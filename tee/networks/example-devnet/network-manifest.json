@@ -1,0 +1,20 @@
+{
+  "eth": {
+    "chain_id": 5124,
+    "genesis_hash": "0x874a74ba374da00d8c097b4be585a60e40f901cac56a764ad0013a07b0a2f93c"
+  },
+  "genesis_nonce": "0xcf53cece6324a805c08120f54d6ae839b70cf0dc1f0b6646f94af43ea55d9aa4",
+  "manifest_version": 1,
+  "measurements": {
+    "bootstrap_policy_hash": "0xbf19dfe3fc5ec80c4bc18d34b43f8226816df2dd784f9f9988c77ddb88868e24",
+    "contracts": {
+      "authority": "0x1000000000000000000000000000000000000002",
+      "registry": "0x1000000000000000000000000000000000000001"
+    }
+  },
+  "name": "example-devnet",
+  "summit": {
+    "genesis_template_hash": "0x52f99622625a1713bb013082bd35c93dffb06029ddbf23012870130118931ec6",
+    "namespace": "example-devnet"
+  }
+}

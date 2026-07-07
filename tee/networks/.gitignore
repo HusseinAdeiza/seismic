@@ -1,0 +1,4 @@
+# Cohort descriptors written by `up --network` — runtime output (live IPs,
+# regenerated each deploy; `down --network` deletes them), never committed.
+# Everything else in a network directory is its committable identity.
+*/nodes/

@@ -1,0 +1,21 @@
+eth_genesis_hash = "0x874a74ba374da00d8c097b4be585a60e40f901cac56a764ad0013a07b0a2f93c"
+validators = []
+# Summit network-params template — authored input for `manifest assemble`.
+# Review every value before founding a real network. Two fields are filled
+# elsewhere and do not belong here: eth_genesis_hash (derived from
+# reth-genesis.json at assemble time) and [[validators]] (TEE-born, filled
+# by the genesis ceremony).
+leader_timeout_ms = 2000
+notarization_timeout_ms = 4000
+nullify_timeout_ms = 4000
+activity_timeout_views = 256
+skip_timeout_views = 32
+max_message_size_bytes = 10485760
+namespace = "example-devnet"
+validator_minimum_stake = 32000000000
+validator_maximum_stake = 32000000000
+blocks_per_epoch = 10000
+allowed_timestamp_future_ms = 10000
+max_deposits_per_epoch = 3
+max_withdrawals_per_epoch = 16
+observers_per_validator = 5
