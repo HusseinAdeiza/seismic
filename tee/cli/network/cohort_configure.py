@@ -1,4 +1,4 @@
-"""`seismic-tee-bootstrap configure` — found a network in one command.
+"""`seismic-tee-network configure` — found a network in one command.
 
 Configures a whole cohort at once: the one genesis node (`--genesis`, mints
 `root_key` locally) plus every joining node (`--join`, fetches `root_key` from
@@ -8,7 +8,7 @@ instead of N terminals. Exactly one node is genesis — assigned here, not left
 to a per-node flag — so a double-genesis network split is unrepresentable.
 
 Founding is an internal act, so this lives on the bootstrap CLI; joining an
-already-live network is the operator `seismic-tee configure`. Both go through
+already-live network is the operator `seismic-tee-node configure`. Both go through
 the same `build_config` / `post_config_to_tdx_init` primitives and
 `status.poll_provisioning`, so each node's POSTed config and wipe-watch are
 identical — only the role (`genesis_node`/`peers`) differs.
@@ -243,7 +243,7 @@ def _report(nodes: list[Node], results: dict[str, bool]) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        prog="seismic-tee-bootstrap configure",
+        prog="seismic-tee-network configure",
         description="Configure a network cohort in parallel: one genesis + N joiners.",
     )
     parser.add_argument(

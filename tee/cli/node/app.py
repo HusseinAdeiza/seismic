@@ -1,10 +1,10 @@
-"""`seismic-tee` — operator CLI for a single Seismic TEE node.
+"""`seismic-tee-node` — operator CLI for a single Seismic TEE node.
 
 Operator-facing: the commands a node operator runs against their own
 already-provisioned node (configure today; stake / sync later). It is
 cloud-agnostic and descriptor-based — it never wraps Pulumi. Standing up a
 network (provisioning + genesis ceremony) is a Seismic-internal act and
-lives in the separate `seismic-tee-bootstrap` CLI.
+lives in the separate `seismic-tee-network` CLI.
 
 Wired via [project.scripts] in pyproject.toml. Each leaf forwards its argv
 to that module's argparse `main()`; see tee/cli/common/plumbing.py.
@@ -26,7 +26,7 @@ def configure(argv: tuple[str, ...]) -> None:
     """Configure a node to join a network: assemble + POST config to tdx-init."""
     from tee.cli.node import configure as configure_mod
 
-    forward(configure_mod.main, "seismic-tee configure", argv)
+    forward(configure_mod.main, "seismic-tee-node configure", argv)
 
 
 @app.command(name="status", context_settings=PASSTHROUGH, add_help_option=False)
@@ -35,7 +35,7 @@ def status(argv: tuple[str, ...]) -> None:
     """Watch a node's first-boot LUKS provisioning progress."""
     from tee.cli.node import status as status_mod
 
-    forward(status_mod.main, "seismic-tee status", argv)
+    forward(status_mod.main, "seismic-tee-node status", argv)
 
 
 if __name__ == "__main__":

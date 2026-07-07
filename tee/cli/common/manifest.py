@@ -916,7 +916,7 @@ def main() -> None:
             print(
                 f"Scaffolded {args.dir}. Edit the inputs (at minimum review "
                 f"{INPUT_SUMMIT_TEMPLATE_FILENAME}), then:\n"
-                f"  seismic-tee-bootstrap manifest assemble {args.dir}{id_hint}"
+                f"  seismic-tee-network manifest assemble {args.dir}{id_hint}"
             )
         elif args.command == "assemble":
             policy_bytes = promote_measurements(

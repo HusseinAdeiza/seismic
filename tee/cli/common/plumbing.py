@@ -1,6 +1,6 @@
 """Shared plumbing for the tee click front-ends.
 
-Both CLIs — `seismic-tee` (operator) and `seismic-tee-bootstrap`
+Both CLIs — `seismic-tee-node` (operator) and `seismic-tee-network`
 (internal network founding) — are thin click groups that forward each
 leaf's arguments verbatim to that module's own argparse `main()`, so
 per-command flags and `--help` are unchanged. Subcommand imports are

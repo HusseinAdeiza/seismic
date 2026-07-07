@@ -1,7 +1,7 @@
 """Cohort orchestrator: bring up / tear down N TDX nodes as one command.
 
-Drives the `seismic-tee-bootstrap up` / `down` subcommands.
-`seismic-tee-bootstrap up --count N` brings up N independent Pulumi stacks
+Drives the `seismic-tee-network up` / `down` subcommands.
+`seismic-tee-network up --count N` brings up N independent Pulumi stacks
 of the single-node `seismic_node` program via the Pulumi Automation API
 (local-program workspace), and writes one node descriptor per node (the
 same `{public_ip, fqdn, …}` shape `pulumi stack output --json` emits — see
@@ -19,9 +19,9 @@ stack output --stack dev-bootstrap-node-3` all work directly afterward.
 
 Scope is provisioning only, and genesis-agnostic: the genesis/join
 distinction is applied later at configure time (genesis via
-`seismic-tee-bootstrap configure`, join via `seismic-tee configure`), not
+`seismic-tee-network configure`, join via `seismic-tee-node configure`), not
 infra config. One stack per node, so
-`seismic-tee-bootstrap down --stack dev-bootstrap-node-3` recycles a single
+`seismic-tee-network down --stack dev-bootstrap-node-3` recycles a single
 node without touching the others.
 
 Runtime: like the `pulumi` CLI, the Automation API shells out to the
@@ -310,12 +310,12 @@ def up_main() -> None:
             f"\nProvisioned {args.count} node(s) for {args.network}. Next:\n"
             "\n"
             "1. Configure the cohort (re-run on every node reboot):\n"
-            f"     seismic-tee-bootstrap configure --genesis {genesis_desc}"
+            f"     seismic-tee-network configure --genesis {genesis_desc}"
             f"{join_flags} \\\n"
             f"       --manifest {manifest_arg}\n"
             "2. Run the genesis ceremony (one-shot; --node defaults to the\n"
             f"   descriptors in {out_dir}):\n"
-            f"     seismic-tee-bootstrap genesis-ceremony --manifest {manifest_arg}"
+            f"     seismic-tee-network genesis-ceremony --manifest {manifest_arg}"
         )
         return
     node_flags = " ".join(
@@ -327,17 +327,17 @@ def up_main() -> None:
         "\n"
         "1. Create the network directory (once per network; assemble shells out\n"
         "   to `seismic-reth genesis-hash`, so seismic-reth must be on PATH):\n"
-        f"     seismic-tee-bootstrap manifest init {net} \\\n"
+        f"     seismic-tee-network manifest init {net} \\\n"
         "       --reth-genesis <reth-genesis.json> \\\n"
         "       --measurements <measurements.json> --measurement-id <image.vhd>\n"
         f"     # edit {net}/summit-template.toml, then:\n"
-        f"     seismic-tee-bootstrap manifest assemble {net}\n"
+        f"     seismic-tee-network manifest assemble {net}\n"
         "2. Configure the cohort (re-run on every node reboot):\n"
-        f"     seismic-tee-bootstrap configure --genesis {genesis_desc}"
+        f"     seismic-tee-network configure --genesis {genesis_desc}"
         f"{join_flags} \\\n"
         f"       --manifest {net}/network-manifest.json\n"
         "3. Run the genesis ceremony (one-shot) over the same descriptors:\n"
-        f"     seismic-tee-bootstrap genesis-ceremony {node_flags} \\\n"
+        f"     seismic-tee-network genesis-ceremony {node_flags} \\\n"
         f"       --manifest {net}/network-manifest.json"
     )
 

@@ -6,12 +6,13 @@ It is the boundary between the infrastructure layer (provisioning, owned
 by Pulumi and run standalone) and this CLI: the CLI consumes a descriptor
 and never shells out to or wraps Pulumi.
 
-`seismic-tee-bootstrap up` emits exactly `{public_ip, fqdn}`. A
+`seismic-tee-network up` emits exactly `{public_ip, fqdn}`. A
 bring-your-own-infra operator (Terraform, manual console, …) can
 hand-write the same shape — `pulumi stack output --json` works too, since
 only `public_ip`/`fqdn` are read and any extra keys are ignored:
 
-    seismic-tee configure --node dev-bootstrap-node-2.json --peer … --manifest m.json
+    seismic-tee-node configure --node dev-bootstrap-node-2.json \
+        --peer … --manifest m.json
 """
 
 import json

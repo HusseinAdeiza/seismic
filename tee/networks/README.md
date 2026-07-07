@@ -3,7 +3,7 @@
 One directory per network: the committable identity of a founded (or
 foundable) network. Each holds the three authored inputs
 (`reth-genesis.json`, `summit-template.toml`, `measurements.json`) plus
-the artifact set `seismic-tee-bootstrap manifest assemble` derives from them
+the artifact set `seismic-tee-network manifest assemble` derives from them
 (`network-manifest.json` — whose SHA-256 is the network's `network_id` —
 `summit-genesis-template.toml`, `measurement-policy.json`). The founding
 workflow lives in the tee README ("Creating a new network").

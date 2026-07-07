@@ -4,12 +4,12 @@
 Assemble a node's tdx-init config from flags + a descriptor + the network
 manifest, and POST it to a provisioned node's tdx-init HTTP receiver:
 
-    seismic-tee configure --node n2.json --peer n1.json --manifest m.json
+    seismic-tee-node configure --node n2.json --peer n1.json --manifest m.json
 
 The operator CLI only ever *joins* an existing network (`genesis_node =
 false`): the node fetches `root_key` from a `--peer` via `getWrappedRootKey`.
 Founding a network — designating the one genesis node that mints `root_key`
-locally — is an internal act owned by `seismic-tee-bootstrap configure`, not
+locally — is an internal act owned by `seismic-tee-network configure`, not
 exposed here. `build_config`/`deliver_config` below are the shared primitives
 both CLIs call; `genesis_node=True` is only ever set by the bootstrap side.
 
@@ -199,8 +199,8 @@ def deliver_config(
 ) -> None:
     """Build + POST one node's config, then (unless `no_wait`) watch its
     first-boot LUKS wipe. The shared per-node delivery path behind both
-    `seismic-tee configure` (join: genesis_node=False + peers) and
-    `seismic-tee-bootstrap configure` (genesis: genesis_node=True + no peers).
+    `seismic-tee-node configure` (join: genesis_node=False + peers) and
+    `seismic-tee-network configure` (genesis: genesis_node=True + no peers).
 
     Resolves the node's public_ip/fqdn from its descriptor (fqdn is the cert
     domain and must resolve to this node, so it's required — a wrong/absent
@@ -256,7 +256,7 @@ def deliver_config(
             "reach a ready state within the watch window (enclave-server :7878 "
             "never came up, or the LUKS wipe errored). It may still be "
             "bootstrapping, or stuck — check enclave-server logs on the node, "
-            "then re-watch with:\n    seismic-tee status --node <descriptor>"
+            "then re-watch with:\n    seismic-tee-node status --node <descriptor>"
         )
 
     _print_summary(fqdn, public_ip)
@@ -280,7 +280,7 @@ def verify_attestation(public_ip: str, measurements_path: Path, home: str) -> No
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        prog="seismic-tee configure",
+        prog="seismic-tee-node configure",
         description="Configure a provisioned Seismic TEE node to join a network.",
     )
     parser.add_argument(
@@ -312,7 +312,7 @@ def parse_args() -> argparse.Namespace:
         required=True,
         metavar="FILE",
         help=(
-            "Network manifest JSON (from `seismic-tee-bootstrap manifest assemble`). "
+            "Network manifest JSON (from `seismic-tee-network manifest assemble`). "
             "Merged into the POSTed config as [network].manifest_base64; shared "
             "across every node, so it lives outside the per-node flags."
         ),
