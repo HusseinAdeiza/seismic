@@ -5,10 +5,10 @@ The deploy tool is the manifest's *sole emitter*:
 deterministically once and then travel as opaque bytes through every hop
 (deploy artifact -> `configure` merges it into the POST -> tdx-init ->
 /run/seismic/conf/).
-The node-side parser lives in
-enclave/crates/seismic-attestation/src/manifest.rs; the schema here must stay
-in lockstep with it (the fixture-vector test in tests/test_manifest.py pins
-both to the same bytes).
+The node-side parser lives in the enclave repo's `seismic-network-manifest` crate:
+https://github.com/SeismicSystems/enclave/tree/seismic/crates/network-manifest;
+the schema here must stay in lockstep with it since the fixture-vector test in
+tests/test_manifest.py pins both to the same bytes).
 
 Two artifacts are produced:
 - network-manifest.json    deploy-time facts; hashed into network_id
@@ -143,8 +143,8 @@ def _check_keys(obj: dict[str, Any], expected: set[str], where: str) -> None:
 def validate_manifest_schema(manifest_bytes: bytes) -> dict[str, Any]:
     """Strictly parse manifest bytes against the v1 schema.
 
-    Mirrors NetworkManifest::from_json_bytes in
-    enclave/crates/seismic-attestation: version probe first (so a future
+    Mirrors NetworkManifestV1::from_json_bytes in
+    enclave/crates/network-manifest: version probe first (so a future
     version reports "unsupported manifest_version", not "unknown key"), then
     reject unknown/missing keys and malformed hex.
     """

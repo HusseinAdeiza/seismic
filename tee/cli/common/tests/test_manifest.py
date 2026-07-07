@@ -30,7 +30,7 @@ from tee.cli.common.manifest import (
     write_artifact_set,
 )
 
-# Mirrors enclave/crates/seismic-attestation/fixtures/network-manifest-v1.json.
+# Mirrors https://github.com/SeismicSystems/enclave/blob/seismic/crates/network-manifest/fixtures/network-manifest-v1.json
 # The network_id vector below is asserted by that crate's
 # parses_v1_fixture_and_derives_network_id test; together they pin the deploy
 # emitter and the node-side parser to byte-identical rendering.
@@ -73,7 +73,7 @@ FIXTURE_NETWORK_ID = (
 # guard; it skips when GitHub is unreachable.
 ENCLAVE_FIXTURE_URL = (
     "https://raw.githubusercontent.com/SeismicSystems/enclave/seismic/"
-    "crates/seismic-attestation/fixtures/network-manifest-v1.json"
+    "crates/network-manifest/fixtures/network-manifest-v1.json"
 )
 
 
