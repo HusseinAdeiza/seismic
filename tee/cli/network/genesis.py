@@ -192,7 +192,8 @@ def _get_pubkeys(
 
     pubkeys: dict[Path, PublicKeys] = {}
     last_error: dict[Path, str] = {}
-    deadline = time.monotonic() + timeout
+    started = time.monotonic()
+    deadline = started + timeout
     next_log = 0.0
     while True:
         for path, client in node_clients:
@@ -215,8 +216,11 @@ def _get_pubkeys(
                 f"ceremony:\n{listing}"
             )
         if now >= next_log:
+            elapsed = int(now - started)
+            remaining = max(0, int(deadline - now))
             print(
-                "waiting for summit pubkeys: "
+                f"waiting for summit pubkeys ({elapsed}s elapsed, "
+                f"{remaining}s until timeout): "
                 + ", ".join(path.stem for path in pending)
             )
             next_log = now + WAIT_LOG_INTERVAL_SECONDS
@@ -288,7 +292,8 @@ def _assert_cohort_genesis_hash(
 
     observed: dict[Path, str] = {}  # block-0 hash, once a node has answered
     last_error: dict[Path, str] = {}
-    deadline = time.monotonic() + timeout
+    started = time.monotonic()
+    deadline = started + timeout
     next_log = 0.0
     while True:
         for path in descriptors:
@@ -312,6 +317,8 @@ def _assert_cohort_genesis_hash(
                         f"eth_getBlockByNumber returned {data.get('error') or data}"
                     )
                 observed[path] = data["result"]["hash"]
+                if observed[path].lower() == expected.lower():
+                    print(f"  ✓ {path.stem}: reth block 0 matches")
             except Exception as e:
                 last_error[path] = f"unreachable via {urls[path]}: {e}"
         pending = [path for path in descriptors if path not in observed]
@@ -322,8 +329,12 @@ def _assert_cohort_genesis_hash(
         if now >= deadline:
             break
         if now >= next_log:
+            elapsed = int(now - started)
+            remaining = max(0, int(deadline - now))
             print(
-                "waiting for reth block 0: " + ", ".join(path.stem for path in pending)
+                f"waiting for reth block 0 ({elapsed}s elapsed, "
+                f"{remaining}s until timeout): "
+                + ", ".join(path.stem for path in pending)
             )
             next_log = now + WAIT_LOG_INTERVAL_SECONDS
         time.sleep(interval)
@@ -374,9 +385,18 @@ def main():
             f"eth.genesis_hash {manifest_hash}"
         )
     print(f"Pinning eth_genesis_hash = {genesis_hash}")
+    timeout_minutes = READY_TIMEOUT_SECONDS // 60
+    print(
+        "Waiting for cohort readiness. On first boot, root-key bootstrap and "
+        "encrypted-disk initialization happen before reth and Summit start; "
+        "several minutes is normal. Each readiness stage times out after "
+        f"{timeout_minutes} minutes."
+    )
+    print("Readiness 1/2: verifying every node's reth block 0...")
     _assert_cohort_genesis_hash(args.node, genesis_hash)
 
     tmpdir = tempfile.mkdtemp()
+    print("Readiness 2/2: gathering every node's Summit public keys...")
     validators, node_clients = _get_pubkeys(args.node)
 
     tmp_validators = f"{tmpdir}/validators.json"
