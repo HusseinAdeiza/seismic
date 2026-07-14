@@ -60,8 +60,9 @@ DEFAULT_AUTHORITY = "0x1000000000000000000000000000000000000002"
 
 DEFAULT_ATTESTATION_TYPE = "azure-tdx"
 
-# Today's hardcoded summit BLS domain separator (Summit TODO 3 parameterizes
-# it); two chains sharing it can cross-replay BLS signatures.
+# Today's hardcoded summit BLS domain separator.
+# two chains sharing it can cross-replay BLS signatures.
+# TODO: make it configurable
 _SUMMIT_DEFAULT_NAMESPACE = "_SUMMIT"
 
 MANIFEST_FILENAME = "network-manifest.json"
@@ -414,17 +415,12 @@ def run_validation_gates(manifest: dict[str, Any], ctx: GateContext) -> None:
     if template_namespace == _SUMMIT_DEFAULT_NAMESPACE:
         ctx.warn(
             "summit namespace is the hardcoded default '_SUMMIT'; two chains "
-            "running the same image can cross-replay BLS signatures "
-            "(Summit TODO 3)"
+            "running the same image can cross-replay BLS signatures"
         )
     # The shipped copy always carries a `validators` key (assemble fills an
     # empty placeholder for summit's parser); only *entries* are suspect.
     if template.get("validators"):
-        ctx.warn(
-            "summit template still contains [[validators]] entries; the "
-            "boot-time fill-genesis-template flow (Summit TODOs 1-2) expects "
-            "a template without them"
-        )
+        ctx.warn("summit genesis template must not contain [[validators]] entries")
 
     # measurements.bootstrap_policy_hash == SHA-256(policy bytes)
     policy_hash = _sha256_hex(ctx.policy_bytes)
