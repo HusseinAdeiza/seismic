@@ -34,17 +34,18 @@ from pathlib import Path
 import requests
 
 from tee.cli.common import manifest as manifest_mod
+from tee.cli.common.dashboard import CohortDashboard
 from tee.cli.common.descriptor import load_descriptor, require
 from tee.cli.network.summit_client import PublicKeys, SummitClient
+from tee.cli.node.status import fetch_status, format_provisioning
 
 # Summit's consensus (BLS) port. Each validator entry in the generated
 # genesis.toml pins "<ip>:<CONSENSUS_PORT>".
 CONSENSUS_PORT = 18551
 
-# Cohort-readiness polling (the barrier). `configure` already watches the
-# 1h+ first-boot disk wipes, so by ceremony time the residual boot tail is
-# minutes; the timeout turns a wedged node into a loud per-node report
-# instead of hanging the ceremony indefinitely.
+# Cohort-readiness polling (the barrier). `configure` normally watches the
+# first-boot disk wipe. If the ceremony observes one still running, it displays
+# that progress and pauses the residual reth-readiness timeout.
 POLL_INTERVAL_SECONDS = 5
 READY_TIMEOUT_SECONDS = 15 * 60
 WAIT_LOG_INTERVAL_SECONDS = 30
@@ -281,21 +282,27 @@ def _assert_cohort_genesis_hash(
 
     A node that doesn't answer is polled until `timeout` — reth comes up
     only after root_key → LUKS open, so early unreachability is the normal
-    boot tail. A *wrong* answer fails immediately: waiting can't fix a node
-    booted from a stale image or different genesis.
+    boot tail. Active disk provisioning is shown through the shared cohort
+    dashboard and pauses this timeout. A *wrong* answer fails immediately:
+    waiting can't fix a node booted from a stale image or different genesis.
     """
     urls: dict[Path, str] = {}
+    public_ips: dict[Path, str] = {}
     for path in descriptors:
         descriptor = load_descriptor(path)
         fqdn = require(descriptor, "fqdn", path)
+        public_ips[path] = require(descriptor, "public_ip", path)
         urls[path] = f"https://{fqdn}/rpc"  # nginx proxies /rpc -> reth :8545
 
+    dashboard = CohortDashboard({str(path): path.stem for path in descriptors})
+    states = {str(path): "waiting for reth block 0" for path in descriptors}
     observed: dict[Path, str] = {}  # block-0 hash, once a node has answered
     last_error: dict[Path, str] = {}
     started = time.monotonic()
     deadline = started + timeout
-    next_log = 0.0
+    provisioning_active = False
     while True:
+        iteration_started = time.monotonic()
         for path in descriptors:
             if path in observed:
                 continue
@@ -318,26 +325,75 @@ def _assert_cohort_genesis_hash(
                     )
                 observed[path] = data["result"]["hash"]
                 if observed[path].lower() == expected.lower():
-                    print(f"  ✓ {path.stem}: reth block 0 matches")
+                    states[str(path)] = "reth block 0 matches"
+                else:
+                    states[str(path)] = f"wrong reth block 0: {observed[path]}"
             except Exception as e:
                 last_error[path] = f"unreachable via {urls[path]}: {e}"
+
         pending = [path for path in descriptors if path not in observed]
         mismatch = any(h.lower() != expected.lower() for h in observed.values())
         if mismatch or not pending:
+            dashboard.render(states)
             break
+
+        reth_probe_finished = time.monotonic()
+        if provisioning_active:
+            deadline += reth_probe_finished - iteration_started
+
+        provisioning: set[Path] = set()
+        details: dict[Path, str] = {}
+        for path in pending:
+            try:
+                status = fetch_status(public_ips[path], timeout=2)
+            except (requests.RequestException, RuntimeError, KeyError, ValueError):
+                details[path] = "waiting for reth block 0"
+                continue
+
+            state = status.get("state")
+            if state == "provisioning":
+                provisioning.add(path)
+                states[str(path)] = (
+                    f"{format_provisioning(status)}  (readiness timeout paused)"
+                )
+            elif state == "error":
+                details[path] = (
+                    "disk provisioning error, auto-retrying: "
+                    f"{status.get('error', '?')}"
+                )
+            elif state == "idle":
+                details[path] = "disk idle; waiting for reth block 0"
+            else:
+                details[path] = f"disk status {state!r}; waiting for reth block 0"
+
         now = time.monotonic()
+        if provisioning:
+            paused_since = (
+                reth_probe_finished if provisioning_active else iteration_started
+            )
+            deadline += now - paused_since
+        elapsed = int(now - started)
+        elapsed -= elapsed % WAIT_LOG_INTERVAL_SECONDS
+        remaining = max(0, int(deadline - now))
+        remaining = (
+            (remaining + WAIT_LOG_INTERVAL_SECONDS - 1)
+            // WAIT_LOG_INTERVAL_SECONDS
+            * WAIT_LOG_INTERVAL_SECONDS
+        )
+        for path in pending:
+            if path not in provisioning:
+                states[str(path)] = (
+                    f"{details[path]} ({elapsed}s elapsed, {remaining}s until timeout)"
+                )
+        dashboard.render(states)
+
         if now >= deadline:
             break
-        if now >= next_log:
-            elapsed = int(now - started)
-            remaining = max(0, int(deadline - now))
-            print(
-                f"waiting for reth block 0 ({elapsed}s elapsed, "
-                f"{remaining}s until timeout): "
-                + ", ".join(path.stem for path in pending)
-            )
-            next_log = now + WAIT_LOG_INTERVAL_SECONDS
+        sleep_started = time.monotonic()
         time.sleep(interval)
+        if provisioning:
+            deadline += time.monotonic() - sleep_started
+        provisioning_active = bool(provisioning)
 
     if mismatch or pending:
         # Report the full cohort, not just the first bad node — a partial
@@ -387,10 +443,11 @@ def main():
     print(f"Pinning eth_genesis_hash = {genesis_hash}")
     timeout_minutes = READY_TIMEOUT_SECONDS // 60
     print(
-        "Waiting for cohort readiness. On first boot, root-key bootstrap and "
-        "encrypted-disk initialization happen before reth and Summit start; "
-        "several minutes is normal. Each readiness stage times out after "
-        f"{timeout_minutes} minutes."
+        "Waiting for cohort readiness. `configure` normally waits for root-key "
+        "bootstrap and encrypted-disk initialization; if that watch was skipped, "
+        "interrupted, or followed by service recovery, readiness can still take "
+        f"several minutes. Each stage has a {timeout_minutes}-minute readiness "
+        "timeout; the reth stage pauses it while disk provisioning is active."
     )
     print("Readiness 1/2: verifying every node's reth block 0...")
     _assert_cohort_genesis_hash(args.node, genesis_hash)

@@ -188,9 +188,16 @@ class AssertCohortGenesisHashTests(unittest.TestCase):
             self._descriptor("node-2", "b.example"),
         ]
         responses = [OSError("boom"), self._block_resp(self.HASH)]
-        with mock.patch.object(genesis.requests, "post", side_effect=responses):
-            with self.assertRaises(SystemExit) as ctx:
-                genesis._assert_cohort_genesis_hash(nodes, self.HASH, timeout=0)
+        with (
+            mock.patch.object(genesis.requests, "post", side_effect=responses),
+            mock.patch.object(
+                genesis,
+                "fetch_status",
+                side_effect=genesis.requests.ConnectionError("not reachable"),
+            ),
+            self.assertRaises(SystemExit) as ctx,
+        ):
+            genesis._assert_cohort_genesis_hash(nodes, self.HASH, timeout=0)
         msg = str(ctx.exception)
         self.assertIn("https://a.example/rpc", msg)
         self.assertIn(f"✓ {nodes[1]}", msg)
@@ -198,9 +205,16 @@ class AssertCohortGenesisHashTests(unittest.TestCase):
     def test_rpc_error_response_exits(self):
         nodes = [self._descriptor("node-1", "a.example")]
         resp = self._resp({"jsonrpc": "2.0", "id": 1, "error": {"message": "boom"}})
-        with mock.patch.object(genesis.requests, "post", return_value=resp):
-            with self.assertRaises(SystemExit) as ctx:
-                genesis._assert_cohort_genesis_hash(nodes, self.HASH, timeout=0)
+        with (
+            mock.patch.object(genesis.requests, "post", return_value=resp),
+            mock.patch.object(
+                genesis,
+                "fetch_status",
+                side_effect=genesis.requests.ConnectionError("not reachable"),
+            ),
+            self.assertRaises(SystemExit) as ctx,
+        ):
+            genesis._assert_cohort_genesis_hash(nodes, self.HASH, timeout=0)
         self.assertIn("boom", str(ctx.exception))
 
     def test_unreachable_node_polled_until_it_answers(self):
@@ -209,11 +223,57 @@ class AssertCohortGenesisHashTests(unittest.TestCase):
         # retried rather than failing the ceremony.
         nodes = [self._descriptor("node-1", "a.example")]
         responses = [OSError("still booting"), self._block_resp(self.HASH)]
+        no_luks_status = mock.patch.object(
+            genesis,
+            "fetch_status",
+            side_effect=genesis.requests.ConnectionError("not reachable"),
+        )
         with mock.patch.object(genesis.requests, "post", side_effect=responses) as post:
-            genesis._assert_cohort_genesis_hash(
-                nodes, self.HASH, timeout=30, interval=0
-            )
+            with no_luks_status:
+                genesis._assert_cohort_genesis_hash(
+                    nodes, self.HASH, timeout=30, interval=0
+                )
         self.assertEqual(post.call_count, 2)
+
+    def test_luks_progress_pauses_readiness_timeout(self):
+        nodes = [self._descriptor("node-1", "a.example")]
+        responses = [
+            OSError("still booting"),
+            OSError("still booting"),
+            self._block_resp(self.HASH),
+        ]
+        statuses = [
+            {
+                "state": "provisioning",
+                "bytes_done": 1,
+                "bytes_total": 2,
+                "eta_seconds": 30,
+            },
+            {"state": "idle"},
+        ]
+        clock = [0.0]
+        rendered: list[str] = []
+
+        def sleep(_interval):
+            clock[0] += 100
+
+        with (
+            mock.patch.object(genesis.requests, "post", side_effect=responses) as post,
+            mock.patch.object(genesis, "fetch_status", side_effect=statuses),
+            mock.patch.object(genesis.time, "monotonic", side_effect=lambda: clock[0]),
+            mock.patch.object(genesis.time, "sleep", side_effect=sleep),
+            mock.patch.object(genesis, "CohortDashboard") as dashboard_cls,
+        ):
+            dashboard_cls.return_value.render.side_effect = (
+                lambda states: rendered.extend(states.values())
+            )
+            genesis._assert_cohort_genesis_hash(
+                nodes, self.HASH, timeout=10, interval=0
+            )
+
+        self.assertEqual(post.call_count, 3)
+        self.assertTrue(any("encrypting disk" in state for state in rendered))
+        self.assertTrue(any("readiness timeout paused" in state for state in rendered))
 
     def test_mismatch_fails_fast_without_waiting_for_stragglers(self):
         # A wrong answer can't heal by waiting — fail immediately even while

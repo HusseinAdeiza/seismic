@@ -16,8 +16,6 @@ identical — only the role (`genesis_node`/`peers`) differs.
 
 import argparse
 import logging
-import shutil
-import sys
 import threading
 import time
 from collections import Counter
@@ -26,6 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from tee.cli.common import manifest as manifest_mod
+from tee.cli.common.dashboard import CohortDashboard
 from tee.cli.common.descriptor import load_descriptor, require
 from tee.cli.common.logging_setup import setup_logging
 from tee.cli.node.configure import (
@@ -131,43 +130,6 @@ def _configure_node(
         return False
 
 
-class _Dashboard:
-    """Render N nodes' live status: an in-place multi-line block on a TTY,
-    else one line per node printed only when it changes (readable in CI logs).
-    """
-
-    def __init__(self, nodes: list[Node]) -> None:
-        self.isatty = sys.stdout.isatty()
-        self.order = [n.name for n in nodes]
-        self.labels = {
-            n.name: n.name + (" (genesis)" if n.genesis else "") for n in nodes
-        }
-        self._width = max(len(label) for label in self.labels.values())
-        self._painted = False
-        self._last: dict[str, str] = {}
-
-    def render(self, states: dict[str, str]) -> None:
-        if self.isatty:
-            cols = shutil.get_terminal_size((100, 24)).columns
-            if self._painted:
-                sys.stdout.write(f"\033[{len(self.order)}A")  # cursor up N lines
-            for name in self.order:
-                text = (
-                    f"{self.labels[name].rjust(self._width)}  {states.get(name, '…')}"
-                )
-                if len(text) >= cols:
-                    text = text[: cols - 1] + "…"
-                sys.stdout.write(f"\033[2K{text}\n")  # clear line + write
-            sys.stdout.flush()
-            self._painted = True
-        else:
-            for name in self.order:
-                line = states.get(name, "…")
-                if self._last.get(name) != line:
-                    print(f"{self.labels[name]}: {line}", flush=True)
-                    self._last[name] = line
-
-
 def _run_cohort(
     nodes: list[Node],
     manifest_path: Path,
@@ -185,7 +147,9 @@ def _run_cohort(
     logging.getLogger("tee").setLevel(logging.WARNING)
 
     states: dict[str, str] = {n.name: "queued…" for n in nodes}
-    dashboard = _Dashboard(nodes)
+    dashboard = CohortDashboard(
+        {n.name: n.name + (" (genesis)" if n.genesis else "") for n in nodes}
+    )
     stop = threading.Event()
     futures: dict[str, Future[bool]] = {}
     with ThreadPoolExecutor(max_workers=len(nodes)) as pool:
