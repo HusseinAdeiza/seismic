@@ -63,8 +63,8 @@ class BuildConfigTests(unittest.TestCase):
     def test_genesis_mode(self):
         # genesis: mints root_key locally, so genesis_node=true and no peers.
         merged = self._build(genesis_node=True, peers=[])
-        self.assertTrue(merged["enclave"]["genesis_node"])
-        self.assertEqual(merged["enclave"]["peers"], [])
+        self.assertTrue(merged["root_key"]["genesis_node"])
+        self.assertEqual(merged["root_key"]["peers"], [])
         # [domain] (fqdn + email) and [network] are injected in both modes.
         self.assertEqual(merged["domain"]["name"], FQDN)
         self.assertEqual(merged["domain"]["email"], EMAIL)
@@ -75,8 +75,8 @@ class BuildConfigTests(unittest.TestCase):
         # join: genesis_node=false and the resolved peer URL(s) survive verbatim.
         peers = ["http://10.0.0.1:7878", "http://10.0.0.2:7878"]
         merged = self._build(genesis_node=False, peers=peers)
-        self.assertFalse(merged["enclave"]["genesis_node"])
-        self.assertEqual(merged["enclave"]["peers"], peers)
+        self.assertFalse(merged["root_key"]["genesis_node"])
+        self.assertEqual(merged["root_key"]["peers"], peers)
         self.assertEqual(merged["domain"]["name"], FQDN)
         self.assertTrue(merged["network"]["manifest_base64"])
         self.assertTrue(merged["network"]["reth_genesis_base64"])

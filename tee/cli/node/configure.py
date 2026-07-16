@@ -13,7 +13,7 @@ locally — is an internal act owned by `seismic-tee-network configure`, not
 exposed here. `build_config`/`deliver_config` below are the shared primitives
 both CLIs call; `genesis_node=True` is only ever set by the bootstrap side.
 
-There is no per-node `node.toml`: `[enclave]` (genesis_node + peers) comes
+There is no per-node `node.toml`: `[root_key]` (genesis_node + peers) comes
 from flags, `[domain]` from the descriptor fqdn + `--email`, and `[network]`
 from `--manifest` + `--reth-genesis`. Those network-wide artifacts stay
 standalone files, merged only at POST time. The node address is *brought by
@@ -21,8 +21,9 @@ the operator* via a descriptor file (see tee/cli/common/descriptor.py), typicall
 `pulumi stack output --json`. The CLI never provisions infrastructure
 (Pulumi's job).
 
-The POSTed TOML shape (`[domain]`/`[enclave]`/`[network]`) is unchanged, so
-tdx-init and the `SEISMIC_ENCLAVE_*` env-var contract it emits are untouched.
+The POSTed TOML shape (`[domain]`/`[root_key]`/`[network]`) is tdx-init's
+schema; it validates server-side with `deny_unknown_fields`, so this CLI and
+the node image must agree on the section names.
 """
 
 import argparse
@@ -107,7 +108,7 @@ def build_config(
     reth_genesis_path: Path,
 ) -> Path:
     """Assemble the config POSTed to tdx-init, mutating no source. The fields
-    come from five inputs: the role (`genesis_node` + `peers` → `[enclave]`),
+    come from five inputs: the role (`genesis_node` + `peers` → `[root_key]`),
     the descriptor's fqdn (→ `[domain].name`, the cert domain), `--email`
     (→ `[domain].email`), and the network manifest + reth genesis
     (`--manifest`/`--reth-genesis` → `[network]`). Written fresh, so there is
@@ -133,7 +134,7 @@ def build_config(
     # json.dumps emits valid TOML basic strings for these simple ASCII values.
     peers_toml = ", ".join(json.dumps(p) for p in peers)
     merged = (
-        f"[enclave]\n"
+        f"[root_key]\n"
         f"genesis_node = {str(genesis_node).lower()}\n"
         f"peers = [{peers_toml}]\n\n"
         f"[domain]\nname = {json.dumps(fqdn)}\nemail = {json.dumps(email)}\n\n"
