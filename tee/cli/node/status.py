@@ -7,7 +7,7 @@ opaque phase. This module polls it and renders a progress bar, and is the
 shared poller behind both `seismic-tee-node status` and `configure`'s default
 post-POST wait.
 
-States (see enclave/crates/tdx-init's `LuksProvisioningStatus`):
+States (see enclave/bin/tdx-init's `LuksProvisioningStatus`):
   provisioning {bytes_done, bytes_total, eta_seconds?} | idle | error {error} | unknown
 
 Watch-completion is deliberately conservative about `idle`: right after a
