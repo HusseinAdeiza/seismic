@@ -63,7 +63,7 @@ def _load_node(descriptor_path: Path, *, genesis: bool, peers: list[str]) -> Nod
 
 def build_cohort(genesis_path: Path, join_paths: list[Path]) -> list[Node]:
     """Resolve the cohort: exactly one genesis (peers empty — it mints), and
-    every joiner pointed at the genesis node's enclave endpoint
+    every joiner pointed at the genesis node's attestation service
     (`http://<genesis_ip>:7878`), so joiners fetch `root_key` from it. Role
     assignment lives here, not in a per-node flag, so there is exactly one
     genesis by construction.

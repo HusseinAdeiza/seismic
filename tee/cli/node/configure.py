@@ -44,8 +44,8 @@ from tee.cli.node.status import watch_luks_provisioning
 logger = logging.getLogger(__name__)
 
 TDX_INIT_PORT = 8080
-# enclave-server's RPC port: a joiner reaches `getWrappedRootKey` here to
-# fetch `root_key`. The attested ECDH/AES-GCM handshake runs at the
+# The attestation service's RPC port: a joiner reaches `getWrappedRootKey`
+# here to fetch `root_key`. The attested ECDH/AES-GCM handshake runs at the
 # application layer, so this is plain http on the raw port — not the
 # nginx-fronted :443 that carries /rpc, /ws, /summit.
 ENCLAVE_PEER_PORT = 7878
@@ -57,7 +57,7 @@ TDX_INIT_RETRY_INTERVAL_SECONDS = 5
 
 
 def resolve_peer(peer: str) -> str:
-    """Resolve a `--peer` argument to an enclave-server URL.
+    """Resolve a `--peer` argument to an attestation-service URL.
 
     Accepts either a ready URL (`http://host:7878`, what a late joiner uses
     against a public entrypoint — post-POC, sourced from the on-chain operator
@@ -247,16 +247,16 @@ def deliver_config(
 
     if rc != 0:
         # The POST succeeded, but the node never reached a ready state within
-        # the watch window: enclave-server's :7878 didn't come up (it only
+        # the watch window: the attestation service's :7878 didn't come up (it only
         # starts serving once it has root_key) or the LUKS wipe errored. Don't
         # print a success summary — that's the misleading case. It may still be
         # mid-bootstrap (e.g. fetching root_key from a slow peer), so point at a
         # re-watch rather than declaring the node dead; exit non-zero either way.
         raise SystemExit(
             f"config delivered to {fqdn} ({public_ip}), but the node did not "
-            "reach a ready state within the watch window (enclave-server :7878 "
-            "never came up, or the LUKS wipe errored). It may still be "
-            "bootstrapping, or stuck — check enclave-server logs on the node, "
+            "reach a ready state within the watch window (attestation service "
+            ":7878 never came up, or the LUKS wipe errored). It may still be "
+            "bootstrapping, or stuck — check attestation-service logs on the node, "
             "then re-watch with:\n    seismic-tee-node status --node <descriptor>"
         )
 

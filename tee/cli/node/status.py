@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Watch a node's first-boot LUKS-provisioning progress.
 
-enclave-server serves `getLuksProvisioningStatus` on :7878 (JSON-RPC) for
-the duration of the first-boot disk wipe — the one long (1h+), otherwise
+The attestation service serves `getLuksProvisioningStatus` on :7878 (JSON-RPC)
+for the duration of the first-boot disk wipe — the one long (1h+), otherwise
 opaque phase. This module polls it and renders a progress bar, and is the
 shared poller behind both `seismic-tee-node status` and `configure`'s default
 post-POST wait.
 
-States (see enclave/bin/tdx-init's `LuksProvisioningStatus`):
+States (see `LuksProvisioningStatus` in the enclave repo's `crates/enclave`):
   provisioning {bytes_done, bytes_total, eta_seconds?} | idle | error {error} | unknown
 
 Watch-completion is deliberately conservative about `idle`: right after a
@@ -34,11 +34,11 @@ from tee.cli.common.logging_setup import setup_logging
 
 ENCLAVE_PORT = 7878
 POLL_INTERVAL_SECONDS = 5
-# Max wait for :7878 to first respond — covers enclave-server startup (and, on
-# a joiner, the root_key fetch from peers that precedes the listener coming up).
+# Max wait for :7878 to first respond — covers attestation-service startup
+# (and, on a joiner, the root_key fetch that precedes the listener coming up).
 CONNECT_TIMEOUT_SECONDS = 180
 # Once reachable and idle, how long to wait for the wipe to begin before
-# concluding none is in progress. The enclave-server-up→first-wipe-tick gap
+# concluding none is in progress. The service-up→first-wipe-tick gap
 # (udev settle, disk discovery, luksFormat warm-up) is seconds; a fast-unlock
 # restart stays idle forever, so this bounds the wait instead of hanging.
 IDLE_GRACE_SECONDS = 60
@@ -55,7 +55,7 @@ ERROR_GRACE_SECONDS = 120
 def fetch_status(public_ip: str, *, timeout: int = 10) -> dict:
     """One getLuksProvisioningStatus call → the result dict (its `state` plus
     any state-specific fields). Raises requests.RequestException if the server
-    isn't reachable (normal while enclave-server is still coming up)."""
+    isn't reachable (normal while the attestation service is coming up)."""
     url = f"http://{public_ip}:{ENCLAVE_PORT}"
     payload = {
         "jsonrpc": "2.0",
@@ -158,7 +158,7 @@ def poll_provisioning(
             if time.monotonic() - start > CONNECT_TIMEOUT_SECONDS:
                 yield ProvisioningUpdate(
                     "error",
-                    f"enclave-server :{ENCLAVE_PORT} never became reachable "
+                    f"attestation service :{ENCLAVE_PORT} never became reachable "
                     f"after {CONNECT_TIMEOUT_SECONDS}s — is the node up?",
                     transient=False,
                     done=True,
@@ -166,7 +166,7 @@ def poll_provisioning(
                 )
                 return
             yield ProvisioningUpdate(
-                "connecting", f"waiting for enclave-server :{ENCLAVE_PORT} ..."
+                "connecting", f"waiting for attestation service :{ENCLAVE_PORT} ..."
             )
             if wait_interval():
                 return
@@ -323,7 +323,7 @@ def main() -> None:
             print(json.dumps(fetch_status(public_ip)))
         except requests.RequestException as e:
             raise SystemExit(
-                f"enclave-server :{ENCLAVE_PORT} not reachable: {e}"
+                f"attestation service :{ENCLAVE_PORT} not reachable: {e}"
             ) from None
         return
 
