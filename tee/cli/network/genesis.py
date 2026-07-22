@@ -36,6 +36,7 @@ import requests
 from tee.cli.common import manifest as manifest_mod
 from tee.cli.common.dashboard import CohortDashboard
 from tee.cli.common.descriptor import load_descriptor, require
+from tee.cli.network import bootnodes as bootnodes_mod
 from tee.cli.network.summit_client import PublicKeys, SummitClient
 from tee.cli.node.status import fetch_status, format_provisioning
 
@@ -88,7 +89,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "Each descriptor's fqdn/public_ip locates that node; produce them "
             "standalone, e.g. `pulumi stack output --json > node-1.json`. "
             "Default: every *.json in the nodes/ dir beside --manifest "
-            "(written by `up --network`), sorted by name."
+            "(written by `up --network`) except bootnodes.json, sorted by name."
         ),
     )
     parser.add_argument(
@@ -131,7 +132,14 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raise SystemExit(f"--manifest file not found: {args.manifest}")
     if args.node is None:
         nodes_dir = args.manifest.parent / manifest_mod.NODES_DIRNAME
-        args.node = sorted(nodes_dir.glob("*.json"))
+        # `configure` writes bootnodes.json into this same dir; it's runtime
+        # p2p state, not a node descriptor, so skip it or load_descriptor
+        # would abort on the missing fqdn/public_ip.
+        args.node = sorted(
+            p
+            for p in nodes_dir.glob("*.json")
+            if p.name != bootnodes_mod.BOOTNODES_FILENAME
+        )
         if not args.node:
             raise SystemExit(
                 f"no --node given and no descriptors in {nodes_dir} (written "

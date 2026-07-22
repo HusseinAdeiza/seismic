@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tee.cli.network import genesis
+from tee.cli.network import bootnodes, genesis
 from tee.cli.network.summit_client import PublicKeys
 
 
@@ -64,6 +64,17 @@ class ParseArgsTests(unittest.TestCase):
         (nodes / "a.json").write_text("{}")
         args = genesis._parse_args(list(self.common))
         self.assertEqual(args.node, [nodes / "a.json", nodes / "b.json"])
+
+    def test_node_default_skips_bootnodes_json(self):
+        # `configure` writes bootnodes.json into the same nodes/ dir; it's p2p
+        # state, not a descriptor, so the default glob must skip it (else the
+        # ceremony aborts loading it as a node — missing fqdn/public_ip).
+        nodes = Path(self._tmp.name) / "nodes"
+        nodes.mkdir()
+        (nodes / "a.json").write_text("{}")
+        (nodes / bootnodes.BOOTNODES_FILENAME).write_text("{}")
+        args = genesis._parse_args(list(self.common))
+        self.assertEqual(args.node, [nodes / "a.json"])
 
     def test_no_node_and_no_nodes_dir_errors(self):
         with self.assertRaises(SystemExit) as ctx:
