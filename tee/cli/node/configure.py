@@ -4,26 +4,30 @@
 Assemble a node's tdx-init config from flags + a descriptor + the network
 manifest, and POST it to a provisioned node's tdx-init HTTP receiver:
 
-    seismic-tee-node configure --node n2.json --peer n1.json --manifest m.json
+    seismic-tee-node configure --node n2.json \
+        --bootnode enode://<pubkey>@<ip>:30303 --manifest m.json
 
 The operator CLI only ever *joins* an existing network (`genesis_node =
-false`): the node fetches `root_key` from a `--peer` via `getWrappedRootKey`.
+false`): the node fetches `root_key` via `getWrappedRootKey` from a peer
+tdx-init derives from `--bootnode` (`http://<host>:7878` per bootnode).
 Founding a network — designating the one genesis node that mints `root_key`
 locally — is an internal act owned by `seismic-tee-network configure`, not
 exposed here. `build_config`/`deliver_config` below are the shared primitives
 both CLIs call; `genesis_node=True` is only ever set by the bootstrap side.
 
-There is no per-node `node.toml`: `[root_key]` (genesis_node + peers) comes
-from flags, `[domain]` from the descriptor fqdn + `--email`, and `[network]`
-from `--manifest` + `--reth-genesis`. Those network-wide artifacts stay
-standalone files, merged only at POST time. The node address is *brought by
-the operator* via a descriptor file (see tee/cli/common/descriptor.py), typically
+There is no per-node `node.toml`: `[node]` (external_ip + genesis_node) comes
+from the descriptor + role, `[node.domain]` from the descriptor fqdn +
+`--email`, and `[network]` from `--manifest` + `--reth-genesis` +
+`--bootnode`. Those network-wide artifacts stay standalone files, merged only
+at POST time. The node address is *brought by the operator* via a descriptor
+file (see tee/cli/common/descriptor.py), typically
 `pulumi stack output --json`. The CLI never provisions infrastructure
 (Pulumi's job).
 
-The POSTed TOML shape (`[domain]`/`[root_key]`/`[network]`) is tdx-init's
-schema; it validates server-side with `deny_unknown_fields`, so this CLI and
-the node image must agree on the section names.
+The POSTed TOML shape (`[network]`/`[node]`, split by provenance:
+coordinator-produced vs this-node-only) is tdx-init's schema; it validates
+server-side with `deny_unknown_fields`, so this CLI and the node image must
+agree on the section names.
 """
 
 import argparse
@@ -44,40 +48,11 @@ from tee.cli.node.status import watch_luks_provisioning
 logger = logging.getLogger(__name__)
 
 TDX_INIT_PORT = 8080
-# The attestation service's RPC port: a joiner reaches `getWrappedRootKey`
-# here to fetch `root_key`. The attested ECDH/AES-GCM handshake runs at the
-# application layer, so this is plain http on the raw port — not the
-# nginx-fronted :443 that carries /rpc, /ws, /summit.
-ENCLAVE_PEER_PORT = 7878
 # How long to wait for tdx-init's HTTP listener to come up. tdx-init
 # starts after persistent-luks-setup, which can take ~20-40s on first
 # boot (LUKS format + mkfs + TPM enroll).
 TDX_INIT_LISTENER_TIMEOUT_SECONDS = 180
 TDX_INIT_RETRY_INTERVAL_SECONDS = 5
-
-
-def resolve_peer(peer: str) -> str:
-    """Resolve a `--peer` argument to an attestation-service URL.
-
-    Accepts either a ready URL (`http://host:7878`, what a late joiner uses
-    against a public entrypoint — post-POC, sourced from the on-chain operator
-    registry) or a path to a node descriptor JSON, from which
-    `http://<public_ip>:ENCLAVE_PEER_PORT` is derived (the founding-cohort
-    form — reuses the peer's own descriptor, so its IP can't drift from what
-    provisioning emitted, the same anti-drift reason [domain] is taken from
-    the descriptor fqdn).
-    """
-    if peer.startswith(("http://", "https://")):
-        return peer
-    path = Path(peer)
-    if not path.is_file():
-        raise SystemExit(
-            f"--peer {peer!r}: expected a URL (http://host:{ENCLAVE_PEER_PORT}) "
-            "or a path to a node descriptor JSON, but found no such file"
-        )
-    descriptor = load_descriptor(path)
-    public_ip = require(descriptor, "public_ip", path)
-    return f"http://{public_ip}:{ENCLAVE_PEER_PORT}"
 
 
 def resolve_reth_genesis(reth_genesis: Path | None, manifest_path: Path) -> Path:
@@ -104,20 +79,49 @@ def build_config(
     email: str,
     *,
     genesis_node: bool,
-    peers: list[str],
     reth_genesis_path: Path,
+    external_ip: str,
+    bootnodes: list[str],
 ) -> Path:
     """Assemble the config POSTed to tdx-init, mutating no source. The fields
-    come from five inputs: the role (`genesis_node` + `peers` → `[root_key]`),
-    the descriptor's fqdn (→ `[domain].name`, the cert domain), `--email`
-    (→ `[domain].email`), and the network manifest + reth genesis
-    (`--manifest`/`--reth-genesis` → `[network]`). Written fresh, so there is
-    no operator-supplied TOML that could carry a conflicting
-    `[domain]`/`[network]` and fork the network.
+    come from: the node's public IP (→ `[node].external_ip`, reth's
+    `--nat extip`), the role (→ `[node].genesis_node`), the descriptor's fqdn
+    (→ `[node.domain].name`, the cert domain), `--email`
+    (→ `[node.domain].email`), and the network manifest + reth genesis +
+    bootnode set (`--manifest`/`--reth-genesis`/`bootnodes` → `[network]`).
+    Written fresh, so there is no operator-supplied TOML that could carry a
+    conflicting `[node]`/`[network]` and fork the network.
 
-    `genesis_node=True` (peers empty) is only ever passed by the bootstrap
-    founding command; the operator `configure` always joins (False + peers).
+    `external_ip` is the node's own public IP (from its descriptor); reth
+    advertises it via `--nat extip` so its enode is dialable, which is what
+    keeps a node's advertised enode host equal to `[network].bootnodes`
+    entries. tdx-init requires `[node].external_ip` and parses it as an
+    `IpAddr`, so it is always emitted and must be non-empty — an empty value
+    would 400 at the far end, so we fail fast here instead.
+
+    `bootnodes` is the single source for the cohort's peer machines: reth
+    dials the enodes verbatim, and tdx-init derives the root-key fetch list
+    from them (`http://<host>:7878`, the node's own entry dropped). Empty is
+    valid only on the greenfield genesis node (it mints `root_key` itself);
+    a joiner with no bootnode has no source for `root_key` and would 400 at
+    the far end, so that too fails fast here.
+
+    `genesis_node=True` is only ever passed by the bootstrap founding
+    command; the operator `configure` always joins (False).
     """
+    if not external_ip:
+        # tdx-init requires [node].external_ip as an IpAddr; an empty value is
+        # a far-end 400. Fail fast — every caller sources it from the
+        # descriptor's required public_ip, so this should be unreachable.
+        raise SystemExit("build_config: external_ip is required and must be non-empty")
+    if not genesis_node and not bootnodes:
+        # Mirrors tdx-init's POST-time rule: a non-genesis node derives its
+        # root_key fetch peers from the bootnodes, so none means no way to
+        # bootstrap — a far-end 400.
+        raise SystemExit(
+            "build_config: a joining node needs at least one bootnode "
+            "(tdx-init derives its root_key fetch peers from them)"
+        )
     manifest_bytes = manifest_path.read_bytes()
     try:
         # Never POST bytes tdx-init would 400 at the far end.
@@ -132,13 +136,14 @@ def build_config(
         raise SystemExit(f"--reth-genesis {reth_genesis_path}: {e}") from None
 
     # json.dumps emits valid TOML basic strings for these simple ASCII values.
-    peers_toml = ", ".join(json.dumps(p) for p in peers)
     merged = (
-        f"[root_key]\n"
-        f"genesis_node = {str(genesis_node).lower()}\n"
-        f"peers = [{peers_toml}]\n\n"
-        f"[domain]\nname = {json.dumps(fqdn)}\nemail = {json.dumps(email)}\n\n"
-        + manifest_mod.render_network_section(manifest_bytes, reth_genesis_bytes)
+        f"[node]\n"
+        f"external_ip = {json.dumps(external_ip)}\n"
+        f"genesis_node = {str(genesis_node).lower()}\n\n"
+        f"[node.domain]\nname = {json.dumps(fqdn)}\nemail = {json.dumps(email)}\n\n"
+        + manifest_mod.render_network_section(
+            manifest_bytes, reth_genesis_bytes, bootnodes
+        )
     )
     with tempfile.NamedTemporaryFile(
         "w",
@@ -194,19 +199,20 @@ def deliver_config(
     email: str,
     *,
     genesis_node: bool,
-    peers: list[str],
     reth_genesis_path: Path,
-    no_wait: bool,
+    bootnodes: list[str],
 ) -> None:
-    """Build + POST one node's config, then (unless `no_wait`) watch its
-    first-boot LUKS wipe. The shared per-node delivery path behind both
-    `seismic-tee-node configure` (join: genesis_node=False + peers) and
-    `seismic-tee-network configure` (genesis: genesis_node=True + no peers).
+    """Build + POST one node's config, then watch its first-boot LUKS wipe.
+    The shared per-node delivery path behind both
+    `seismic-tee-node configure` (join: genesis_node=False) and
+    `seismic-tee-network configure` (genesis: genesis_node=True).
 
     Resolves the node's public_ip/fqdn from its descriptor (fqdn is the cert
     domain and must resolve to this node, so it's required — a wrong/absent
-    name fails certbot at boot). Raises SystemExit if the node doesn't reach a
-    ready state within the watch window, so a failure never reads as success.
+    name fails certbot at boot). The public_ip doubles as `[node].external_ip`
+    (reth's `--nat extip`), the same anti-drift reason `[node.domain]` is taken
+    from the descriptor. Raises SystemExit if the node doesn't reach a ready
+    state within the watch window, so a failure never reads as success.
     """
     descriptor = load_descriptor(descriptor_path)
     public_ip = require(descriptor, "public_ip", descriptor_path)
@@ -214,26 +220,21 @@ def deliver_config(
     role = "genesis" if genesis_node else "join"
 
     # Assemble the POST config before contacting the node, so bad local input
-    # (invalid manifest, unresolvable peer) fails fast.
+    # (invalid manifest, missing bootnode) fails fast.
     config = build_config(
         manifest_path,
         fqdn,
         email,
         genesis_node=genesis_node,
-        peers=peers,
         reth_genesis_path=reth_genesis_path,
+        external_ip=public_ip,
+        bootnodes=bootnodes,
     )
     logger.info(f"Built {role} config for {fqdn} -> {config}")
 
     logger.info(f"Configuring node {fqdn} ({public_ip}) as {role}...")
     post_config_to_tdx_init(public_ip, config)
     logger.info("config delivered to tdx-init.")
-
-    if no_wait:
-        # Caller opted out of watching (CI/headless); the POST landed, so
-        # report where the node will be and leave it provisioning.
-        _print_summary(fqdn, public_ip)
-        return
 
     # Watch the first-boot LUKS wipe — the long, otherwise-opaque phase.
     # Purely local observability: the POST already landed, so ctrl-C here
@@ -295,19 +296,6 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--peer",
-        action="append",
-        required=True,
-        metavar="URL|DESCRIPTOR",
-        help=(
-            "Peer to fetch root_key from: a node descriptor JSON "
-            f"(→ http://<public_ip>:{ENCLAVE_PEER_PORT}) or a raw "
-            f"http://host:{ENCLAVE_PEER_PORT} URL. Repeatable; the enclave "
-            "tries them in order. Required — a joining node has no root_key "
-            "of its own."
-        ),
-    )
-    parser.add_argument(
         "--manifest",
         type=Path,
         required=True,
@@ -333,11 +321,26 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--bootnode",
+        action="append",
+        required=True,
+        metavar="ENODE",
+        help=(
+            "Bootnode enode URL "
+            "(enode://<pubkey>@<host>:<port>) → [network].bootnodes. reth "
+            "dials it on startup, and tdx-init derives the root_key fetch "
+            "peer from it (http://<host>:7878). Repeatable; required — a "
+            "joining node has no root_key of its own. Fetch a running node's "
+            "enode from its seismic_nodeInfo RPC (the founding set a network "
+            "writes to nodes/bootnodes.json)."
+        ),
+    )
+    parser.add_argument(
         "--email",
         default="ops@seismic.systems",
         help=(
             "Contact email for the node's Let's Encrypt registration (certbot); "
-            "goes into [domain].email of the POSTed config. Same across a "
+            "goes into [node.domain].email of the POSTed config. Same across a "
             "cohort. Default: ops@seismic.systems."
         ),
     )
@@ -350,16 +353,6 @@ def parse_args() -> argparse.Namespace:
             "(Currently unavailable.) Expected TDX measurements for "
             "attestation verification. The verify path is retired pending "
             "attested-tls integration, so passing this errors for now."
-        ),
-    )
-    parser.add_argument(
-        "--no-wait",
-        action="store_true",
-        default=False,
-        help=(
-            "Don't watch first-boot LUKS provisioning after POSTing. Default "
-            "is to watch (ctrl-C to stop); use this for CI/headless runs where "
-            "there's no TTY to interrupt and the wipe can take 1h+."
         ),
     )
 
@@ -385,16 +378,14 @@ def main() -> None:
             "attested-tls). Re-run without --measurements to POST config only."
         )
 
-    peers = [resolve_peer(p) for p in args.peer]
     reth_genesis = resolve_reth_genesis(args.reth_genesis, args.manifest)
     deliver_config(
         args.node,
         args.manifest,
         args.email,
         genesis_node=False,
-        peers=peers,
         reth_genesis_path=reth_genesis,
-        no_wait=args.no_wait,
+        bootnodes=args.bootnode,
     )
 
 

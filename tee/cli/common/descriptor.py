@@ -12,7 +12,7 @@ hand-write the same shape — `pulumi stack output --json` works too, since
 only `public_ip`/`fqdn` are read and any extra keys are ignored:
 
     seismic-tee-node configure --node dev-bootstrap-node-2.json \
-        --peer … --manifest m.json
+        --bootnode enode://… --manifest m.json
 """
 
 import json

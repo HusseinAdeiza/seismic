@@ -732,19 +732,33 @@ def init_network_dir(
     return written
 
 
-def render_network_section(manifest_bytes: bytes, reth_genesis_bytes: bytes) -> str:
+def render_network_section(
+    manifest_bytes: bytes,
+    reth_genesis_bytes: bytes,
+    bootnodes: list[str],
+) -> str:
     """Render the `[network]` config section tdx-init consumes.
 
     base64 keeps both artifacts opaque through the TOML hop (byte-exactness
     rule): tdx-init decodes and writes these exact bytes verbatim — the
     manifest to `network-manifest.json`, the genesis to `reth-genesis.json`
     (reth's `--chain`).
+
+    `bootnodes` is the enode set feeding reth's `--bootnodes` and — derived by
+    tdx-init, `http://<host>:7878` with the node's own entry dropped — the
+    attestation service's root-key fetch list. tdx-init requires the key, so
+    it is always emitted; an empty list is valid only for the genesis node
+    (nothing to dial, it mints `root_key` itself — the greenfield stage-1
+    case), and 400s for a joiner.
     """
     manifest_b64 = base64.standard_b64encode(manifest_bytes).decode("ascii")
     genesis_b64 = base64.standard_b64encode(reth_genesis_bytes).decode("ascii")
+    # json.dumps emits valid TOML basic strings for enode URLs (ASCII).
+    bootnodes_toml = ", ".join(json.dumps(b) for b in bootnodes)
     return (
         f'[network]\nmanifest_base64 = "{manifest_b64}"\n'
         f'reth_genesis_base64 = "{genesis_b64}"\n'
+        f"bootnodes = [{bootnodes_toml}]\n"
     )
 
 

@@ -217,13 +217,42 @@ class NetworkSectionTests(unittest.TestCase):
 
         manifest_bytes = render_manifest(FIXTURE_MANIFEST)
         genesis_bytes = json.dumps({"config": {"chainId": 5124}}).encode()
-        section = tomllib.loads(render_network_section(manifest_bytes, genesis_bytes))
+        section = tomllib.loads(
+            render_network_section(manifest_bytes, genesis_bytes, [])
+        )
         decoded = base64.standard_b64decode(section["network"]["manifest_base64"])
         self.assertEqual(decoded, manifest_bytes)
         decoded_genesis = base64.standard_b64decode(
             section["network"]["reth_genesis_base64"]
         )
         self.assertEqual(decoded_genesis, genesis_bytes)
+
+    def test_bootnodes_populated_survive_verbatim(self):
+        import tomllib
+
+        manifest_bytes = render_manifest(FIXTURE_MANIFEST)
+        genesis_bytes = json.dumps({"config": {"chainId": 5124}}).encode()
+        bootnodes = [
+            "enode://" + "ab" * 64 + "@1.2.3.4:30303",
+            "enode://" + "cd" * 64 + "@5.6.7.8:30303",
+        ]
+        section = tomllib.loads(
+            render_network_section(manifest_bytes, genesis_bytes, bootnodes)
+        )
+        self.assertEqual(section["network"]["bootnodes"], bootnodes)
+
+    def test_bootnodes_empty_key_is_present(self):
+        # tdx-init requires the key even when the list is empty (the
+        # greenfield genesis case) — so the POSTed config states plainly
+        # that the node has no static bootnodes yet.
+        import tomllib
+
+        manifest_bytes = render_manifest(FIXTURE_MANIFEST)
+        genesis_bytes = json.dumps({"config": {"chainId": 5124}}).encode()
+        rendered = render_network_section(manifest_bytes, genesis_bytes, [])
+        self.assertIn("bootnodes = []", rendered)
+        section = tomllib.loads(rendered)
+        self.assertEqual(section["network"]["bootnodes"], [])
 
 
 class RethGenesisMatchTests(unittest.TestCase):
