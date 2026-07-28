@@ -45,6 +45,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from eth_utils import keccak
+
 from tee.cli.common.logging_setup import setup_logging
 
 logger = logging.getLogger(__name__)
@@ -52,13 +54,23 @@ logger = logging.getLogger(__name__)
 MANIFEST_VERSION = 1
 
 # Genesis-alloc addresses of the admission-policy contracts, named by role as
-# in the manifest schema: registry = the measurement allowlist (today
-# UpgradeOperator.sol), authority = its mutation authority (today
-# MultisigUpgradeOperator.sol). The gates below check both exist in the alloc.
+# in the manifest schema: registry = the measurement allowlist
+# (MeasurementRegistry.sol), authority = its mutation authority (today
+# MeasurementAuthorityDev.sol). The gates below check both exist in the
+# alloc, and that the registry account holds the canonical runtime plus
+# exactly the genesis storage its policy artifact compiles to.
 DEFAULT_REGISTRY = "0x1000000000000000000000000000000000000001"
 DEFAULT_AUTHORITY = "0x1000000000000000000000000000000000000002"
 
 DEFAULT_ATTESTATION_TYPE = "azure-tdx"
+
+# The shared policy-compiler CLI from the enclave repo's
+# seismic-measurement-admission crate. Promotion and policy->genesis-storage
+# compilation are schema knowledge (which registers form guest identity,
+# which value forms are canonical, how admission IDs key registry storage),
+# so deploy shells out to the one shared implementation instead of carrying
+# a second one in Python.
+DEFAULT_ADMISSION_BIN = "seismic-measurement-admission"
 
 # Today's hardcoded summit BLS domain separator.
 # two chains sharing it can cross-replay BLS signatures.
@@ -219,80 +231,66 @@ def validate_manifest_schema(manifest_bytes: bytes) -> dict[str, Any]:
     return obj
 
 
+def _admission_cli(admission_bin: str, *args: str, input_bytes: bytes) -> bytes:
+    """Run the shared policy-compiler CLI, feeding the document on stdin.
+
+    Byte streams both ways: promoted policy bytes are hash-committed, so
+    nothing may re-render them between the CLI and the artifact set.
+    """
+    cmd = [admission_bin, *args, "-"]
+    try:
+        result = subprocess.run(
+            cmd, input=input_bytes, capture_output=True, timeout=120, check=True
+        )
+    except FileNotFoundError:
+        raise GateError(
+            f"{admission_bin!r} not found; build the policy-compiler CLI from "
+            "the enclave repo (cargo build -p seismic-measurement-admission "
+            "--features cli) or pass --admission-bin"
+        ) from None
+    except subprocess.TimeoutExpired:
+        raise GateError(f"`{' '.join(cmd)}` timed out") from None
+    except subprocess.CalledProcessError as e:
+        detail = (e.stderr or e.stdout or b"").decode("utf-8", "replace").strip()
+        raise GateError(f"`{' '.join(cmd)}` failed: {detail}") from None
+    return result.stdout
+
+
 def promote_measurements(
     raw_bytes: bytes,
     measurement_id: str | None,
     attestation_type: str = DEFAULT_ATTESTATION_TYPE,
+    admission_bin: str = DEFAULT_ADMISSION_BIN,
 ) -> bytes:
     """Promote `make measure` output into measurement-policy.json bytes.
 
-    Accepts the shapes seismic-images produces (a bare PCR map, or an object
-    wrapping one under "measurements") and wraps them into the
-    Flashbots-compatible list-of-records format that attested-tls'
-    `attestation` crate parses. If the input already *is* that list format it
-    is passed through byte-verbatim — the manifest commits to the policy file
-    by hash, so an already-published policy must not be re-rendered.
+    Shells out to the admission CLI's `promote`, which selects exactly the
+    admission-schema registers from the raw measured-boot output, normalizes
+    them to named `pcrN` keys binding a single-value `expected_any`, wraps
+    them into one Flashbots-compatible policy record, and compiles its own
+    output before returning it. If the input already *is* a record list it is
+    passed through byte-verbatim (the manifest commits to the policy file by
+    hash, so an already-published policy must not be re-rendered) — but still
+    compiled, which is the whole promoted-policy validation: a document the
+    compiler accepts is exactly a document that can seed registry genesis
+    storage.
     """
-    try:
-        raw = json.loads(raw_bytes)
-    except json.JSONDecodeError as e:
-        raise GateError(f"measurements file is not valid JSON: {e}") from None
-
-    if isinstance(raw, list):
-        _validate_policy_records(raw)
-        return raw_bytes
-
-    if not isinstance(raw, dict):
-        raise GateError(f"unrecognized measurements shape: {type(raw).__name__}")
-
-    pcrs = raw.get("measurements", raw)
-    measurement_id = measurement_id or raw.get("measurement_id")
+    args = ["promote"]
     if measurement_id:
-        # Accept a path to the artifact; the published record id is the bare
-        # filename (a real id never contains a separator).
-        measurement_id = Path(measurement_id).name
-    attestation_type = raw.get("attestation_type", attestation_type)
-    if not measurement_id:
-        raise GateError(
-            "measurements file carries no measurement_id; pass "
-            "--measurement-id (conventionally the registered image "
-            "artifact filename)"
-        )
-    records = [
-        {
-            "measurement_id": measurement_id,
-            "attestation_type": attestation_type,
-            "measurements": pcrs,
-        }
-    ]
-    _validate_policy_records(records)
-    return (
-        json.dumps(records, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
-    ).encode("utf-8")
+        args += ["--measurement-id", measurement_id]
+    if attestation_type:
+        args += ["--attestation-type", attestation_type]
+    return _admission_cli(admission_bin, *args, input_bytes=raw_bytes)
 
 
-def _validate_policy_records(records: list[Any]) -> None:
-    if not records:
-        raise GateError("measurement policy has no records")
-    for i, rec in enumerate(records):
-        where = f"measurement policy record {i}"
-        if not isinstance(rec, dict):
-            raise GateError(f"{where}: expected object")
-        for key in ("measurement_id", "attestation_type"):
-            if not isinstance(rec.get(key), str) or not rec[key]:
-                raise GateError(f"{where}: missing or empty {key}")
-        pcrs = rec.get("measurements")
-        if not isinstance(pcrs, dict) or not pcrs:
-            raise GateError(f"{where}: missing or empty measurements map")
-        for reg, entry in pcrs.items():
-            if not str(reg).isdigit():
-                raise GateError(f"{where}: register key {reg!r} is not an index")
-            if not isinstance(entry, dict) or not isinstance(
-                entry.get("expected"), str
-            ):
-                raise GateError(
-                    f"{where}: register {reg} must be {{'expected': '<hex>'}}"
-                )
+def compile_measurement_policy(
+    policy_bytes: bytes, admission_bin: str = DEFAULT_ADMISSION_BIN
+) -> dict[str, Any]:
+    """Compile a policy document via the admission CLI; returns its report:
+    policy hash, admission IDs, the canonical registry runtime-code hash, and
+    the complete registry genesis storage map."""
+    report = _admission_cli(admission_bin, "compile", input_bytes=policy_bytes)
+    return json.loads(report)
 
 
 def reth_genesis_hash(reth_genesis: Path, reth_bin: str = "seismic-reth") -> str:
@@ -335,8 +333,11 @@ class GateContext:
     summit_template: Path
     policy_bytes: bytes
     reth_bin: str = "seismic-reth"
-    # Injectable for tests; defaults to shelling out to seismic-reth.
+    admission_bin: str = DEFAULT_ADMISSION_BIN
+    # Injectable for tests; default to shelling out to seismic-reth and the
+    # admission CLI respectively.
     genesis_hash_fn: Callable[[Path], str] | None = None
+    compile_fn: Callable[[bytes], dict[str, Any]] | None = None
     # Set by `assemble` to its filled template copy (eth_genesis_hash injected
     # when the authored file omits it); gates then check these bytes instead
     # of re-reading summit_template from disk.
@@ -430,7 +431,6 @@ def run_validation_gates(manifest: dict[str, Any], ctx: GateContext) -> None:
             f"{manifest['measurements']['bootstrap_policy_hash']}, computed "
             f"{policy_hash}"
         )
-    _validate_policy_records(json.loads(ctx.policy_bytes))
 
     # Contract addresses must exist in the genesis alloc (with code).
     alloc = {addr.lower(): acct for addr, acct in genesis.get("alloc", {}).items()}
@@ -448,22 +448,112 @@ def run_validation_gates(manifest: dict[str, Any], ctx: GateContext) -> None:
                 "reth genesis alloc"
             )
 
-    # Policy artifact <-> registry genesis storage consistency. The initial
-    # measurements are not genesis-pinned yet, so there is nothing to compare
-    # against — but if storage shows up, this gate must trip until the
-    # comparison is built, rather than silently passing.
-    registry_storage = alloc[contracts["registry"]].get("storage", {})
-    if registry_storage:
-        raise GateError(
-            "registry genesis storage is populated but the policy artifact "
-            "<-> genesis storage consistency check is not implemented; "
-            "implement it before deploying a genesis-pinned admission policy"
-        )
-    ctx.warn(
-        "registry genesis storage is empty: the initial admission policy is "
-        "not genesis-pinned yet, so the policy<->storage consistency gate "
-        "is vacuous"
+    # Policy artifact <-> registry account consistency: compile the policy
+    # with the shared admission CLI ("the compiler accepts it" is the whole
+    # document validation) and require the registry genesis account to hold
+    # the canonical runtime code plus exactly the compiled storage, so the
+    # genesis hash commits to the reviewed policy and nothing else.
+    compile_fn = ctx.compile_fn or (
+        lambda b: compile_measurement_policy(b, admission_bin=ctx.admission_bin)
     )
+    report = compile_fn(ctx.policy_bytes)
+    if report.get("policy_hash") != policy_hash:
+        raise GateError(
+            f"policy compiler saw different document bytes: it reports "
+            f"policy_hash {report.get('policy_hash')}, this file hashes to "
+            f"{policy_hash}"
+        )
+    _validate_registry_account(
+        alloc[contracts["registry"]], contracts["registry"], report
+    )
+
+
+def _norm_word(value: Any, where: str) -> str:
+    """Normalize a 256-bit storage slot/word to 0x + 64 lowercase hex digits.
+
+    Genesis JSON accepts unpadded and mixed-case hex; the compile report is
+    already canonical. Comparing normalized words keeps the gate about
+    values, not formatting.
+    """
+    if not isinstance(value, str):
+        raise GateError(f"{where}: expected hex string, got {value!r}")
+    try:
+        word = int(value, 16)
+    except ValueError:
+        raise GateError(f"{where}: expected hex string, got {value!r}") from None
+    if not 0 <= word < 2**256:
+        raise GateError(f"{where}: {value!r} does not fit a 256-bit word")
+    return f"0x{word:064x}"
+
+
+def _validate_registry_account(
+    acct: dict[str, Any], addr: str, report: dict[str, Any]
+) -> None:
+    """Exact registry-account gate: canonical runtime code and precisely the
+    compiled genesis storage — every expected slot present with the expected
+    word, and no unexplained slots."""
+    for key in ("registry_runtime_code_hash", "registry_genesis_storage"):
+        if key not in report:
+            raise GateError(
+                f"policy compile report carries no {key}; rebuild the "
+                "admission CLI from the current enclave repo"
+            )
+    try:
+        code = bytes.fromhex(acct["code"].removeprefix("0x"))
+    except ValueError:
+        raise GateError(f"registry {addr} code is not valid hex") from None
+    code_hash = "0x" + keccak(code).hex()
+    if code_hash != report.get("registry_runtime_code_hash"):
+        raise GateError(
+            f"registry {addr} code is not the canonical MeasurementRegistry "
+            f"runtime: keccak256 is {code_hash}, the policy compiler pins "
+            f"{report.get('registry_runtime_code_hash')} (rebuild the genesis "
+            "from the current contract artifact)"
+        )
+
+    expected = {
+        _norm_word(slot, "compile report storage slot"): _norm_word(
+            value, f"compile report storage value at {slot}"
+        )
+        for slot, value in report.get("registry_genesis_storage", {}).items()
+    }
+    raw_storage = acct.get("storage", {})
+    actual = {
+        _norm_word(slot, f"registry {addr} storage slot"): _norm_word(
+            value, f"registry {addr} storage value at {slot}"
+        )
+        for slot, value in raw_storage.items()
+    }
+    if len(actual) != len(raw_storage):
+        raise GateError(
+            f"registry {addr} genesis storage lists the same slot twice "
+            "under different hex spellings"
+        )
+    if not actual:
+        raise GateError(
+            f"registry {addr} genesis storage is empty: the admission policy "
+            "must be genesis-pinned. Seed the account with the compiled "
+            "registry_genesis_storage (`seismic-measurement-admission "
+            "compile measurement-policy.json`)"
+        )
+    if actual != expected:
+        problems = [
+            f"slot {slot} missing (expected {expected[slot]})"
+            for slot in sorted(set(expected) - set(actual))
+        ]
+        problems += [
+            f"slot {slot} unexplained (value {actual[slot]})"
+            for slot in sorted(set(actual) - set(expected))
+        ]
+        problems += [
+            f"slot {slot} holds {actual[slot]}, expected {expected[slot]}"
+            for slot in sorted(set(actual) & set(expected))
+            if actual[slot] != expected[slot]
+        ]
+        raise GateError(
+            f"registry {addr} genesis storage does not match the compiled "
+            f"policy artifact:\n  " + "\n  ".join(problems)
+        )
 
 
 @dataclass
@@ -517,8 +607,10 @@ def assemble(
     registry: str = DEFAULT_REGISTRY,
     authority: str = DEFAULT_AUTHORITY,
     reth_bin: str = "seismic-reth",
+    admission_bin: str = DEFAULT_ADMISSION_BIN,
     genesis_nonce: bytes | None = None,
     genesis_hash_fn: Callable[[Path], str] | None = None,
+    compile_fn: Callable[[bytes], dict[str, Any]] | None = None,
 ) -> AssembledManifest:
     """Assemble, render, and gate-check a v1 network manifest.
 
@@ -592,7 +684,9 @@ def assemble(
         summit_template=summit_template,
         policy_bytes=policy_bytes,
         reth_bin=reth_bin,
+        admission_bin=admission_bin,
         genesis_hash_fn=genesis_hash_fn,
+        compile_fn=compile_fn,
         summit_template_bytes=template_bytes,
     )
     run_validation_gates(parsed, ctx)
@@ -799,6 +893,14 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             help="seismic-reth binary used to recompute eth_genesis_hash",
         )
 
+    def add_admission_bin(p: argparse.ArgumentParser) -> None:
+        p.add_argument(
+            "--admission-bin",
+            default=DEFAULT_ADMISSION_BIN,
+            help="policy-compiler CLI used to promote measurements and "
+            "compile the policy into registry genesis storage",
+        )
+
     ini = sub.add_parser("init", help="scaffold a network directory's authored inputs")
     ini.add_argument("dir", type=Path, help="network directory to create")
     ini.add_argument(
@@ -873,6 +975,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="overwrite an existing manifest (a new network identity)",
     )
     add_reth_bin(asm)
+    add_admission_bin(asm)
 
     val = sub.add_parser(
         "validate", help="re-run all gates over an assembled network directory"
@@ -884,6 +987,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "there (manifest, shipped template, policy) against its reth genesis",
     )
     add_reth_bin(val)
+    add_admission_bin(val)
 
     args = parser.parse_args(argv)
 
@@ -933,6 +1037,7 @@ def main() -> None:
                 args.measurements.read_bytes(),
                 args.measurement_id,
                 args.attestation_type,
+                admission_bin=args.admission_bin,
             )
             assembled = assemble(
                 name=args.name,
@@ -942,12 +1047,14 @@ def main() -> None:
                 registry=args.registry,
                 authority=args.authority,
                 reth_bin=args.reth_bin,
+                admission_bin=args.admission_bin,
             )
             ctx = GateContext(
                 reth_genesis=args.reth_genesis,
                 summit_template=args.summit_template,
                 policy_bytes=policy_bytes,
                 reth_bin=args.reth_bin,
+                admission_bin=args.admission_bin,
             )
             write_artifact_set(args.out, assembled, ctx, force=args.force)
             logger.info("wrote %s", args.out / MANIFEST_FILENAME)
@@ -961,6 +1068,7 @@ def main() -> None:
                 summit_template=args.summit_template,
                 policy_bytes=args.measurement_policy.read_bytes(),
                 reth_bin=args.reth_bin,
+                admission_bin=args.admission_bin,
             )
             run_validation_gates(manifest, ctx)
             print(f"network_id: {compute_network_id(manifest_bytes)}")

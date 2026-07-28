@@ -4,21 +4,28 @@ Run with:
     uv run python -m unittest discover -s tee/tests -v
 """
 
+import http.client
 import json
+import shutil
 import tempfile
 import tomllib
 import unittest
 import urllib.error
 import urllib.request
 from pathlib import Path
+from typing import Any
+
+from eth_utils import keccak
 
 from tee.cli.common import manifest as manifest_mod
 from tee.cli.common.manifest import (
+    DEFAULT_ADMISSION_BIN,
     AssembledManifest,
     GateContext,
     GateError,
     ManifestSchemaError,
     assemble,
+    compile_measurement_policy,
     compute_network_id,
     init_network_dir,
     promote_measurements,
@@ -29,6 +36,29 @@ from tee.cli.common.manifest import (
     validate_reth_genesis_matches,
     write_artifact_set,
 )
+
+# The shared policy-compiler CLI from the enclave repo. Tests of the
+# subprocess boundary run only where it is built (everything else injects
+# compile_fn / crafts policy bytes directly, mirroring genesis_hash_fn).
+ADMISSION_BIN = shutil.which(DEFAULT_ADMISSION_BIN)
+
+
+def promoted_policy_bytes(measurement_id: str = "img.vhd") -> bytes:
+    """A valid promoted policy document (the canonical one-record form the
+    admission CLI emits: schema registers only, single-value expected_any)."""
+    records = [
+        {
+            "attestation_type": "azure-tdx",
+            "measurement_id": measurement_id,
+            "measurements": {
+                "pcr4": {"expected_any": ["ab" * 32]},
+                "pcr9": {"expected_any": ["cd" * 32]},
+                "pcr11": {"expected_any": ["ef" * 32]},
+            },
+        }
+    ]
+    return (json.dumps(records, indent=2) + "\n").encode()
+
 
 # Mirrors https://github.com/SeismicSystems/enclave/blob/seismic/crates/network-manifest/fixtures/network-manifest-v1.json
 # The network_id vector below is asserted by that crate's
@@ -161,53 +191,87 @@ class SchemaTests(unittest.TestCase):
 
 
 class PromoteTests(unittest.TestCase):
-    PCRS = {"4": {"expected": "ab" * 24}, "9": {"expected": "cd" * 24}}
+    """The `promote` subprocess boundary. Promotion semantics themselves
+    (register selection, normalization, pass-through, compile-validation)
+    are pinned by the admission crate's own tests and fixtures; these tests
+    cover the shell-out and its failure surfacing."""
 
-    def test_promotes_make_measure_wrapper_shape(self):
-        raw = json.dumps({"measurements": self.PCRS}).encode()
-        policy = json.loads(promote_measurements(raw, "img.vhd"))
-        self.assertEqual(
-            policy,
-            [
-                {
-                    "measurement_id": "img.vhd",
-                    "attestation_type": "azure-tdx",
-                    "measurements": self.PCRS,
-                }
-            ],
-        )
+    RAW = {
+        "measurements": {
+            "4": {"expected": "ab" * 32},
+            "8": {"expected": "00" * 32},
+            "9": {"expected": "cd" * 32},
+            "11": {"expected": "ef" * 32},
+        }
+    }
 
-    def test_promotes_bare_pcr_map(self):
-        raw = json.dumps(self.PCRS).encode()
-        policy = json.loads(promote_measurements(raw, "img.vhd", "dcap-tdx"))
-        self.assertEqual(policy[0]["attestation_type"], "dcap-tdx")
-        self.assertEqual(policy[0]["measurements"], self.PCRS)
+    def test_missing_binary_is_a_gate_error(self):
+        # Runs everywhere: the actionable build-or-point-at-it message must
+        # not depend on having the binary.
+        raw = json.dumps(self.RAW).encode()
+        with self.assertRaisesRegex(GateError, "not found"):
+            promote_measurements(raw, "img.vhd", admission_bin="no-such-admission-cli")
 
+    @unittest.skipUnless(ADMISSION_BIN, "seismic-measurement-admission not in PATH")
+    def test_promotes_make_measure_wrapper_to_schema_registers(self):
+        raw = json.dumps(self.RAW).encode()
+        policy = json.loads(promote_measurements(raw, "../build/img.vhd"))
+        record = policy[0]
+        # Path ids reduce to the bare filename; the promoted record binds
+        # exactly the named schema registers, single-value expected_any.
+        self.assertEqual(record["measurement_id"], "img.vhd")
+        self.assertEqual(record["attestation_type"], "azure-tdx")
+        self.assertEqual(list(record["measurements"]), ["pcr4", "pcr9", "pcr11"])
+        self.assertEqual(record["measurements"]["pcr4"], {"expected_any": ["ab" * 32]})
+
+    @unittest.skipUnless(ADMISSION_BIN, "seismic-measurement-admission not in PATH")
     def test_already_promoted_policy_passes_through_verbatim(self):
         # Odd-but-valid formatting must survive untouched: the manifest
         # commits to these exact bytes.
         raw = (
             b'[{"measurement_id": "x", "attestation_type": "azure-tdx",'
-            b'   "measurements": {"4": {"expected": "ab"}}}]'
+            b'   "measurements": {"4": {"expected": "'
+            + b"ab" * 32
+            + b'"}, "9": {"expected": "'
+            + b"cd" * 32
+            + b'"}, "11": {"expected": "'
+            + b"ef" * 32
+            + b'"}}}]'
         )
         self.assertEqual(promote_measurements(raw, None), raw)
 
-    def test_normalizes_path_measurement_id_to_basename(self):
-        # A path to the artifact is a common slip; the published id is the
-        # bare filename (a real id never contains a separator).
-        raw = json.dumps({"measurements": self.PCRS}).encode()
-        policy = json.loads(promote_measurements(raw, "../images/build/img.vhd"))
-        self.assertEqual(policy[0]["measurement_id"], "img.vhd")
+    @unittest.skipUnless(ADMISSION_BIN, "seismic-measurement-admission not in PATH")
+    def test_promote_failure_surfaces_compiler_diagnostics(self):
+        raw = json.dumps({"measurements": {"4": {"expected": "ab" * 32}}}).encode()
+        with self.assertRaisesRegex(GateError, "pcr9"):
+            promote_measurements(raw, "img.vhd")
 
+    @unittest.skipUnless(ADMISSION_BIN, "seismic-measurement-admission not in PATH")
     def test_requires_measurement_id(self):
-        raw = json.dumps({"measurements": self.PCRS}).encode()
+        raw = json.dumps(self.RAW).encode()
         with self.assertRaisesRegex(GateError, "measurement_id"):
             promote_measurements(raw, None)
 
-    def test_rejects_malformed_records(self):
-        raw = json.dumps([{"measurement_id": "x"}]).encode()
-        with self.assertRaises(GateError):
-            promote_measurements(raw, None)
+
+class CompilePolicyTests(unittest.TestCase):
+    """The `compile` subprocess boundary (report consumed by the gates)."""
+
+    @unittest.skipUnless(ADMISSION_BIN, "seismic-measurement-admission not in PATH")
+    def test_compile_report_shape(self):
+        policy = promoted_policy_bytes()
+        report = compile_measurement_policy(policy)
+        self.assertEqual(report["policy_hash"], manifest_mod._sha256_hex(policy))
+        self.assertEqual(report["accepted_count"], 1)
+        # 4 field slots (policy hashes, revision, count) + 1 status slot.
+        self.assertEqual(len(report["registry_genesis_storage"]), 5)
+        manifest_mod._check_hex(
+            report["registry_runtime_code_hash"], 32, "registry_runtime_code_hash"
+        )
+
+    @unittest.skipUnless(ADMISSION_BIN, "seismic-measurement-admission not in PATH")
+    def test_compile_failure_is_a_gate_error(self):
+        with self.assertRaisesRegex(GateError, "failed"):
+            compile_measurement_policy(b"[]")
 
 
 class NetworkSectionTests(unittest.TestCase):
@@ -279,24 +343,94 @@ class RethGenesisMatchTests(unittest.TestCase):
                 validate_reth_genesis_matches(FIXTURE_MANIFEST, genesis)
 
 
+class RuntimeCodeDriftTests(unittest.TestCase):
+    """Cross-repo drift guard for the registry runtime-code pin.
+
+    The admission CLI pins keccak256 of the canonical MeasurementRegistry
+    deployed bytecode; the gates enforce that pin against the genesis alloc,
+    so a stale pin already fails assembly loudly. This test is the early
+    warning: the pin reported by the binary on PATH must match the artifact
+    the reth genesis builder installs. Online-only, like the
+    manifest-fixture byte-parity test.
+    """
+
+    REGISTRY_ARTIFACT_URL = (
+        "https://raw.githubusercontent.com/SeismicSystems/seismic/main/"
+        "contracts/artifacts/MeasurementRegistry.json"
+    )
+
+    def _fetch(self, url: str) -> bytes:
+        try:
+            with urllib.request.urlopen(url, timeout=10) as resp:
+                return resp.read()
+        except urllib.error.HTTPError:
+            # A 4xx/5xx means the artifact moved — a real drift signal,
+            # not flaky network, so fail loudly.
+            raise
+        except (urllib.error.URLError, TimeoutError, http.client.HTTPException) as e:
+            self.skipTest(f"cross-repo artifact unreachable: {e}")
+
+    @unittest.skipUnless(ADMISSION_BIN, "seismic-measurement-admission not in PATH")
+    def test_admission_crate_pins_current_registry_runtime(self):
+        report = compile_measurement_policy(promoted_policy_bytes())
+        artifact = json.loads(self._fetch(self.REGISTRY_ARTIFACT_URL))
+        runtime = artifact["deployedBytecode"]["object"].removeprefix("0x")
+        self.assertEqual(
+            report["registry_runtime_code_hash"],
+            "0x" + keccak(bytes.fromhex(runtime)).hex(),
+        )
+
+
 class GateTests(unittest.TestCase):
-    """End-to-end assembly + gates over a synthetic artifact set."""
+    """End-to-end assembly + gates over a synthetic artifact set.
+
+    The policy compiler is injected (compile_fn, mirroring genesis_hash_fn):
+    the gates' contract is "registry account == report", so a synthetic
+    report plus a genesis alloc built to match exercises every mismatch
+    arm without the Rust binary.
+    """
 
     ETH_HASH = "0x" + "12" * 32
+    REGISTRY_CODE = "0x600160005500"
+    REGISTRY_CODE_HASH = "0x" + keccak(bytes.fromhex("600160005500")).hex()
+    # Canonical report spellings; the genesis alloc below writes the same
+    # slots unpadded/mixed-case, which the gate must treat as equal.
+    REPORT_STORAGE = {
+        "0x" + "aa" * 32: "0x" + "11" * 32,
+        "0x" + "00" * 31 + "02": "0x" + "00" * 31 + "01",
+    }
+    GENESIS_STORAGE = {
+        "0x" + "AA" * 32: "0x" + "11" * 32,
+        "0x2": "0x1",
+    }
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         root = Path(self.tmp.name)
         self.reth_genesis = root / "reth-genesis.json"
+        self._write_genesis()
+        # Authored templates carry no eth_genesis_hash — assemble fills it.
+        self.summit_template = root / "summit-genesis-template.toml"
+        self.summit_template.write_text('namespace = "testnet-1"\n')
+        self.policy_bytes = promoted_policy_bytes()
+        self.out_dir = root / "out"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _write_genesis(self, registry_overrides: dict[str, Any] | None = None):
+        registry: dict[str, Any] = {
+            "code": self.REGISTRY_CODE,
+            "storage": dict(self.GENESIS_STORAGE),
+        }
+        registry.update(registry_overrides or {})
         self.reth_genesis.write_text(
             json.dumps(
                 {
                     "config": {"chainId": 5124},
                     "alloc": {
                         # Mixed case on purpose: gate must compare lowercased.
-                        "0x1000000000000000000000000000000000000001": {
-                            "code": "0x60016001"
-                        },
+                        "0x1000000000000000000000000000000000000001": registry,
                         "0x1000000000000000000000000000000000000002": {
                             "code": "0x60016001"
                         },
@@ -304,17 +438,13 @@ class GateTests(unittest.TestCase):
                 }
             )
         )
-        # Authored templates carry no eth_genesis_hash — assemble fills it.
-        self.summit_template = root / "summit-genesis-template.toml"
-        self.summit_template.write_text('namespace = "testnet-1"\n')
-        self.policy_bytes = promote_measurements(
-            json.dumps({"measurements": {"4": {"expected": "ab" * 24}}}).encode(),
-            "img.vhd",
-        )
-        self.out_dir = root / "out"
 
-    def tearDown(self):
-        self.tmp.cleanup()
+    def _report(self, policy_bytes: bytes) -> dict[str, Any]:
+        return {
+            "policy_hash": manifest_mod._sha256_hex(policy_bytes),
+            "registry_runtime_code_hash": self.REGISTRY_CODE_HASH,
+            "registry_genesis_storage": dict(self.REPORT_STORAGE),
+        }
 
     def _assemble(self, **overrides) -> AssembledManifest:
         kwargs = {
@@ -324,6 +454,7 @@ class GateTests(unittest.TestCase):
             "policy_bytes": self.policy_bytes,
             "genesis_nonce": b"\xaa" * 32,
             "genesis_hash_fn": lambda _p: self.ETH_HASH,
+            "compile_fn": self._report,
         }
         kwargs.update(overrides)
         # ty can't verify a **kwargs dict-splat against typed params.
@@ -335,6 +466,7 @@ class GateTests(unittest.TestCase):
             "summit_template": self.summit_template,
             "policy_bytes": self.policy_bytes,
             "genesis_hash_fn": lambda _p: self.ETH_HASH,
+            "compile_fn": self._report,
         }
         kwargs.update(overrides)
         # ty can't verify a **kwargs dict-splat against typed params.
@@ -347,8 +479,6 @@ class GateTests(unittest.TestCase):
         self.assertEqual(first.network_id, second.network_id)
         self.assertEqual(first.manifest["eth"]["chain_id"], 5124)
         self.assertEqual(first.manifest["eth"]["genesis_hash"], self.ETH_HASH)
-        # Vacuous policy<->storage gate must be surfaced, not silent.
-        self.assertTrue(any("genesis-pinned" in w for w in first.warnings))
 
     def test_fresh_nonce_uniquifies_clones(self):
         a = self._assemble(genesis_nonce=None)
@@ -411,12 +541,53 @@ class GateTests(unittest.TestCase):
                 ),
             )
 
-    def test_gate_populated_operator_storage_trips_unimplemented_check(self):
-        genesis = json.loads(self.reth_genesis.read_text())
-        operator = genesis["alloc"]["0x1000000000000000000000000000000000000001"]
-        operator["storage"] = {"0x" + "00" * 32: "0x" + "01" * 32}
-        self.reth_genesis.write_text(json.dumps(genesis))
-        with self.assertRaisesRegex(GateError, "consistency check"):
+    def test_gate_compiler_policy_hash_cross_check(self):
+        def stale_report(policy_bytes: bytes) -> dict[str, Any]:
+            return {**self._report(policy_bytes), "policy_hash": "0x" + "99" * 32}
+
+        with self.assertRaisesRegex(GateError, "different document bytes"):
+            self._assemble(compile_fn=stale_report)
+
+    def test_gate_non_canonical_registry_code(self):
+        self._write_genesis({"code": "0xdeadbeef"})
+        with self.assertRaisesRegex(
+            GateError, "not the canonical MeasurementRegistry runtime"
+        ):
+            self._assemble()
+
+    def test_gate_empty_registry_storage(self):
+        self._write_genesis({"storage": {}})
+        with self.assertRaisesRegex(GateError, "must be genesis-pinned"):
+            self._assemble()
+
+    def test_gate_missing_storage_slot(self):
+        self._write_genesis({"storage": {"0x" + "aa" * 32: "0x" + "11" * 32}})
+        with self.assertRaisesRegex(
+            GateError, r"slot 0x0{63}2 missing \(expected 0x0{63}1\)"
+        ):
+            self._assemble()
+
+    def test_gate_unexplained_storage_slot(self):
+        storage = dict(self.GENESIS_STORAGE)
+        storage["0x" + "cc" * 32] = "0x" + "01" * 32
+        self._write_genesis({"storage": storage})
+        with self.assertRaisesRegex(GateError, f"slot 0x{'cc' * 32} unexplained"):
+            self._assemble()
+
+    def test_gate_wrong_storage_value(self):
+        storage = dict(self.GENESIS_STORAGE)
+        storage["0x2"] = "0x3"
+        self._write_genesis({"storage": storage})
+        with self.assertRaisesRegex(
+            GateError, r"slot 0x0{63}2 holds 0x0{63}3, expected 0x0{63}1"
+        ):
+            self._assemble()
+
+    def test_gate_duplicate_slot_spellings(self):
+        storage = dict(self.GENESIS_STORAGE)
+        storage["0x02"] = "0x1"  # same slot as "0x2" under another spelling
+        self._write_genesis({"storage": storage})
+        with self.assertRaisesRegex(GateError, "same slot twice"):
             self._assemble()
 
     def test_assemble_fills_template_hash(self):
@@ -481,16 +652,13 @@ class GateTests(unittest.TestCase):
         raw.write_text(json.dumps({"measurements": {"4": {"expected": "ab" * 24}}}))
         init_network_dir(net, "testnet-1", self.reth_genesis, raw)
         authored = (net / "summit-template.toml").read_bytes()
-        policy = promote_measurements((net / "measurements.json").read_bytes(), "i.vhd")
         assembled = self._assemble(
             reth_genesis=net / "reth-genesis.json",
             summit_template=net / "summit-template.toml",
-            policy_bytes=policy,
         )
         ctx = self._ctx(
             reth_genesis=net / "reth-genesis.json",
             summit_template=net / "summit-template.toml",
-            policy_bytes=policy,
         )
         write_artifact_set(net, assembled, ctx)
         # Authored input untouched; the shipped filled copy sits beside it;
@@ -572,10 +740,9 @@ class InitTests(unittest.TestCase):
             self.measurements,
             measurement_id="img.vhd",
         )
-        stamped = (self.out / "measurements.json").read_bytes()
+        stamped = json.loads((self.out / "measurements.json").read_bytes())
         # assemble's promotion picks the id up from the file — no flag needed.
-        policy = json.loads(promote_measurements(stamped, None))
-        self.assertEqual(policy[0]["measurement_id"], "img.vhd")
+        self.assertEqual(stamped["measurement_id"], "img.vhd")
 
     def test_rejects_measurement_id_for_promoted_policy(self):
         promoted = Path(self.tmp.name) / "policy.json"
@@ -603,6 +770,7 @@ class DirCliTests(unittest.TestCase):
     def test_assemble_dir_resolution(self):
         args = manifest_mod._parse_args(["assemble", "networks/testnet-1"])
         self.assertEqual(args.name, "testnet-1")
+        self.assertEqual(args.admission_bin, DEFAULT_ADMISSION_BIN)
         self.assertEqual(
             args.reth_genesis, Path("networks/testnet-1/reth-genesis.json")
         )
@@ -636,6 +804,7 @@ class DirCliTests(unittest.TestCase):
     def test_validate_dir_resolution(self):
         args = manifest_mod._parse_args(["validate", "networks/t"])
         self.assertEqual(args.manifest, Path("networks/t/network-manifest.json"))
+        self.assertEqual(args.admission_bin, DEFAULT_ADMISSION_BIN)
         # validate reads the *shipped* template copy, not the authored input.
         self.assertEqual(
             args.summit_template, Path("networks/t/summit-genesis-template.toml")
