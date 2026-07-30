@@ -113,18 +113,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         metavar="FILE",
         help=(
             "Network manifest JSON (from `manifest assemble`) — the same file "
-            "every node was configured with. Its eth.genesis_hash is pinned "
-            "into genesis.toml."
-        ),
-    )
-    parser.add_argument(
-        "-g",
-        "--genesis-hash",
-        type=str,
-        default=None,
-        help=(
-            "Dev-only override of the manifest's eth.genesis_hash. The cohort "
-            "assertion still runs against the overridden value."
+            "every node was configured with. Its eth.genesis_hash is asserted "
+            "against every node's reth block 0."
         ),
     )
     args = parser.parse_args(argv)
@@ -251,10 +241,10 @@ def _verify_template_commitment(template_path: Path, manifest: dict) -> None:
     """Assert the template is the one the manifest commits to
     (summit.genesis_template_hash).
 
-    The `-g` override protects only `eth_genesis_hash`; everything else in
-    the template (namespace, timeouts, stake bounds) flows into genesis.toml
-    as-is, so building from uncommitted bytes would start the chain on
-    parameters the manifest never pinned.
+    Everything in the template (eth_genesis_hash, namespace, timeouts,
+    stake bounds) flows into genesis.toml as-is, so building from
+    uncommitted bytes would start the chain on parameters the manifest
+    never pinned.
     """
     computed = "0x" + hashlib.sha256(template_path.read_bytes()).hexdigest()
     committed = manifest["summit"]["genesis_template_hash"]
@@ -440,15 +430,9 @@ def main():
     except manifest_mod.ManifestSchemaError as e:
         raise SystemExit(f"--manifest {args.manifest}: invalid manifest: {e}") from None
     _verify_template_commitment(args.summit_template, manifest)
-    manifest_hash = manifest["eth"]["genesis_hash"]
+    genesis_hash = manifest["eth"]["genesis_hash"]
 
-    genesis_hash = args.genesis_hash or manifest_hash
-    if genesis_hash.lower() != manifest_hash.lower():
-        print(
-            f"WARNING: -g {genesis_hash} overrides the manifest's "
-            f"eth.genesis_hash {manifest_hash}"
-        )
-    print(f"Pinning eth_genesis_hash = {genesis_hash}")
+    print(f"Expecting eth_genesis_hash = {genesis_hash}")
     timeout_minutes = READY_TIMEOUT_SECONDS // 60
     print(
         "Waiting for cohort readiness. `configure` normally waits for root-key "
@@ -479,8 +463,6 @@ def main():
             str(args.summit_template),
             "-v",
             tmp_validators,
-            "-g",
-            genesis_hash,
         ],
         check=True,
     )

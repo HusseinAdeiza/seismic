@@ -100,8 +100,8 @@ class ParseArgsTests(unittest.TestCase):
 
 class TemplateCommitmentTests(unittest.TestCase):
     """The ceremony must build genesis.toml only from the template the
-    manifest commits to — the -g override protects the eth hash, but the
-    namespace/timeouts/stake bounds flow into genesis.toml as-is."""
+    manifest commits to — the eth hash, namespace, timeouts, and stake
+    bounds all flow into genesis.toml as-is."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
