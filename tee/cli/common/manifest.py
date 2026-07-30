@@ -10,12 +10,18 @@ https://github.com/SeismicSystems/enclave/tree/seismic/crates/network-manifest;
 the schema here must stay in lockstep with it since the fixture-vector test in
 tests/test_manifest.py pins both to the same bytes).
 
-Two artifacts are produced:
+Three artifacts are produced:
 - network-manifest.json    deploy-time facts; hashed into network_id
 - measurement-policy.json  Flashbots-compatible measurement allowlist,
                            promoted from seismic-images' `make measure`
                            output and committed to by the manifest via
                            measurements.bootstrap_policy_hash
+- reth-genesis.json        the input genesis with the policy's compiled
+                           registry_genesis_storage injected into the
+                           registry account (committed genesis files are
+                           policy-free; the accepted admission IDs are a
+                           per-network fact), committed to via
+                           eth.genesis_hash
 
 Usage (one directory per network: `init` gathers the authored inputs — the
 only command that takes loose files — then `assemble`/`validate` operate on
@@ -39,6 +45,7 @@ import re
 import secrets
 import subprocess
 import sys
+import tempfile
 import tomllib
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -85,8 +92,9 @@ SUMMIT_TEMPLATE_FILENAME = "summit-genesis-template.toml"
 # Authored-input filenames inside a network directory (`manifest init`).
 # Distinct from the shipped artifact-set names above so `assemble --dir`
 # never overwrites an authored input. reth-genesis.json is shared
-# deliberately: its artifact copy is byte-verbatim, so the same-name write
-# is an identity.
+# deliberately: its artifact copy is the input with the compiled registry
+# genesis storage injected, and injection replaces the registry account's
+# storage wholesale, so the same-name write is stable under re-assembly.
 INPUT_SUMMIT_TEMPLATE_FILENAME = "summit-template.toml"
 INPUT_MEASUREMENTS_FILENAME = "measurements.json"
 
@@ -293,6 +301,53 @@ def compile_measurement_policy(
     return json.loads(report)
 
 
+def inject_registry_genesis_storage(
+    genesis_bytes: bytes, registry: str, report: dict[str, Any]
+) -> bytes:
+    """Write the compile report's registry_genesis_storage verbatim into the
+    reth genesis's registry account, replacing any existing storage.
+
+    Committed genesis files are policy-free (canonical registry runtime, empty
+    storage — failing closed): the accepted admission IDs are a per-network
+    fact, so `assemble` derives the storage from the network's policy
+    document and writes it here. Replacement, not merge: the gate requires
+    the account to hold exactly the compiled map, and wholesale replacement
+    keeps re-assembly idempotent when the policy changes.
+    """
+    storage = report.get("registry_genesis_storage")
+    if not isinstance(storage, dict) or not storage:
+        raise GateError(
+            "policy compile report carries no registry_genesis_storage; "
+            "rebuild the admission CLI from the current enclave repo"
+        )
+    genesis = json.loads(genesis_bytes)
+    alloc = genesis.get("alloc") if isinstance(genesis, dict) else None
+    if not isinstance(alloc, dict):
+        raise GateError("reth genesis has no alloc object")
+    matches = [k for k in alloc if isinstance(k, str) and k.lower() == registry.lower()]
+    if not matches:
+        raise GateError(f"registry {registry} is not in the reth genesis alloc")
+    if len(matches) > 1:
+        raise GateError(
+            f"reth genesis alloc lists registry {registry} twice under "
+            "different hex spellings"
+        )
+    acct = alloc[matches[0]]
+    if not isinstance(acct, dict):
+        raise GateError(f"registry {registry} alloc entry is not an object")
+    acct["storage"] = dict(storage)
+    return (json.dumps(genesis, indent=2) + "\n").encode("utf-8")
+
+
+def _genesis_hash_of_bytes(genesis_bytes: bytes, hash_fn: Callable[[Path], str]) -> str:
+    """Hash a genesis that exists only as bytes (assemble's injected copy):
+    materialize it for the path-based `seismic-reth genesis-hash` shell-out."""
+    with tempfile.NamedTemporaryFile(suffix=".json") as tf:
+        tf.write(genesis_bytes)
+        tf.flush()
+        return hash_fn(Path(tf.name))
+
+
 def reth_genesis_hash(reth_genesis: Path, reth_bin: str = "seismic-reth") -> str:
     """Compute eth_genesis_hash offline via `seismic-reth genesis-hash`.
 
@@ -342,6 +397,10 @@ class GateContext:
     # when the authored file omits it); gates then check these bytes instead
     # of re-reading summit_template from disk.
     summit_template_bytes: bytes | None = None
+    # Set by `assemble` to its copy of the full genesis document, with the
+    # compiled registry storage injected into the registry account; gates
+    # then check these bytes instead of re-reading reth_genesis from disk.
+    reth_genesis_bytes: bytes | None = None
     warnings: list[str] = field(default_factory=list)
 
     def warn(self, message: str) -> None:
@@ -356,7 +415,12 @@ def run_validation_gates(manifest: dict[str, Any], ctx: GateContext) -> None:
     Fails at deploy, not at boot. tdx-init re-runs the same checks over the
     embedded artifacts at POST time.
     """
-    genesis = json.loads(ctx.reth_genesis.read_bytes())
+    genesis_bytes = (
+        ctx.reth_genesis_bytes
+        if ctx.reth_genesis_bytes is not None
+        else ctx.reth_genesis.read_bytes()
+    )
+    genesis = json.loads(genesis_bytes)
 
     # eth.chain_id == reth genesis config.chainId
     chain_id = genesis.get("config", {}).get("chainId")
@@ -372,7 +436,11 @@ def run_validation_gates(manifest: dict[str, Any], ctx: GateContext) -> None:
     hash_fn = ctx.genesis_hash_fn or (
         lambda p: reth_genesis_hash(p, reth_bin=ctx.reth_bin)
     )
-    computed = hash_fn(ctx.reth_genesis)
+    computed = (
+        _genesis_hash_of_bytes(genesis_bytes, hash_fn)
+        if ctx.reth_genesis_bytes is not None
+        else hash_fn(ctx.reth_genesis)
+    )
     if manifest["eth"]["genesis_hash"] != computed:
         raise GateError(
             f"eth.genesis_hash mismatch: manifest has "
@@ -564,6 +632,10 @@ class AssembledManifest:
     # The template copy the manifest commits to (eth_genesis_hash filled if
     # the authored file omitted it) — what write_artifact_set ships.
     summit_template_bytes: bytes
+    # The genesis copy the manifest commits to (compiled registry genesis
+    # storage injected into the registry account) — what write_artifact_set
+    # ships and eth.genesis_hash is computed from.
+    reth_genesis_bytes: bytes
     network_id: str
     warnings: list[str]
 
@@ -622,8 +694,15 @@ def assemble(
     never authored: whatever the input declares (if anything) is replaced with
     the computed value in the copy that `genesis_template_hash` commits to and
     the artifact set ships — committed bytes never carry a stale hash.
+
+    The registry account's genesis storage is likewise derived, not authored:
+    the policy document is compiled and its registry_genesis_storage injected
+    into the shipped genesis copy, so eth.genesis_hash commits to the
+    reviewed policy. The gates then re-validate the injected copy against an
+    independent compile of the same document.
     """
-    genesis = json.loads(reth_genesis.read_bytes())
+    input_genesis_bytes = reth_genesis.read_bytes()
+    genesis = json.loads(input_genesis_bytes)
     chain_id = genesis.get("config", {}).get("chainId")
     if not isinstance(chain_id, int) or isinstance(chain_id, bool):
         raise GateError(f"reth genesis config.chainId is {chain_id!r}, not an int")
@@ -634,8 +713,15 @@ def assemble(
     if not isinstance(namespace, str):
         raise GateError(f"summit template has no namespace string (got {namespace!r})")
 
+    compile_policy = compile_fn or (
+        lambda b: compile_measurement_policy(b, admission_bin=admission_bin)
+    )
+    reth_genesis_bytes = inject_registry_genesis_storage(
+        input_genesis_bytes, registry, compile_policy(policy_bytes)
+    )
+
     hash_fn = genesis_hash_fn or (lambda p: reth_genesis_hash(p, reth_bin=reth_bin))
-    eth_hash = hash_fn(reth_genesis).lower()
+    eth_hash = _genesis_hash_of_bytes(reth_genesis_bytes, hash_fn).lower()
     if "eth_genesis_hash" in template and template["eth_genesis_hash"] != eth_hash:
         logger.info(
             "replacing the template's declared eth_genesis_hash %s with the "
@@ -688,6 +774,7 @@ def assemble(
         genesis_hash_fn=genesis_hash_fn,
         compile_fn=compile_fn,
         summit_template_bytes=template_bytes,
+        reth_genesis_bytes=reth_genesis_bytes,
     )
     run_validation_gates(parsed, ctx)
 
@@ -696,6 +783,7 @@ def assemble(
         manifest=parsed,
         policy_bytes=policy_bytes,
         summit_template_bytes=template_bytes,
+        reth_genesis_bytes=reth_genesis_bytes,
         network_id=compute_network_id(manifest_bytes),
         warnings=ctx.warnings,
     )
@@ -704,11 +792,12 @@ def assemble(
 def write_artifact_set(
     out_dir: Path,
     assembled: AssembledManifest,
-    ctx: GateContext,
     force: bool = False,
 ) -> None:
-    """Write the network artifact set: manifest, policy, and verbatim copies
-    of the genesis artifacts it commits to.
+    """Write the network artifact set: manifest, policy, and assemble's
+    copies of the genesis artifacts the manifest commits to (registry
+    storage injected into the reth genesis, eth_genesis_hash filled into
+    the summit template).
 
     A manifest is immutable for the network's lifetime — refuse to overwrite
     an existing one unless forced.
@@ -723,10 +812,7 @@ def write_artifact_set(
     out_dir.mkdir(parents=True, exist_ok=True)
     manifest_path.write_bytes(assembled.manifest_bytes)
     (out_dir / POLICY_FILENAME).write_bytes(assembled.policy_bytes)
-    # The reth genesis is a byte-verbatim copy of the input; the template is
-    # assemble's copy (eth_genesis_hash filled if the author omitted it).
-    # Every file re-verifies against the manifest's hashes with sha256sum.
-    (out_dir / RETH_GENESIS_FILENAME).write_bytes(ctx.reth_genesis.read_bytes())
+    (out_dir / RETH_GENESIS_FILENAME).write_bytes(assembled.reth_genesis_bytes)
     (out_dir / SUMMIT_TEMPLATE_FILENAME).write_bytes(assembled.summit_template_bytes)
 
 
@@ -1049,16 +1135,10 @@ def main() -> None:
                 reth_bin=args.reth_bin,
                 admission_bin=args.admission_bin,
             )
-            ctx = GateContext(
-                reth_genesis=args.reth_genesis,
-                summit_template=args.summit_template,
-                policy_bytes=policy_bytes,
-                reth_bin=args.reth_bin,
-                admission_bin=args.admission_bin,
-            )
-            write_artifact_set(args.out, assembled, ctx, force=args.force)
+            write_artifact_set(args.out, assembled, force=args.force)
             logger.info("wrote %s", args.out / MANIFEST_FILENAME)
             logger.info("wrote %s", args.out / POLICY_FILENAME)
+            logger.info("wrote %s", args.out / RETH_GENESIS_FILENAME)
             print(f"network_id: {assembled.network_id}")
         else:
             manifest_bytes = args.manifest.read_bytes()

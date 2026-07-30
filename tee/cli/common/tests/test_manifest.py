@@ -4,6 +4,7 @@ Run with:
     uv run python -m unittest discover -s tee/tests -v
 """
 
+import hashlib
 import http.client
 import json
 import shutil
@@ -28,6 +29,7 @@ from tee.cli.common.manifest import (
     compile_measurement_policy,
     compute_network_id,
     init_network_dir,
+    inject_registry_genesis_storage,
     promote_measurements,
     render_manifest,
     render_network_section,
@@ -343,6 +345,52 @@ class RethGenesisMatchTests(unittest.TestCase):
                 validate_reth_genesis_matches(FIXTURE_MANIFEST, genesis)
 
 
+class InjectTests(unittest.TestCase):
+    """inject_registry_genesis_storage — the derive half of the registry
+    gate (its exactness arms live in GateTests)."""
+
+    # Letter-bearing address so upper/lower spellings are distinct strings.
+    REGISTRY = "0x" + "ab" * 20
+    REPORT = {"registry_genesis_storage": {"0x" + "00" * 31 + "01": "0x" + "11" * 32}}
+
+    def test_preserves_alloc_key_spelling(self):
+        # Genesis JSON may checksum-case the address; the account is found
+        # case-insensitively and its original key survives the rewrite.
+        cased = "0x" + self.REGISTRY[2:].upper()
+        genesis = json.dumps({"alloc": {cased: {"code": "0x00"}}}).encode()
+        injected = json.loads(
+            inject_registry_genesis_storage(genesis, self.REGISTRY, self.REPORT)
+        )
+        self.assertEqual(list(injected["alloc"]), [cased])
+        self.assertEqual(
+            injected["alloc"][cased]["storage"],
+            self.REPORT["registry_genesis_storage"],
+        )
+
+    def test_missing_registry_account(self):
+        genesis = json.dumps({"alloc": {}}).encode()
+        with self.assertRaisesRegex(GateError, "not in the reth genesis alloc"):
+            inject_registry_genesis_storage(genesis, self.REGISTRY, self.REPORT)
+
+    def test_duplicate_alloc_spellings(self):
+        genesis = json.dumps(
+            {
+                "alloc": {
+                    self.REGISTRY: {"code": "0x00"},
+                    "0x" + self.REGISTRY[2:].upper(): {"code": "0x00"},
+                }
+            }
+        ).encode()
+        with self.assertRaisesRegex(GateError, "twice"):
+            inject_registry_genesis_storage(genesis, self.REGISTRY, self.REPORT)
+
+    def test_report_without_storage(self):
+        genesis = json.dumps({"alloc": {self.REGISTRY: {"code": "0x00"}}}).encode()
+        for report in ({}, {"registry_genesis_storage": {}}):
+            with self.assertRaisesRegex(GateError, "registry_genesis_storage"):
+                inject_registry_genesis_storage(genesis, self.REGISTRY, report)
+
+
 class RuntimeCodeDriftTests(unittest.TestCase):
     """Cross-repo drift guard for the registry runtime-code pin.
 
@@ -386,8 +434,10 @@ class GateTests(unittest.TestCase):
 
     The policy compiler is injected (compile_fn, mirroring genesis_hash_fn):
     the gates' contract is "registry account == report", so a synthetic
-    report plus a genesis alloc built to match exercises every mismatch
-    arm without the Rust binary.
+    report exercises every mismatch arm without the Rust binary. assemble
+    itself writes the report's storage into its genesis copy, so the
+    storage-mismatch arms are reached through the validate path — gates
+    re-run over an artifact set whose on-disk genesis was tampered with.
     """
 
     ETH_HASH = "0x" + "12" * 32
@@ -424,6 +474,9 @@ class GateTests(unittest.TestCase):
             "storage": dict(self.GENESIS_STORAGE),
         }
         registry.update(registry_overrides or {})
+        # A None override removes the key (a policy-free genesis carries
+        # no storage key at all).
+        registry = {k: v for k, v in registry.items() if v is not None}
         self.reth_genesis.write_text(
             json.dumps(
                 {
@@ -471,6 +524,14 @@ class GateTests(unittest.TestCase):
         kwargs.update(overrides)
         # ty can't verify a **kwargs dict-splat against typed params.
         return GateContext(**kwargs)  # ty: ignore[invalid-argument-type]
+
+    def _validate(self, assembled: AssembledManifest) -> None:
+        """The validate path: gates re-run over the on-disk genesis, with
+        assemble's filled template copy standing in for the shipped file."""
+        run_validation_gates(
+            assembled.manifest,
+            self._ctx(summit_template_bytes=assembled.summit_template_bytes),
+        )
 
     def test_assemble_passes_gates_and_is_deterministic(self):
         first = self._assemble()
@@ -555,40 +616,97 @@ class GateTests(unittest.TestCase):
         ):
             self._assemble()
 
+    def test_validate_accepts_equal_storage_under_other_spellings(self):
+        # The on-disk genesis spells the report's slots unpadded/mixed-case
+        # (GENESIS_STORAGE); the gate compares normalized words.
+        self._validate(self._assemble())
+
     def test_gate_empty_registry_storage(self):
+        assembled = self._assemble()
         self._write_genesis({"storage": {}})
         with self.assertRaisesRegex(GateError, "must be genesis-pinned"):
-            self._assemble()
+            self._validate(assembled)
 
     def test_gate_missing_storage_slot(self):
+        assembled = self._assemble()
         self._write_genesis({"storage": {"0x" + "aa" * 32: "0x" + "11" * 32}})
         with self.assertRaisesRegex(
             GateError, r"slot 0x0{63}2 missing \(expected 0x0{63}1\)"
         ):
-            self._assemble()
+            self._validate(assembled)
 
     def test_gate_unexplained_storage_slot(self):
+        assembled = self._assemble()
         storage = dict(self.GENESIS_STORAGE)
         storage["0x" + "cc" * 32] = "0x" + "01" * 32
         self._write_genesis({"storage": storage})
         with self.assertRaisesRegex(GateError, f"slot 0x{'cc' * 32} unexplained"):
-            self._assemble()
+            self._validate(assembled)
 
     def test_gate_wrong_storage_value(self):
+        assembled = self._assemble()
         storage = dict(self.GENESIS_STORAGE)
         storage["0x2"] = "0x3"
         self._write_genesis({"storage": storage})
         with self.assertRaisesRegex(
             GateError, r"slot 0x0{63}2 holds 0x0{63}3, expected 0x0{63}1"
         ):
-            self._assemble()
+            self._validate(assembled)
 
     def test_gate_duplicate_slot_spellings(self):
+        assembled = self._assemble()
         storage = dict(self.GENESIS_STORAGE)
         storage["0x02"] = "0x1"  # same slot as "0x2" under another spelling
         self._write_genesis({"storage": storage})
         with self.assertRaisesRegex(GateError, "same slot twice"):
-            self._assemble()
+            self._validate(assembled)
+
+    def test_assemble_injects_registry_storage(self):
+        # A policy-free input (no storage key, like reth's committed
+        # dev.json) assembles: the report's storage lands verbatim in the
+        # genesis copy the manifest commits to; code and other accounts
+        # stay untouched.
+        self._write_genesis({"storage": None})
+        assembled = self._assemble()
+        genesis = json.loads(assembled.reth_genesis_bytes)
+        registry = genesis["alloc"]["0x1000000000000000000000000000000000000001"]
+        self.assertEqual(registry["storage"], self.REPORT_STORAGE)
+        self.assertEqual(registry["code"], self.REGISTRY_CODE)
+        self.assertEqual(
+            genesis["alloc"]["0x1000000000000000000000000000000000000002"],
+            {"code": "0x60016001"},
+        )
+
+    def test_assemble_replaces_stale_storage_wholesale(self):
+        # A policy change re-derives the whole map; stale slots don't linger.
+        self._write_genesis({"storage": {"0x" + "dd" * 32: "0x" + "ee" * 32}})
+        assembled = self._assemble()
+        genesis = json.loads(assembled.reth_genesis_bytes)
+        registry = genesis["alloc"]["0x1000000000000000000000000000000000000001"]
+        self.assertEqual(registry["storage"], self.REPORT_STORAGE)
+
+    def test_eth_genesis_hash_commits_to_injected_genesis(self):
+        # Content-derived fake hasher: the manifest must commit to the hash
+        # of the injected copy, not of the policy-free input. Passing gates
+        # also pin the self-check to the same bytes.
+        def content_hash(p: Path) -> str:
+            return "0x" + hashlib.sha256(p.read_bytes()).hexdigest()
+
+        assembled = self._assemble(genesis_hash_fn=content_hash)
+        injected = "0x" + hashlib.sha256(assembled.reth_genesis_bytes).hexdigest()
+        self.assertEqual(assembled.manifest["eth"]["genesis_hash"], injected)
+        raw = "0x" + hashlib.sha256(self.reth_genesis.read_bytes()).hexdigest()
+        self.assertNotEqual(injected, raw)
+
+    def test_artifact_set_reassembles_stably(self):
+        # Re-assembly over the shipped artifact set re-injects the same
+        # storage: the same-name reth genesis write is stable.
+        assembled = self._assemble()
+        write_artifact_set(self.out_dir, assembled)
+        written = self.out_dir / "reth-genesis.json"
+        self.assertEqual(written.read_bytes(), assembled.reth_genesis_bytes)
+        again = self._assemble(reth_genesis=written)
+        self.assertEqual(again.reth_genesis_bytes, assembled.reth_genesis_bytes)
 
     def test_assemble_fills_template_hash(self):
         # eth_genesis_hash is derived from reth-genesis.json, not authored:
@@ -597,7 +715,7 @@ class GateTests(unittest.TestCase):
         assembled = self._assemble()
         filled_line = f'eth_genesis_hash = "{self.ETH_HASH}"\n'.encode()
         self.assertTrue(assembled.summit_template_bytes.startswith(filled_line))
-        write_artifact_set(self.out_dir, assembled, self._ctx())
+        write_artifact_set(self.out_dir, assembled)
         written = self.out_dir / "summit-genesis-template.toml"
         self.assertEqual(written.read_bytes(), assembled.summit_template_bytes)
         # validate-style round trip: gates re-pass over the written copy.
@@ -656,22 +774,18 @@ class GateTests(unittest.TestCase):
             reth_genesis=net / "reth-genesis.json",
             summit_template=net / "summit-template.toml",
         )
-        ctx = self._ctx(
-            reth_genesis=net / "reth-genesis.json",
-            summit_template=net / "summit-template.toml",
-        )
-        write_artifact_set(net, assembled, ctx)
+        write_artifact_set(net, assembled)
         # Authored input untouched; the shipped filled copy sits beside it;
-        # the same-name reth genesis write is byte-identical.
+        # the same-name reth genesis write carries assemble's injected copy.
         self.assertEqual((net / "summit-template.toml").read_bytes(), authored)
         self.assertTrue((net / "summit-genesis-template.toml").exists())
         self.assertEqual(
-            (net / "reth-genesis.json").read_bytes(), self.reth_genesis.read_bytes()
+            (net / "reth-genesis.json").read_bytes(), assembled.reth_genesis_bytes
         )
 
     def test_write_artifact_set_refuses_overwrite(self):
         assembled = self._assemble()
-        write_artifact_set(self.out_dir, assembled, self._ctx())
+        write_artifact_set(self.out_dir, assembled)
         for name in (
             "network-manifest.json",
             "measurement-policy.json",
@@ -683,8 +797,8 @@ class GateTests(unittest.TestCase):
         written = (self.out_dir / "network-manifest.json").read_bytes()
         self.assertEqual(compute_network_id(written), assembled.network_id)
         with self.assertRaisesRegex(GateError, "immutable"):
-            write_artifact_set(self.out_dir, assembled, self._ctx())
-        write_artifact_set(self.out_dir, assembled, self._ctx(), force=True)
+            write_artifact_set(self.out_dir, assembled)
+        write_artifact_set(self.out_dir, assembled, force=True)
 
 
 class InitTests(unittest.TestCase):

@@ -5,8 +5,10 @@ foundable) network. Each holds the three authored inputs
 (`reth-genesis.json`, `summit-template.toml`, `measurements.json`) plus
 the artifact set `seismic-tee-network manifest assemble` derives from them
 (`network-manifest.json` — whose SHA-256 is the network's `network_id` —
-`summit-genesis-template.toml`, `measurement-policy.json`). The founding
-workflow lives in the tee README ("Creating a new network").
+`summit-genesis-template.toml`, `measurement-policy.json`; `assemble` also
+writes the policy's compiled registry genesis storage into
+`reth-genesis.json` itself). The founding workflow lives in the tee README
+("Creating a new network").
 
 Directories are committed because a fresh `assemble` mints a fresh
 `genesis_nonce`: the same `network_id` can never be regenerated from the
