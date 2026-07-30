@@ -1,14 +1,18 @@
 # Network directories
 
 One directory per network: the committable identity of a founded (or
-foundable) network. Each holds the three authored inputs
-(`reth-genesis.json`, `summit-template.toml`, `measurements.json`) plus
-the artifact set `seismic-tee-network manifest assemble` derives from them
-(`network-manifest.json` — whose SHA-256 is the network's `network_id` —
-`summit-genesis-template.toml`, `measurement-policy.json`; `assemble` also
-writes the policy's compiled registry genesis storage into
-`reth-genesis.json` itself). The founding workflow lives in the tee README
-("Creating a new network").
+foundable) network. The authored inputs live under `inputs/`;
+`seismic-tee-network manifest assemble` derives the artifact set from them
+at the top level. Everything top-level is hash-pinned by
+`network-manifest.json` — whose SHA-256 is the network's `network_id` —
+and everything under `inputs/` is provenance. The founding workflow lives
+in the tee README ("Creating a new network").
+
+![How assemble derives the artifact set, what pins what, and where the
+genesis ceremony picks it up](network-dir.png)
+
+The diagram source is `network-dir.excalidraw`; re-render the PNG when
+editing it.
 
 Directories are committed because a fresh `assemble` mints a fresh
 `genesis_nonce`: the same `network_id` can never be regenerated from the
@@ -26,7 +30,7 @@ identity. Two intended uses:
   brings up a working cohort. If two such cohorts might ever run at once,
   re-run `manifest assemble --force` first so each gets a fresh
   `genesis_nonce` (cohorts sharing a `network_id` can cross-replay
-  attestation transcripts). Note `measurements.json` snapshots a specific
+  attestation transcripts). Note `inputs/measurements.json` snapshots a specific
   image build — when the deployed VHD moves on, refresh it and
   re-assemble (`up --network` refuses on a pin/policy mismatch).
 - **Start a real network.** Don't reuse or copy this directory — run

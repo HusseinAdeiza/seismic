@@ -698,16 +698,6 @@ class GateTests(unittest.TestCase):
         raw = "0x" + hashlib.sha256(self.reth_genesis.read_bytes()).hexdigest()
         self.assertNotEqual(injected, raw)
 
-    def test_artifact_set_reassembles_stably(self):
-        # Re-assembly over the shipped artifact set re-injects the same
-        # storage: the same-name reth genesis write is stable.
-        assembled = self._assemble()
-        write_artifact_set(self.out_dir, assembled)
-        written = self.out_dir / "reth-genesis.json"
-        self.assertEqual(written.read_bytes(), assembled.reth_genesis_bytes)
-        again = self._assemble(reth_genesis=written)
-        self.assertEqual(again.reth_genesis_bytes, assembled.reth_genesis_bytes)
-
     def test_assemble_fills_template_hash(self):
         # eth_genesis_hash is derived from reth-genesis.json, not authored:
         # the computed hash gets prepended, and the filled copy is what the
@@ -764,21 +754,31 @@ class GateTests(unittest.TestCase):
 
     def test_init_then_assemble_shares_directory(self):
         # The `manifest init` → edit → `assemble --dir` loop: authored inputs
-        # and derived outputs coexist in one network directory.
+        # under inputs/, the derived artifact set at the top level.
         net = Path(self.tmp.name) / "networks" / "testnet-1"
+        inputs = net / "inputs"
         raw = Path(self.tmp.name) / "raw-measurements.json"
         raw.write_text(json.dumps({"measurements": {"4": {"expected": "ab" * 24}}}))
         init_network_dir(net, "testnet-1", self.reth_genesis, raw)
-        authored = (net / "summit-template.toml").read_bytes()
+        authored = (inputs / "summit-genesis-template.toml").read_bytes()
         assembled = self._assemble(
-            reth_genesis=net / "reth-genesis.json",
-            summit_template=net / "summit-template.toml",
+            reth_genesis=inputs / "reth-genesis.json",
+            summit_template=inputs / "summit-genesis-template.toml",
         )
         write_artifact_set(net, assembled)
-        # Authored input untouched; the shipped filled copy sits beside it;
-        # the same-name reth genesis write carries assemble's injected copy.
-        self.assertEqual((net / "summit-template.toml").read_bytes(), authored)
-        self.assertTrue((net / "summit-genesis-template.toml").exists())
+        # Authored inputs untouched; each same-basename artifact at the top
+        # level carries assemble's derived copy.
+        self.assertEqual(
+            (inputs / "summit-genesis-template.toml").read_bytes(), authored
+        )
+        self.assertEqual(
+            (inputs / "reth-genesis.json").read_bytes(),
+            self.reth_genesis.read_bytes(),
+        )
+        self.assertEqual(
+            (net / "summit-genesis-template.toml").read_bytes(),
+            assembled.summit_template_bytes,
+        )
         self.assertEqual(
             (net / "reth-genesis.json").read_bytes(), assembled.reth_genesis_bytes
         )
@@ -818,15 +818,21 @@ class InitTests(unittest.TestCase):
         written = init_network_dir(
             self.out, "testnet-1", self.reth_genesis, self.measurements
         )
+        inputs = self.out / "inputs"
+        self.assertEqual({p.parent for p in written}, {inputs})
         self.assertEqual(
             sorted(p.name for p in written),
-            ["measurements.json", "reth-genesis.json", "summit-template.toml"],
+            [
+                "measurements.json",
+                "reth-genesis.json",
+                "summit-genesis-template.toml",
+            ],
         )
         self.assertEqual(
-            (self.out / "reth-genesis.json").read_bytes(),
+            (inputs / "reth-genesis.json").read_bytes(),
             self.reth_genesis.read_bytes(),
         )
-        template = tomllib.loads((self.out / "summit-template.toml").read_text())
+        template = tomllib.loads((inputs / "summit-genesis-template.toml").read_text())
         self.assertEqual(template["namespace"], "testnet-1")
         self.assertNotIn("eth_genesis_hash", template)
         self.assertNotIn("validators", template)
@@ -838,7 +844,8 @@ class InitTests(unittest.TestCase):
             self.out, "testnet-1", self.reth_genesis, self.measurements, src
         )
         self.assertEqual(
-            (self.out / "summit-template.toml").read_bytes(), src.read_bytes()
+            (self.out / "inputs" / "summit-genesis-template.toml").read_bytes(),
+            src.read_bytes(),
         )
 
     def test_refuses_overwrite(self):
@@ -854,7 +861,7 @@ class InitTests(unittest.TestCase):
             self.measurements,
             measurement_id="img.vhd",
         )
-        stamped = json.loads((self.out / "measurements.json").read_bytes())
+        stamped = json.loads((self.out / "inputs" / "measurements.json").read_bytes())
         # assemble's promotion picks the id up from the file — no flag needed.
         self.assertEqual(stamped["measurement_id"], "img.vhd")
 
@@ -885,15 +892,16 @@ class DirCliTests(unittest.TestCase):
         args = manifest_mod._parse_args(["assemble", "networks/testnet-1"])
         self.assertEqual(args.name, "testnet-1")
         self.assertEqual(args.admission_bin, DEFAULT_ADMISSION_BIN)
+        # assemble reads the authored inputs under inputs/.
         self.assertEqual(
-            args.reth_genesis, Path("networks/testnet-1/reth-genesis.json")
-        )
-        # assemble reads the *authored* input template.
-        self.assertEqual(
-            args.summit_template, Path("networks/testnet-1/summit-template.toml")
+            args.reth_genesis, Path("networks/testnet-1/inputs/reth-genesis.json")
         )
         self.assertEqual(
-            args.measurements, Path("networks/testnet-1/measurements.json")
+            args.summit_template,
+            Path("networks/testnet-1/inputs/summit-genesis-template.toml"),
+        )
+        self.assertEqual(
+            args.measurements, Path("networks/testnet-1/inputs/measurements.json")
         )
         self.assertEqual(args.out, Path("networks/testnet-1"))
 

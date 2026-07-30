@@ -351,7 +351,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         metavar="FILE",
         help=(
-            "reth genesis JSON (chain spec) POSTed to every node; → "
+            "reth genesis JSON POSTed to every node; → "
             "[network].reth_genesis_base64. Default: reth-genesis.json "
             "beside --manifest (the artifact-set layout)."
         ),

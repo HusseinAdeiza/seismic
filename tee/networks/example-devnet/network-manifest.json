@@ -1,12 +1,12 @@
 {
   "eth": {
     "chain_id": 5124,
-    "genesis_hash": "0x874a74ba374da00d8c097b4be585a60e40f901cac56a764ad0013a07b0a2f93c"
+    "genesis_hash": "0x7c1c5d208fe9b8f1b4287c1cf1e696d466f89091c935d20dc661fa4333f68b6a"
   },
-  "genesis_nonce": "0xcf53cece6324a805c08120f54d6ae839b70cf0dc1f0b6646f94af43ea55d9aa4",
+  "genesis_nonce": "0x4fbed0378023e48392dc5cb8f8cb118bbd4d65309d013fe2bf3f69b61acabe0c",
   "manifest_version": 1,
   "measurements": {
-    "bootstrap_policy_hash": "0xbf19dfe3fc5ec80c4bc18d34b43f8226816df2dd784f9f9988c77ddb88868e24",
+    "bootstrap_policy_hash": "0x98ba9f24c6d8bc18e8ddb7bb4abea483b2365e58586b94ba4249a0a58f683882",
     "contracts": {
       "authority": "0x1000000000000000000000000000000000000002",
       "registry": "0x1000000000000000000000000000000000000001"
@@ -14,7 +14,7 @@
   },
   "name": "example-devnet",
   "summit": {
-    "genesis_template_hash": "0x52f99622625a1713bb013082bd35c93dffb06029ddbf23012870130118931ec6",
+    "genesis_template_hash": "0x7ce6a01783a163d1bcbacc0d761b6872958396e85c0f3c5db2500d0135f250f3",
     "namespace": "example-devnet"
   }
 }

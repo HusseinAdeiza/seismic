@@ -330,7 +330,7 @@ def up_main() -> None:
         f"     seismic-tee-network manifest init {net} \\\n"
         "       --reth-genesis <reth-genesis.json> \\\n"
         "       --measurements <measurements.json> --measurement-id <image.vhd>\n"
-        f"     # edit {net}/summit-template.toml, then:\n"
+        f"     # edit {net}/inputs/summit-genesis-template.toml, then:\n"
         f"     seismic-tee-network manifest assemble {net}\n"
         "2. Configure the cohort (re-run on every node reboot):\n"
         f"     seismic-tee-network configure --genesis {genesis_desc}"

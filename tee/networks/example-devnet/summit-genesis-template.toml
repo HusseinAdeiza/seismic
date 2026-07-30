@@ -1,4 +1,4 @@
-eth_genesis_hash = "0x874a74ba374da00d8c097b4be585a60e40f901cac56a764ad0013a07b0a2f93c"
+eth_genesis_hash = "0x7c1c5d208fe9b8f1b4287c1cf1e696d466f89091c935d20dc661fa4333f68b6a"
 validators = []
 # Summit network-params template — authored input for `manifest assemble`.
 # Review every value before founding a real network. Two fields are filled

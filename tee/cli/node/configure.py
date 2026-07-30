@@ -312,7 +312,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         metavar="FILE",
         help=(
-            "reth genesis JSON (chain spec) POSTed to the node as "
+            "reth genesis JSON POSTed to the node as "
             "[network].reth_genesis_base64; tdx-init writes it to "
             "/run/seismic/conf/reth-genesis.json for reth's --chain. Must be "
             "the file the manifest's eth.genesis_hash was computed from. "

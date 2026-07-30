@@ -10,18 +10,29 @@ https://github.com/SeismicSystems/enclave/tree/seismic/crates/network-manifest;
 the schema here must stay in lockstep with it since the fixture-vector test in
 tests/test_manifest.py pins both to the same bytes).
 
-Three artifacts are produced:
-- network-manifest.json    deploy-time facts; hashed into network_id
-- measurement-policy.json  Flashbots-compatible measurement allowlist,
-                           promoted from seismic-images' `make measure`
-                           output and committed to by the manifest via
-                           measurements.bootstrap_policy_hash
-- reth-genesis.json        the input genesis with the policy's compiled
-                           registry_genesis_storage injected into the
-                           registry account (committed genesis files are
-                           policy-free; the accepted admission IDs are a
-                           per-network fact), committed to via
-                           eth.genesis_hash
+A network directory holds the authored inputs under `inputs/` and the
+derived artifact set at the top level. Everything top-level is hash-pinned
+by the manifest; everything under `inputs/` is provenance:
+
+    inputs/reth-genesis.json             policy-free genesis
+    inputs/summit-genesis-template.toml  summit parameter choices
+    inputs/measurements.json             raw PCR map from `make measure`
+
+    network-manifest.json         deploy-time facts; SHA-256 = network_id
+    reth-genesis.json             the input genesis with the policy's
+                                  compiled registry_genesis_storage
+                                  injected into the registry account
+                                  (the accepted admission IDs are a
+                                  per-network fact); eth.genesis_hash
+    summit-genesis-template.toml  the input template with eth_genesis_hash
+                                  filled; summit.genesis_template_hash
+    measurement-policy.json       Flashbots-compatible measurement
+                                  allowlist promoted from the raw
+                                  measurements; bootstrap_policy_hash
+
+An input sharing its artifact's basename is the same format with derived
+fields filled in at assemble time; the raw measurements become
+measurement-policy.json because promotion is a format transformation.
 
 Usage (one directory per network: `init` gathers the authored inputs — the
 only command that takes loose files — then `assemble`/`validate` operate on
@@ -31,7 +42,7 @@ the directory):
         --reth-genesis dev.json \
         --measurements ../seismic-images/build/measurements.json \
         --measurement-id seismic_2026-06-11.abc123.vhd
-    # edit tee/networks/seismic-devnet-3/summit-template.toml, then:
+    # edit tee/networks/seismic-devnet-3/inputs/summit-genesis-template.toml:
     uv run python -m tee.cli.common.manifest assemble tee/networks/seismic-devnet-3
     uv run python -m tee.cli.common.manifest validate tee/networks/seismic-devnet-3
 """
@@ -88,15 +99,13 @@ MANIFEST_FILENAME = "network-manifest.json"
 POLICY_FILENAME = "measurement-policy.json"
 RETH_GENESIS_FILENAME = "reth-genesis.json"
 SUMMIT_TEMPLATE_FILENAME = "summit-genesis-template.toml"
+MEASUREMENTS_FILENAME = "measurements.json"
 
-# Authored-input filenames inside a network directory (`manifest init`).
-# Distinct from the shipped artifact-set names above so `assemble --dir`
-# never overwrites an authored input. reth-genesis.json is shared
-# deliberately: its artifact copy is the input with the compiled registry
-# genesis storage injected, and injection replaces the registry account's
-# storage wholesale, so the same-name write is stable under re-assembly.
-INPUT_SUMMIT_TEMPLATE_FILENAME = "summit-template.toml"
-INPUT_MEASUREMENTS_FILENAME = "measurements.json"
+# Authored inputs live under this subdir of a network directory: `manifest
+# init` scaffolds them there, `assemble --dir` reads them there, and the
+# derived artifact set is written to the top level — the shipped artifacts
+# and the inputs they were derived from never collide.
+INPUTS_DIRNAME = "inputs"
 
 # Cohort descriptors (`up --network` output) live under this subdir of a
 # network directory. Mutable infra state — regenerated per deploy, deleted by
@@ -351,7 +360,7 @@ def _genesis_hash_of_bytes(genesis_bytes: bytes, hash_fn: Callable[[Path], str])
 def reth_genesis_hash(reth_genesis: Path, reth_bin: str = "seismic-reth") -> str:
     """Compute eth_genesis_hash offline via `seismic-reth genesis-hash`.
 
-    Same chain-spec parse path as `seismic-reth node --chain <file>`, so the
+    Same genesis parse path as `seismic-reth node --chain <file>`, so the
     result is exactly the genesis hash a node booted from this file computes.
     """
     cmd = [reth_bin, "genesis-hash", "--chain", str(reth_genesis)]
@@ -876,37 +885,39 @@ def init_network_dir(
     summit_template: Path | None = None,
     measurement_id: str | None = None,
 ) -> list[Path]:
-    """Scaffold a network directory's three authored inputs.
+    """Scaffold a network directory's three authored inputs under inputs/.
 
-    Copies the chain spec and measurements in (stamping measurement_id into
+    Copies the genesis and measurements in (stamping measurement_id into
     the latter when given), and writes a starter summit template
     (namespace = name) unless one is supplied to copy. The founder edits
     these in place, then `assemble --dir` derives the artifact set into the
-    same directory — inputs and the committed outputs live together, so the
-    directory is the whole network (commit it for networks that matter).
+    directory's top level — inputs and the committed artifacts live
+    together, so the directory is the whole network (commit it for networks
+    that matter).
     """
     measurements_bytes = measurements.read_bytes()
     if measurement_id is not None:
         measurements_bytes = stamp_measurement_id(measurements_bytes, measurement_id)
     contents = {
         RETH_GENESIS_FILENAME: reth_genesis.read_bytes(),
-        INPUT_MEASUREMENTS_FILENAME: measurements_bytes,
-        INPUT_SUMMIT_TEMPLATE_FILENAME: (
+        MEASUREMENTS_FILENAME: measurements_bytes,
+        SUMMIT_TEMPLATE_FILENAME: (
             summit_template.read_bytes()
             if summit_template is not None
             else starter_summit_template(name).encode()
         ),
     }
-    existing = [n for n in contents if (out_dir / n).exists()]
+    inputs_dir = out_dir / INPUTS_DIRNAME
+    existing = [n for n in contents if (inputs_dir / n).exists()]
     if existing:
         raise GateError(
-            f"refusing to overwrite existing input(s) in {out_dir}: "
+            f"refusing to overwrite existing input(s) in {inputs_dir}: "
             f"{', '.join(existing)}"
         )
-    out_dir.mkdir(parents=True, exist_ok=True)
+    inputs_dir.mkdir(parents=True, exist_ok=True)
     written = []
     for filename, data in contents.items():
-        path = out_dir / filename
+        path = inputs_dir / filename
         path.write_bytes(data)
         written.append(path)
     return written
@@ -1000,16 +1011,17 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--reth-genesis",
         type=Path,
         required=True,
-        help=f"chain spec, copied in as {RETH_GENESIS_FILENAME}. Required: "
-        "an external fact (chain state + contract alloc) init cannot invent",
+        help="reth genesis, copied in as "
+        f"{INPUTS_DIRNAME}/{RETH_GENESIS_FILENAME}. Required: an external "
+        "fact (chain state + contract alloc) init cannot invent",
     )
     ini.add_argument(
         "--measurements",
         type=Path,
         required=True,
         help="seismic-images make-measure output (or promoted policy), "
-        f"copied in as {INPUT_MEASUREMENTS_FILENAME}. Required: the PCRs of "
-        "a real published image, never generated",
+        f"copied in as {INPUTS_DIRNAME}/{MEASUREMENTS_FILENAME}. Required: "
+        "the PCRs of a real published image, never generated",
     )
     ini.add_argument(
         "--summit-template",
@@ -1023,8 +1035,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--measurement-id",
         default=None,
         help="image artifact filename the measurements belong to; stamped "
-        f"into {INPUT_MEASUREMENTS_FILENAME} so assemble needs no "
-        "--measurement-id",
+        f"into {INPUTS_DIRNAME}/{MEASUREMENTS_FILENAME} so assemble needs "
+        "no --measurement-id",
     )
 
     asm = sub.add_parser(
@@ -1034,15 +1046,16 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     asm.add_argument(
         "dir",
         type=Path,
-        help="network directory from `manifest init`: reads its "
-        f"{RETH_GENESIS_FILENAME} / {INPUT_SUMMIT_TEMPLATE_FILENAME} / "
-        f"{INPUT_MEASUREMENTS_FILENAME}, takes the network name from its "
-        "basename, and writes the artifact set beside them",
+        help=f"network directory from `manifest init`: reads its "
+        f"{INPUTS_DIRNAME}/ ({RETH_GENESIS_FILENAME}, "
+        f"{SUMMIT_TEMPLATE_FILENAME}, {MEASUREMENTS_FILENAME}), takes the "
+        "network name from its basename, and writes the artifact set at "
+        "the top level",
     )
     asm.add_argument(
         "--measurement-id",
         help="policy record id (image artifact filename); overrides the one "
-        f"init stamped into {INPUT_MEASUREMENTS_FILENAME}",
+        f"init stamped into {INPUTS_DIRNAME}/{MEASUREMENTS_FILENAME}",
     )
     asm.add_argument("--attestation-type", default=DEFAULT_ATTESTATION_TYPE)
     asm.add_argument(
@@ -1081,9 +1094,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         args.name = args.name or args.dir.resolve().name
     elif args.command == "assemble":
         args.name = args.dir.resolve().name
-        args.reth_genesis = args.dir / RETH_GENESIS_FILENAME
-        args.summit_template = args.dir / INPUT_SUMMIT_TEMPLATE_FILENAME
-        args.measurements = args.dir / INPUT_MEASUREMENTS_FILENAME
+        inputs_dir = args.dir / INPUTS_DIRNAME
+        args.reth_genesis = inputs_dir / RETH_GENESIS_FILENAME
+        args.summit_template = inputs_dir / SUMMIT_TEMPLATE_FILENAME
+        args.measurements = inputs_dir / MEASUREMENTS_FILENAME
         args.out = args.dir
     elif args.command == "validate":
         args.manifest = args.dir / MANIFEST_FILENAME
@@ -1115,10 +1129,22 @@ def main() -> None:
             )
             print(
                 f"Scaffolded {args.dir}. Edit the inputs (at minimum review "
-                f"{INPUT_SUMMIT_TEMPLATE_FILENAME}), then:\n"
+                f"{INPUTS_DIRNAME}/{SUMMIT_TEMPLATE_FILENAME}), then:\n"
                 f"  seismic-tee-network manifest assemble {args.dir}{id_hint}"
             )
         elif args.command == "assemble":
+            missing = [
+                p
+                for p in (args.reth_genesis, args.summit_template, args.measurements)
+                if not p.exists()
+            ]
+            if missing:
+                raise GateError(
+                    "missing authored input(s): "
+                    + ", ".join(str(p) for p in missing)
+                    + f" — authored inputs live under {INPUTS_DIRNAME}/; "
+                    "scaffold them with `manifest init`"
+                )
             policy_bytes = promote_measurements(
                 args.measurements.read_bytes(),
                 args.measurement_id,
