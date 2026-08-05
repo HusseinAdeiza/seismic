@@ -5,14 +5,11 @@ Run with:
 """
 
 import hashlib
-import http.client
 import json
 import shutil
 import tempfile
 import tomllib
 import unittest
-import urllib.error
-import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -104,38 +101,15 @@ FIXTURE_NETWORK_ID = (
     "0x8ef142e3f2bf15f8b201c4d8cda7848a9e846222c62b5615d4d36c7fccd98a24"
 )
 
-# The node-side parser pins these exact bytes in the enclave repo. Fetch its
-# fixture from GitHub (the `seismic` branch) rather than assuming a sibling
-# checkout on disk, so the cross-repo byte-parity check runs in CI too. The
-# network_id value is also pinned offline by
-# test_render_matches_enclave_network_id_vector, so this only adds a live drift
-# guard; it skips when GitHub is unreachable.
-ENCLAVE_FIXTURE_URL = (
-    "https://raw.githubusercontent.com/SeismicSystems/enclave/seismic/"
-    "crates/network-manifest/fixtures/network-manifest-v1.json"
-)
-
-
-def _fetch_enclave_fixture() -> bytes:
-    with urllib.request.urlopen(ENCLAVE_FIXTURE_URL, timeout=10) as resp:
-        return resp.read()
+# The node-side parser pins the fixture's exact bytes in the enclave repo;
+# the live byte-parity check against it lives in live_test_manifest.py
+# (network-required, `make test-live`).
 
 
 class RenderTests(unittest.TestCase):
     def test_render_matches_enclave_network_id_vector(self):
         rendered = render_manifest(FIXTURE_MANIFEST)
         self.assertEqual(compute_network_id(rendered), FIXTURE_NETWORK_ID)
-
-    def test_render_matches_enclave_fixture_bytes(self):
-        try:
-            fixture = _fetch_enclave_fixture()
-        except urllib.error.HTTPError:
-            # A 4xx/5xx means the fixture moved or the ref is gone — a real
-            # drift signal, not flaky network, so fail loudly.
-            raise
-        except (urllib.error.URLError, TimeoutError) as e:
-            self.skipTest(f"enclave fixture unreachable: {e}")
-        self.assertEqual(render_manifest(FIXTURE_MANIFEST), fixture)
 
     def test_render_is_deterministic_under_key_order(self):
         shuffled = dict(reversed(list(FIXTURE_MANIFEST.items())))
@@ -438,42 +412,9 @@ class InjectTests(unittest.TestCase):
                 inject_registry_genesis_storage(genesis, self.REGISTRY, report)
 
 
-class RuntimeCodeDriftTests(unittest.TestCase):
-    """Cross-repo drift guard for the registry runtime-code pin.
-
-    The admission CLI pins keccak256 of the canonical MeasurementRegistry
-    deployed bytecode; the gates enforce that pin against the genesis alloc,
-    so a stale pin already fails assembly loudly. This test is the early
-    warning: the pin reported by the binary on PATH must match the artifact
-    the reth genesis builder installs. Online-only, like the
-    manifest-fixture byte-parity test.
-    """
-
-    REGISTRY_ARTIFACT_URL = (
-        "https://raw.githubusercontent.com/SeismicSystems/seismic/main/"
-        "contracts/artifacts/MeasurementRegistry.json"
-    )
-
-    def _fetch(self, url: str) -> bytes:
-        try:
-            with urllib.request.urlopen(url, timeout=10) as resp:
-                return resp.read()
-        except urllib.error.HTTPError:
-            # A 4xx/5xx means the artifact moved — a real drift signal,
-            # not flaky network, so fail loudly.
-            raise
-        except (urllib.error.URLError, TimeoutError, http.client.HTTPException) as e:
-            self.skipTest(f"cross-repo artifact unreachable: {e}")
-
-    @unittest.skipUnless(ADMISSION_BIN, "seismic-measurement-admission not in PATH")
-    def test_admission_crate_pins_current_registry_runtime(self):
-        report = compile_measurement_policy(promoted_policy_bytes())
-        artifact = json.loads(self._fetch(self.REGISTRY_ARTIFACT_URL))
-        runtime = artifact["deployedBytecode"]["object"].removeprefix("0x")
-        self.assertEqual(
-            report["registry_runtime_code_hash"],
-            "0x" + keccak(bytes.fromhex(runtime)).hex(),
-        )
+# The registry runtime-code drift guard (admission binary's pin vs the
+# monorepo's MeasurementRegistry artifact) lives in live_test_manifest.py
+# (network-required, `make test-live`).
 
 
 class GateTests(unittest.TestCase):
