@@ -4,7 +4,6 @@ Run with:
     uv run python -m unittest discover -s tee/tests -v
 """
 
-import hashlib
 import json
 import tempfile
 import unittest
@@ -25,11 +24,11 @@ class ParseArgsTests(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.n1 = self._file("n1.json")
         self.n2 = self._file("n2.json")
-        self.template = self._file("template.toml")
+        self.summit_genesis = self._file("genesis.toml")
         self.manifest = self._file("manifest.json")
         self.common = [
-            "--summit-template",
-            str(self.template),
+            "--summit-genesis",
+            str(self.summit_genesis),
             "--manifest",
             str(self.manifest),
         ]
@@ -81,16 +80,16 @@ class ParseArgsTests(unittest.TestCase):
             genesis._parse_args(list(self.common))
         self.assertIn("--node", str(ctx.exception))
 
-    def test_summit_template_defaults_to_manifest_sibling(self):
-        # The artifact-set layout `manifest assemble --out` writes.
-        sibling = Path(self._tmp.name) / "summit-genesis-template.toml"
+    def test_summit_genesis_defaults_to_manifest_sibling(self):
+        # The artifact-set layout `manifest assemble` writes.
+        sibling = Path(self._tmp.name) / "summit-genesis.toml"
         sibling.write_text("")
         args = genesis._parse_args(
             ["--node", str(self.n1), "--manifest", str(self.manifest)]
         )
-        self.assertEqual(args.summit_template, sibling)
+        self.assertEqual(args.summit_genesis, sibling)
 
-    def test_missing_default_template_errors_with_hint(self):
+    def test_missing_default_genesis_errors_with_hint(self):
         with self.assertRaises(SystemExit) as ctx:
             genesis._parse_args(
                 ["--node", str(self.n1), "--manifest", str(self.manifest)]
@@ -98,33 +97,61 @@ class ParseArgsTests(unittest.TestCase):
         self.assertIn("beside --manifest", str(ctx.exception))
 
 
-class TemplateCommitmentTests(unittest.TestCase):
-    """The ceremony must build genesis.toml only from the template the
+class GenesisCommitmentTests(unittest.TestCase):
+    """The ceremony must build genesis.toml only from the summit genesis the
     manifest commits to — the eth hash, namespace, timeouts, and stake
-    bounds all flow into genesis.toml as-is."""
+    bounds all flow into the built genesis.toml as-is. The digest shell-out
+    is mocked: `summit genesis digest` semantics are summit's own tests'
+    job; these cover the compare-and-refuse."""
+
+    DIGEST = "0x" + "ab" * 32
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
-        self.template = Path(self._tmp.name) / "summit-genesis-template.toml"
-        self.template.write_text('namespace = "testnet-1"\n')
+        self.summit_genesis = Path(self._tmp.name) / "summit-genesis.toml"
+        self.summit_genesis.write_text('namespace = "testnet-1"\n')
 
-    def _manifest_committing_to(self, data: bytes) -> dict:
-        return {
-            "summit": {"genesis_template_hash": "0x" + hashlib.sha256(data).hexdigest()}
-        }
+    def _manifest_committing_to(self, digest: str) -> dict:
+        return {"summit": {"genesis_config_digest": digest}}
 
-    def test_committed_template_passes(self):
-        genesis._verify_template_commitment(
-            self.template, self._manifest_committing_to(self.template.read_bytes())
+    def _digest_returning(self, value):
+        return mock.patch.object(
+            genesis.manifest_mod, "summit_config_digest", return_value=value
         )
 
-    def test_uncommitted_template_exits(self):
-        with self.assertRaises(SystemExit) as ctx:
-            genesis._verify_template_commitment(
-                self.template, self._manifest_committing_to(b"other bytes")
+    def test_committed_genesis_passes(self):
+        with self._digest_returning(self.DIGEST) as digest:
+            genesis._verify_genesis_commitment(
+                self.summit_genesis,
+                self._manifest_committing_to(self.DIGEST),
+                "summit",
             )
-        self.assertIn("genesis_template_hash", str(ctx.exception))
+        digest.assert_called_once_with(self.summit_genesis, "summit")
+
+    def test_uncommitted_genesis_exits(self):
+        with self._digest_returning(self.DIGEST):
+            with self.assertRaises(SystemExit) as ctx:
+                genesis._verify_genesis_commitment(
+                    self.summit_genesis,
+                    self._manifest_committing_to("0x" + "cd" * 32),
+                    "summit",
+                )
+        self.assertIn("genesis_config_digest", str(ctx.exception))
+
+    def test_digest_failure_exits_with_the_tool_error(self):
+        with mock.patch.object(
+            genesis.manifest_mod,
+            "summit_config_digest",
+            side_effect=genesis.manifest_mod.GateError("'summit' not found"),
+        ):
+            with self.assertRaises(SystemExit) as ctx:
+                genesis._verify_genesis_commitment(
+                    self.summit_genesis,
+                    self._manifest_committing_to(self.DIGEST),
+                    "summit",
+                )
+        self.assertIn("not found", str(ctx.exception))
 
 
 class AssertCohortGenesisHashTests(unittest.TestCase):

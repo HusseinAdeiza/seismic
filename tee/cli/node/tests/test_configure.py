@@ -18,6 +18,7 @@ from tee.cli.common.tests.test_manifest import FIXTURE_MANIFEST
 from tee.cli.node.configure import (
     build_config,
     resolve_reth_genesis,
+    resolve_summit_genesis,
 )
 
 FQDN = "node1.example.com"
@@ -43,6 +44,11 @@ class BuildConfigTests(unittest.TestCase):
             ".json", json.dumps({"config": {"chainId": 5124}, "alloc": {}})
         )
         self._tmp.append(self.reth_genesis)
+        # namespace matches FIXTURE_MANIFEST's summit.namespace.
+        self.summit_genesis = _write(
+            ".toml", 'namespace = "seismic-devnet-3"\nvalidators = []\n'
+        )
+        self._tmp.append(self.summit_genesis)
 
     def tearDown(self):
         for p in self._tmp:
@@ -60,6 +66,7 @@ class BuildConfigTests(unittest.TestCase):
             EMAIL,
             genesis_node=genesis_node,
             reth_genesis_path=self.reth_genesis,
+            summit_genesis_path=self.summit_genesis,
             external_ip=EXTERNAL_IP,
             bootnodes=bootnodes or [],
         )
@@ -80,6 +87,7 @@ class BuildConfigTests(unittest.TestCase):
         self.assertEqual(merged["node"]["domain"]["email"], EMAIL)
         self.assertTrue(merged["network"]["manifest_base64"])
         self.assertTrue(merged["network"]["reth_genesis_base64"])
+        self.assertTrue(merged["network"]["summit_genesis_base64"])
         self.assertEqual(merged["network"]["bootnodes"], [])
 
     def test_join_mode(self):
@@ -91,6 +99,7 @@ class BuildConfigTests(unittest.TestCase):
         self.assertEqual(merged["node"]["domain"]["name"], FQDN)
         self.assertTrue(merged["network"]["manifest_base64"])
         self.assertTrue(merged["network"]["reth_genesis_base64"])
+        self.assertTrue(merged["network"]["summit_genesis_base64"])
         self.assertEqual(merged["network"]["bootnodes"], [BOOTNODE])
 
     def test_bootnodes_populated(self):
@@ -112,6 +121,7 @@ class BuildConfigTests(unittest.TestCase):
                 EMAIL,
                 genesis_node=True,
                 reth_genesis_path=self.reth_genesis,
+                summit_genesis_path=self.summit_genesis,
                 external_ip="",
                 bootnodes=[],
             )
@@ -132,6 +142,7 @@ class BuildConfigTests(unittest.TestCase):
                 EMAIL,
                 genesis_node=True,
                 reth_genesis_path=self.reth_genesis,
+                summit_genesis_path=self.summit_genesis,
                 external_ip=EXTERNAL_IP,
                 bootnodes=[],
             )
@@ -148,6 +159,24 @@ class BuildConfigTests(unittest.TestCase):
                 EMAIL,
                 genesis_node=True,
                 reth_genesis_path=wrong,
+                summit_genesis_path=self.summit_genesis,
+                external_ip=EXTERNAL_IP,
+                bootnodes=[],
+            )
+
+    def test_rejects_summit_namespace_mismatch(self):
+        # A summit genesis other than the one the manifest was assembled from
+        # must fail the POST build (tdx-init would 400 on it anyway).
+        wrong = _write(".toml", 'namespace = "other-net"\n')
+        self._tmp.append(wrong)
+        with self.assertRaises(SystemExit):
+            build_config(
+                self.manifest,
+                FQDN,
+                EMAIL,
+                genesis_node=True,
+                reth_genesis_path=self.reth_genesis,
+                summit_genesis_path=wrong,
                 external_ip=EXTERNAL_IP,
                 bootnodes=[],
             )
@@ -174,6 +203,22 @@ class ResolveRethGenesisTests(unittest.TestCase):
             manifest = Path(d) / "network-manifest.json"
             with self.assertRaises(SystemExit):
                 resolve_reth_genesis(None, manifest)
+
+
+class ResolveSummitGenesisTests(unittest.TestCase):
+    def test_defaults_to_manifest_sibling(self):
+        # The artifact-set layout `manifest assemble` writes.
+        with tempfile.TemporaryDirectory() as d:
+            manifest = Path(d) / "network-manifest.json"
+            sibling = Path(d) / "summit-genesis.toml"
+            sibling.write_text("")
+            self.assertEqual(resolve_summit_genesis(None, manifest), sibling)
+
+    def test_missing_default_errors(self):
+        with tempfile.TemporaryDirectory() as d:
+            manifest = Path(d) / "network-manifest.json"
+            with self.assertRaises(SystemExit):
+                resolve_summit_genesis(None, manifest)
 
 
 if __name__ == "__main__":

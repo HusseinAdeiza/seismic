@@ -100,7 +100,7 @@ class GreenfieldBootstrapTests(unittest.TestCase):
             ),
         ):
             results = cohort_configure._bootstrap_greenfield(
-                nodes, Path("m.json"), Path("g.json"), "e@x"
+                nodes, Path("m.json"), Path("g.json"), Path("s.toml"), "e@x"
             )
 
         self.assertEqual(results, {"node-1": True, "node-2": True})
@@ -122,7 +122,7 @@ class GreenfieldBootstrapTests(unittest.TestCase):
             ) as collect,
         ):
             results = cohort_configure._bootstrap_greenfield(
-                nodes, Path("m.json"), Path("g.json"), "e@x"
+                nodes, Path("m.json"), Path("g.json"), Path("s.toml"), "e@x"
             )
 
         collect.assert_not_called()  # never reached the enode fetch

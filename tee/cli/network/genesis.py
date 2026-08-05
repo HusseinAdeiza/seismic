@@ -1,10 +1,11 @@
 """Genesis ceremony (network creation, one-time).
 
-Gathers every cohort node's summit pubkeys, builds one `genesis.toml`
-for the whole initial validator set, and POSTs it back to each node's
-summit. This is run *once*, by whoever brings a network up — a validator
-joining an already-bootstrapped network never runs it (it joins via the
-deposit contract + sync, and is configured with `genesis_node = false`).
+Gathers every cohort node's summit pubkeys, fills them into the network's
+shipped summit genesis (`summit genesis set-validators`), and POSTs the
+result back to each node's summit. This is run *once*, by whoever brings a
+network up — a validator joining an already-bootstrapped network never runs
+it (it joins via the deposit contract + sync, and is configured with
+`genesis_node = false`).
 
 `eth_genesis_hash` comes from the network manifest (`--manifest`), where
 `manifest assemble` pinned it at deploy time — the ceremony needs no
@@ -23,7 +24,6 @@ so this never calls Pulumi.
 """
 
 import argparse
-import hashlib
 import json
 import shutil
 import subprocess
@@ -93,17 +93,16 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--summit-template",
+        "--summit-genesis",
         type=Path,
         default=None,
         metavar="FILE",
         help=(
-            "Summit genesis template TOML (network-params without "
-            "[[validators]]) the `genesis` binary fills validators into. Must "
-            "be the copy the manifest commits to (summit.genesis_template_"
-            "hash) — verified before building. Default: summit-genesis-"
-            "template.toml beside --manifest (the artifact-set layout "
-            "`manifest assemble --out` produces)."
+            "Summit genesis TOML `summit genesis set-validators` fills the "
+            "cohort's validator set into. Must be the copy the manifest "
+            "commits to (summit.genesis_config_digest) — verified before "
+            "building. Default: summit-genesis.toml beside --manifest (the "
+            "artifact-set layout `manifest assemble` produces)."
         ),
     )
     parser.add_argument(
@@ -145,19 +144,19 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     for path in args.node:
         if not path.is_file():
             raise SystemExit(f"--node descriptor not found: {path}")
-    defaulted = args.summit_template is None
+    defaulted = args.summit_genesis is None
     if defaulted:
-        args.summit_template = (
-            args.manifest.parent / manifest_mod.SUMMIT_TEMPLATE_FILENAME
+        args.summit_genesis = (
+            args.manifest.parent / manifest_mod.SUMMIT_GENESIS_FILENAME
         )
-    if not args.summit_template.is_file():
+    if not args.summit_genesis.is_file():
         hint = (
-            " (the default is summit-genesis-template.toml beside --manifest; "
-            "pass --summit-template if it lives elsewhere)"
+            " (the default is summit-genesis.toml beside --manifest; "
+            "pass --summit-genesis if it lives elsewhere)"
             if defaulted
             else ""
         )
-        raise SystemExit(f"--summit-template not found: {args.summit_template}{hint}")
+        raise SystemExit(f"--summit-genesis not found: {args.summit_genesis}{hint}")
     return args
 
 
@@ -237,25 +236,29 @@ def _get_pubkeys(
     return validators, node_clients
 
 
-def _verify_template_commitment(template_path: Path, manifest: dict) -> None:
-    """Assert the template is the one the manifest commits to
-    (summit.genesis_template_hash).
+def _verify_genesis_commitment(
+    summit_genesis: Path, manifest: dict, summit_bin: str
+) -> None:
+    """Assert the summit genesis is the one the manifest commits to
+    (summit.genesis_config_digest, via `summit genesis digest`).
 
-    Everything in the template (eth_genesis_hash, namespace, timeouts,
-    stake bounds) flows into genesis.toml as-is, so building from
-    uncommitted bytes would start the chain on parameters the manifest
-    never pinned.
+    Everything in it (eth_genesis_hash, namespace, timeouts, stake bounds)
+    flows into the built genesis.toml as-is, so building from uncommitted
+    bytes would start the chain on parameters the manifest never pinned.
     """
-    computed = "0x" + hashlib.sha256(template_path.read_bytes()).hexdigest()
-    committed = manifest["summit"]["genesis_template_hash"]
+    try:
+        computed = manifest_mod.summit_config_digest(summit_genesis, summit_bin)
+    except manifest_mod.GateError as e:
+        raise SystemExit(f"--summit-genesis {summit_genesis}: {e}") from None
+    committed = manifest["summit"]["genesis_config_digest"]
     if computed != committed.lower():
         raise SystemExit(
-            f"--summit-template {template_path} is not the template the "
-            "manifest commits to (summit.genesis_template_hash); refusing to "
+            f"--summit-genesis {summit_genesis} is not the genesis the "
+            "manifest commits to (summit.genesis_config_digest); refusing to "
             "build genesis.toml:\n"
             f"    committed: {committed}\n"
             f"    computed:  {computed}\n"
-            "Use the artifact-set copy written by `manifest assemble --out` "
+            "Use the artifact-set copy written by `manifest assemble` "
             "(the default when it sits beside --manifest)."
         )
 
@@ -414,22 +417,21 @@ def _assert_cohort_genesis_hash(
 def main():
     args = _parse_args()
 
-    # `genesis` is summit's binary; expect it on PATH (build summit and symlink
-    # its target/debug/genesis onto PATH, the same way summit expects `reth`).
-    # Fail with a clear message instead of a subprocess FileNotFoundError.
-    genesis_bin = shutil.which("genesis")
-    if genesis_bin is None:
+    # The `genesis set-validators` / `genesis digest` subcommands live on
+    # summit's node binary; expect it on PATH. Fail with a clear message
+    # instead of a subprocess FileNotFoundError.
+    summit_bin = shutil.which(manifest_mod.DEFAULT_SUMMIT_BIN)
+    if summit_bin is None:
         raise SystemExit(
-            "`genesis` binary not found on PATH. Build summit and put its "
-            "`genesis` binary on PATH, e.g. "
-            "`ln -s <summit>/target/debug/genesis ~/.cargo/bin/genesis`."
+            "`summit` binary not found on PATH. Build summit and put it on "
+            "PATH, e.g. `ln -s <summit>/target/debug/summit ~/.cargo/bin/summit`."
         )
 
     try:
         manifest = manifest_mod.validate_manifest_schema(args.manifest.read_bytes())
     except manifest_mod.ManifestSchemaError as e:
         raise SystemExit(f"--manifest {args.manifest}: invalid manifest: {e}") from None
-    _verify_template_commitment(args.summit_template, manifest)
+    _verify_genesis_commitment(args.summit_genesis, manifest, summit_bin)
     genesis_hash = manifest["eth"]["genesis_hash"]
 
     print(f"Expecting eth_genesis_hash = {genesis_hash}")
@@ -454,22 +456,24 @@ def main():
         json.dump(validators, f, indent=2)
 
     # Output streams to the terminal (check=True raises on failure).
+    genesis_path = Path(f"{tmpdir}/genesis.toml")
     subprocess.run(
         [
-            genesis_bin,
-            "-o",
-            tmpdir,
+            summit_bin,
+            "genesis",
+            "set-validators",
             "-i",
-            str(args.summit_template),
+            str(args.summit_genesis),
             "-v",
             tmp_validators,
+            "-o",
+            str(genesis_path),
         ],
         check=True,
     )
 
     # Log the built genesis's path (not its contents) before delivery, mirroring
     # how `configure` logs the merged node config it POSTs.
-    genesis_path = Path(f"{tmpdir}/genesis.toml")
     print(f"Built genesis -> {genesis_path}")
 
     for _, client in node_clients:

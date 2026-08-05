@@ -15,7 +15,7 @@ derived artifact set at the top level. Everything top-level is hash-pinned
 by the manifest; everything under `inputs/` is provenance:
 
     inputs/reth-genesis.json             policy-free genesis
-    inputs/summit-genesis-template.toml  summit parameter choices
+    inputs/summit-genesis.toml           summit parameter choices
     inputs/measurements.json             raw PCR map from `make measure`
 
     network-manifest.json         deploy-time facts; SHA-256 = network_id
@@ -24,15 +24,17 @@ by the manifest; everything under `inputs/` is provenance:
                                   injected into the registry account
                                   (the accepted admission IDs are a
                                   per-network fact); eth.genesis_hash
-    summit-genesis-template.toml  the input template with eth_genesis_hash
-                                  filled; summit.genesis_template_hash
+    summit-genesis.toml           the complete summit genesis every node
+                                  boots from: the input with
+                                  eth_genesis_hash filled and a validators
+                                  set; summit.genesis_config_digest
     measurement-policy.json       Flashbots-compatible measurement
                                   allowlist promoted from the raw
                                   measurements; bootstrap_policy_hash
 
-An input sharing its artifact's basename is the same format with derived
-fields filled in at assemble time; the raw measurements become
-measurement-policy.json because promotion is a format transformation.
+Each artifact is its input with derived fields filled in at assemble time;
+the raw measurements become measurement-policy.json because promotion is a
+format transformation.
 
 Usage (one directory per network: `init` gathers the authored inputs — the
 only command that takes loose files — then `assemble`/`validate` operate on
@@ -42,7 +44,7 @@ the directory):
         --reth-genesis dev.json \
         --measurements ../seismic-images/build/measurements.json \
         --measurement-id seismic_2026-06-11.abc123.vhd
-    # edit tee/networks/seismic-devnet-3/inputs/summit-genesis-template.toml:
+    # edit tee/networks/seismic-devnet-3/inputs/summit-genesis.toml:
     uv run python -m tee.cli.common.manifest assemble tee/networks/seismic-devnet-3
     uv run python -m tee.cli.common.manifest validate tee/networks/seismic-devnet-3
 """
@@ -53,7 +55,6 @@ import hashlib
 import json
 import logging
 import re
-import secrets
 import subprocess
 import sys
 import tempfile
@@ -90,6 +91,14 @@ DEFAULT_ATTESTATION_TYPE = "azure-tdx"
 # a second one in Python.
 DEFAULT_ADMISSION_BIN = "seismic-measurement-admission"
 
+# Summit's node binary; its `genesis digest` subcommand computes
+# summit.genesis_config_digest. The digest is SHA-256 over summit's
+# domain-prefixed SSZ serialization of the complete genesis — summit's own
+# definition of chain identity (its P2P and signing domains derive from it) —
+# so deploy shells out to the one implementation instead of mirroring the
+# SSZ layout in Python.
+DEFAULT_SUMMIT_BIN = "summit"
+
 # Today's hardcoded summit BLS domain separator.
 # two chains sharing it can cross-replay BLS signatures.
 # TODO: make it configurable
@@ -98,7 +107,10 @@ _SUMMIT_DEFAULT_NAMESPACE = "_SUMMIT"
 MANIFEST_FILENAME = "network-manifest.json"
 POLICY_FILENAME = "measurement-policy.json"
 RETH_GENESIS_FILENAME = "reth-genesis.json"
-SUMMIT_TEMPLATE_FILENAME = "summit-genesis-template.toml"
+# Both the authored input (under inputs/) and the shipped artifact (at the
+# network directory top level) use this basename: same format, the
+# artifact being the input with the derived fields filled in.
+SUMMIT_GENESIS_FILENAME = "summit-genesis.toml"
 MEASUREMENTS_FILENAME = "measurements.json"
 
 # Authored inputs live under this subdir of a network directory: `manifest
@@ -197,7 +209,6 @@ def validate_manifest_schema(manifest_bytes: bytes) -> dict[str, Any]:
         {
             "manifest_version",
             "name",
-            "genesis_nonce",
             "eth",
             "summit",
             "measurements",
@@ -206,7 +217,6 @@ def validate_manifest_schema(manifest_bytes: bytes) -> dict[str, Any]:
     )
     if not isinstance(obj["name"], str):
         raise ManifestSchemaError(f"name: expected string, got {obj['name']!r}")
-    _check_hex(obj["genesis_nonce"], 32, "genesis_nonce")
 
     eth = obj["eth"]
     if not isinstance(eth, dict):
@@ -222,8 +232,8 @@ def validate_manifest_schema(manifest_bytes: bytes) -> dict[str, Any]:
     summit = obj["summit"]
     if not isinstance(summit, dict):
         raise ManifestSchemaError("summit: expected object")
-    _check_keys(summit, {"genesis_template_hash", "namespace"}, "summit")
-    _check_hex(summit["genesis_template_hash"], 32, "summit.genesis_template_hash")
+    _check_keys(summit, {"genesis_config_digest", "namespace"}, "summit")
+    _check_hex(summit["genesis_config_digest"], 32, "summit.genesis_config_digest")
     if not isinstance(summit["namespace"], str):
         raise ManifestSchemaError(
             f"summit.namespace: expected string, got {summit['namespace']!r}"
@@ -348,11 +358,12 @@ def inject_registry_genesis_storage(
     return (json.dumps(genesis, indent=2) + "\n").encode("utf-8")
 
 
-def _genesis_hash_of_bytes(genesis_bytes: bytes, hash_fn: Callable[[Path], str]) -> str:
-    """Hash a genesis that exists only as bytes (assemble's injected copy):
-    materialize it for the path-based `seismic-reth genesis-hash` shell-out."""
-    with tempfile.NamedTemporaryFile(suffix=".json") as tf:
-        tf.write(genesis_bytes)
+def _hash_of_bytes(data: bytes, hash_fn: Callable[[Path], str], suffix: str) -> str:
+    """Hash an artifact that exists only as bytes (assemble's derived copies):
+    materialize it for the path-based shell-outs (`seismic-reth genesis-hash`,
+    `summit genesis digest`)."""
+    with tempfile.NamedTemporaryFile(suffix=suffix) as tf:
+        tf.write(data)
         tf.flush()
         return hash_fn(Path(tf.name))
 
@@ -382,6 +393,34 @@ def reth_genesis_hash(reth_genesis: Path, reth_bin: str = "seismic-reth") -> str
     return out.lower()
 
 
+def summit_config_digest(
+    summit_genesis: Path, summit_bin: str = DEFAULT_SUMMIT_BIN
+) -> str:
+    """Compute summit.genesis_config_digest offline via `summit genesis digest`.
+
+    The file is loaded down the same parse path a starting validator takes, so
+    a successful digest doubles as a verdict that the genesis is well formed:
+    anything this accepts a validator accepts.
+    """
+    cmd = [summit_bin, "genesis", "digest", str(summit_genesis)]
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=120, check=True
+        )
+    except FileNotFoundError:
+        raise GateError(
+            f"{summit_bin!r} not found; build summit (the `genesis digest` "
+            "subcommand) or pass --summit-bin"
+        ) from None
+    except subprocess.CalledProcessError as e:
+        raise GateError(
+            f"`{' '.join(cmd)}` failed: {e.stderr.strip() or e.stdout.strip()}"
+        ) from None
+    out = result.stdout.strip()
+    _check_hex_or_gate(out, 32, f"`{' '.join(cmd)}` output")
+    return out.lower()
+
+
 def _check_hex_or_gate(value: Any, nbytes: int, fieldname: str) -> None:
     try:
         _check_hex(value, nbytes, fieldname)
@@ -394,18 +433,20 @@ class GateContext:
     """Artifact set a manifest is validated against (deploy-side gates)."""
 
     reth_genesis: Path
-    summit_template: Path
+    summit_genesis: Path
     policy_bytes: bytes
     reth_bin: str = "seismic-reth"
     admission_bin: str = DEFAULT_ADMISSION_BIN
-    # Injectable for tests; default to shelling out to seismic-reth and the
-    # admission CLI respectively.
+    summit_bin: str = DEFAULT_SUMMIT_BIN
+    # Injectable for tests; default to shelling out to seismic-reth, the
+    # admission CLI, and summit respectively.
     genesis_hash_fn: Callable[[Path], str] | None = None
     compile_fn: Callable[[bytes], dict[str, Any]] | None = None
-    # Set by `assemble` to its filled template copy (eth_genesis_hash injected
-    # when the authored file omits it); gates then check these bytes instead
-    # of re-reading summit_template from disk.
-    summit_template_bytes: bytes | None = None
+    digest_fn: Callable[[Path], str] | None = None
+    # Set by `assemble` to its completed summit genesis (eth_genesis_hash and
+    # a validators set injected into the authored input); gates then check
+    # these bytes instead of re-reading summit_genesis from disk.
+    summit_genesis_bytes: bytes | None = None
     # Set by `assemble` to its copy of the full genesis document, with the
     # compiled registry storage injected into the registry account; gates
     # then check these bytes instead of re-reading reth_genesis from disk.
@@ -446,7 +487,7 @@ def run_validation_gates(manifest: dict[str, Any], ctx: GateContext) -> None:
         lambda p: reth_genesis_hash(p, reth_bin=ctx.reth_bin)
     )
     computed = (
-        _genesis_hash_of_bytes(genesis_bytes, hash_fn)
+        _hash_of_bytes(genesis_bytes, hash_fn, suffix=".json")
         if ctx.reth_genesis_bytes is not None
         else hash_fn(ctx.reth_genesis)
     )
@@ -457,48 +498,53 @@ def run_validation_gates(manifest: dict[str, Any], ctx: GateContext) -> None:
             f"from {ctx.reth_genesis}"
         )
 
-    # summit.genesis_template_hash == SHA-256(template bytes)
-    template_bytes = (
-        ctx.summit_template_bytes
-        if ctx.summit_template_bytes is not None
-        else ctx.summit_template.read_bytes()
+    # summit.genesis_config_digest == `summit genesis digest` over the shipped
+    # summit genesis: summit's own SSZ-domain digest (what its P2P and signing
+    # domains derive from), not a byte hash of the file.
+    summit_genesis_bytes = (
+        ctx.summit_genesis_bytes
+        if ctx.summit_genesis_bytes is not None
+        else ctx.summit_genesis.read_bytes()
     )
-    template_hash = _sha256_hex(template_bytes)
-    if manifest["summit"]["genesis_template_hash"] != template_hash:
+    digest_fn = ctx.digest_fn or (
+        lambda p: summit_config_digest(p, summit_bin=ctx.summit_bin)
+    )
+    computed_digest = (
+        _hash_of_bytes(summit_genesis_bytes, digest_fn, suffix=".toml")
+        if ctx.summit_genesis_bytes is not None
+        else digest_fn(ctx.summit_genesis)
+    )
+    if manifest["summit"]["genesis_config_digest"] != computed_digest:
         raise GateError(
-            f"summit.genesis_template_hash mismatch: manifest has "
-            f"{manifest['summit']['genesis_template_hash']}, computed "
-            f"{template_hash} from {ctx.summit_template}"
+            f"summit.genesis_config_digest mismatch: manifest has "
+            f"{manifest['summit']['genesis_config_digest']}, recomputed "
+            f"{computed_digest} from {ctx.summit_genesis}"
         )
 
-    # The template's embedded eth_genesis_hash and namespace must match the
+    # The genesis's embedded eth_genesis_hash and namespace must match the
     # manifest fields (the namespace is duplicated into the manifest so
     # verifiers don't need to parse TOML).
-    template = tomllib.loads(template_bytes.decode("utf-8"))
-    template_eth_hash = template.get("eth_genesis_hash")
+    summit_genesis = tomllib.loads(summit_genesis_bytes.decode("utf-8"))
+    genesis_eth_hash = summit_genesis.get("eth_genesis_hash")
     if (
-        not isinstance(template_eth_hash, str)
-        or template_eth_hash.lower() != manifest["eth"]["genesis_hash"]
+        not isinstance(genesis_eth_hash, str)
+        or genesis_eth_hash.lower() != manifest["eth"]["genesis_hash"]
     ):
         raise GateError(
-            f"summit template eth_genesis_hash is {template_eth_hash!r}, "
+            f"summit genesis eth_genesis_hash is {genesis_eth_hash!r}, "
             f"manifest has {manifest['eth']['genesis_hash']}"
         )
-    template_namespace = template.get("namespace")
-    if template_namespace != manifest["summit"]["namespace"]:
+    genesis_namespace = summit_genesis.get("namespace")
+    if genesis_namespace != manifest["summit"]["namespace"]:
         raise GateError(
-            f"summit template namespace is {template_namespace!r}, "
+            f"summit genesis namespace is {genesis_namespace!r}, "
             f"manifest has {manifest['summit']['namespace']!r}"
         )
-    if template_namespace == _SUMMIT_DEFAULT_NAMESPACE:
+    if genesis_namespace == _SUMMIT_DEFAULT_NAMESPACE:
         ctx.warn(
             "summit namespace is the hardcoded default '_SUMMIT'; two chains "
             "running the same image can cross-replay BLS signatures"
         )
-    # The shipped copy always carries a `validators` key (assemble fills an
-    # empty placeholder for summit's parser); only *entries* are suspect.
-    if template.get("validators"):
-        ctx.warn("summit genesis template must not contain [[validators]] entries")
 
     # measurements.bootstrap_policy_hash == SHA-256(policy bytes)
     policy_hash = _sha256_hex(ctx.policy_bytes)
@@ -638,9 +684,10 @@ class AssembledManifest:
     manifest_bytes: bytes
     manifest: dict[str, Any]
     policy_bytes: bytes
-    # The template copy the manifest commits to (eth_genesis_hash filled if
-    # the authored file omitted it) — what write_artifact_set ships.
-    summit_template_bytes: bytes
+    # The completed summit genesis the manifest commits to (eth_genesis_hash
+    # and a validators set filled into the authored input) — what
+    # write_artifact_set ships as summit-genesis.toml.
+    summit_genesis_bytes: bytes
     # The genesis copy the manifest commits to (compiled registry genesis
     # storage injected into the registry account) — what write_artifact_set
     # ships and eth.genesis_hash is computed from.
@@ -649,19 +696,20 @@ class AssembledManifest:
     warnings: list[str]
 
 
-def fill_template_genesis_hash(template_bytes: bytes, eth_genesis_hash: str) -> bytes:
-    """Set `eth_genesis_hash` in a summit template to the computed value.
+def fill_eth_genesis_hash(genesis_bytes: bytes, eth_genesis_hash: str) -> bytes:
+    """Set `eth_genesis_hash` in an authored summit genesis to the computed
+    value.
 
     The hash is derived from reth-genesis.json — never authored — but summit's
     genesis-binary parser requires the field to be present in the TOML it
     reads, so the shipped copy must carry it. Any declared value is dropped
     (it can only be stale copy-paste, e.g. summit's example_genesis.toml) and
     the computed one is prepended — always valid TOML for a top-level key, and
-    deterministic, so the filled copy is what `genesis_template_hash` commits
-    to and the ceremony ships.
+    deterministic, so the filled copy is what `genesis_config_digest` commits
+    to and the artifact set ships.
     """
     lines, in_table = [], False
-    for line in template_bytes.splitlines(keepends=True):
+    for line in genesis_bytes.splitlines(keepends=True):
         stripped = line.lstrip()
         # Top-level keys can only appear before the first table header; a
         # same-named key inside a table (none exists today) is left alone.
@@ -673,7 +721,7 @@ def fill_template_genesis_hash(template_bytes: bytes, eth_genesis_hash: str) -> 
     stripped_bytes = b"".join(lines)
     if "eth_genesis_hash" in tomllib.loads(stripped_bytes.decode("utf-8")):
         raise GateError(
-            "could not replace the template's declared eth_genesis_hash "
+            "could not replace the authored file's declared eth_genesis_hash "
             "(unusual TOML layout); delete the line by hand — the value is "
             "derived from the reth genesis"
         )
@@ -683,26 +731,27 @@ def fill_template_genesis_hash(template_bytes: bytes, eth_genesis_hash: str) -> 
 def assemble(
     name: str,
     reth_genesis: Path,
-    summit_template: Path,
+    summit_genesis: Path,
     policy_bytes: bytes,
     registry: str = DEFAULT_REGISTRY,
     authority: str = DEFAULT_AUTHORITY,
     reth_bin: str = "seismic-reth",
     admission_bin: str = DEFAULT_ADMISSION_BIN,
-    genesis_nonce: bytes | None = None,
+    summit_bin: str = DEFAULT_SUMMIT_BIN,
     genesis_hash_fn: Callable[[Path], str] | None = None,
     compile_fn: Callable[[bytes], dict[str, Any]] | None = None,
+    digest_fn: Callable[[Path], str] | None = None,
 ) -> AssembledManifest:
     """Assemble, render, and gate-check a v1 network manifest.
 
-    genesis_nonce defaults to fresh OsRng bytes — the clone-deployment
-    uniquifier; two networks spun from otherwise identical artifacts must not
-    share a network_id. Only tests should pass an explicit nonce.
-
-    The summit template's `eth_genesis_hash` is derived from reth-genesis.json,
+    The summit genesis's `eth_genesis_hash` is derived from reth-genesis.json,
     never authored: whatever the input declares (if anything) is replaced with
-    the computed value in the copy that `genesis_template_hash` commits to and
-    the artifact set ships — committed bytes never carry a stale hash.
+    the computed value in the completed copy the artifact set ships —
+    committed bytes never carry a stale hash. The manifest pins that
+    completed genesis via summit's own config digest (`summit genesis
+    digest`), which covers the consensus parameters and the validator set;
+    an input without validators ships an empty placeholder set
+    (`validators = []`).
 
     The registry account's genesis storage is likewise derived, not authored:
     the policy document is compiled and its registry_genesis_storage injected
@@ -716,11 +765,11 @@ def assemble(
     if not isinstance(chain_id, int) or isinstance(chain_id, bool):
         raise GateError(f"reth genesis config.chainId is {chain_id!r}, not an int")
 
-    template_bytes = summit_template.read_bytes()
-    template = tomllib.loads(template_bytes.decode("utf-8"))
-    namespace = template.get("namespace")
+    authored_bytes = summit_genesis.read_bytes()
+    authored = tomllib.loads(authored_bytes.decode("utf-8"))
+    namespace = authored.get("namespace")
     if not isinstance(namespace, str):
-        raise GateError(f"summit template has no namespace string (got {namespace!r})")
+        raise GateError(f"summit genesis has no namespace string (got {namespace!r})")
 
     compile_policy = compile_fn or (
         lambda b: compile_measurement_policy(b, admission_bin=admission_bin)
@@ -730,35 +779,36 @@ def assemble(
     )
 
     hash_fn = genesis_hash_fn or (lambda p: reth_genesis_hash(p, reth_bin=reth_bin))
-    eth_hash = _genesis_hash_of_bytes(reth_genesis_bytes, hash_fn).lower()
-    if "eth_genesis_hash" in template and template["eth_genesis_hash"] != eth_hash:
+    eth_hash = _hash_of_bytes(reth_genesis_bytes, hash_fn, suffix=".json").lower()
+    if "eth_genesis_hash" in authored and authored["eth_genesis_hash"] != eth_hash:
         logger.info(
-            "replacing the template's declared eth_genesis_hash %s with the "
+            "replacing the authored eth_genesis_hash %s with the "
             "computed %s (the value is derived from the reth genesis)",
-            template["eth_genesis_hash"],
+            authored["eth_genesis_hash"],
             eth_hash,
         )
-    if "validators" not in template:
-        # summit's genesis binary requires the field to *parse* the template
-        # (its GenesisConfig has no serde default) even though it replaces the
-        # value from -v; authored templates rightly omit validators, so the
-        # shipped copy carries an empty placeholder set.
-        template_bytes = b"validators = []\n" + template_bytes
-    template_bytes = fill_template_genesis_hash(template_bytes, eth_hash)
-    nonce = genesis_nonce if genesis_nonce is not None else secrets.token_bytes(32)
-    if len(nonce) != 32:
-        raise GateError(f"genesis_nonce must be 32 bytes, got {len(nonce)}")
+    if "validators" not in authored:
+        # summit requires the field to *parse* a genesis (its Genesis type has
+        # no serde default); an input authored without a validator set ships
+        # an empty placeholder.
+        authored_bytes = b"validators = []\n" + authored_bytes
+    summit_genesis_bytes = fill_eth_genesis_hash(authored_bytes, eth_hash)
+    resolve_digest = digest_fn or (
+        lambda p: summit_config_digest(p, summit_bin=summit_bin)
+    )
+    config_digest = _hash_of_bytes(
+        summit_genesis_bytes, resolve_digest, suffix=".toml"
+    ).lower()
 
     manifest = {
         "manifest_version": MANIFEST_VERSION,
         "name": name,
-        "genesis_nonce": "0x" + nonce.hex(),
         "eth": {
             "chain_id": chain_id,
             "genesis_hash": eth_hash,
         },
         "summit": {
-            "genesis_template_hash": _sha256_hex(template_bytes),
+            "genesis_config_digest": config_digest,
             "namespace": namespace,
         },
         "measurements": {
@@ -776,13 +826,15 @@ def assemble(
     parsed = validate_manifest_schema(manifest_bytes)
     ctx = GateContext(
         reth_genesis=reth_genesis,
-        summit_template=summit_template,
+        summit_genesis=summit_genesis,
         policy_bytes=policy_bytes,
         reth_bin=reth_bin,
         admission_bin=admission_bin,
+        summit_bin=summit_bin,
         genesis_hash_fn=genesis_hash_fn,
         compile_fn=compile_fn,
-        summit_template_bytes=template_bytes,
+        digest_fn=digest_fn,
+        summit_genesis_bytes=summit_genesis_bytes,
         reth_genesis_bytes=reth_genesis_bytes,
     )
     run_validation_gates(parsed, ctx)
@@ -791,7 +843,7 @@ def assemble(
         manifest_bytes=manifest_bytes,
         manifest=parsed,
         policy_bytes=policy_bytes,
-        summit_template_bytes=template_bytes,
+        summit_genesis_bytes=summit_genesis_bytes,
         reth_genesis_bytes=reth_genesis_bytes,
         network_id=compute_network_id(manifest_bytes),
         warnings=ctx.warnings,
@@ -805,8 +857,8 @@ def write_artifact_set(
 ) -> None:
     """Write the network artifact set: manifest, policy, and assemble's
     copies of the genesis artifacts the manifest commits to (registry
-    storage injected into the reth genesis, eth_genesis_hash filled into
-    the summit template).
+    storage injected into the reth genesis, the authored summit genesis
+    completed with its derived fields).
 
     A manifest is immutable for the network's lifetime — refuse to overwrite
     an existing one unless forced.
@@ -822,21 +874,21 @@ def write_artifact_set(
     manifest_path.write_bytes(assembled.manifest_bytes)
     (out_dir / POLICY_FILENAME).write_bytes(assembled.policy_bytes)
     (out_dir / RETH_GENESIS_FILENAME).write_bytes(assembled.reth_genesis_bytes)
-    (out_dir / SUMMIT_TEMPLATE_FILENAME).write_bytes(assembled.summit_template_bytes)
+    (out_dir / SUMMIT_GENESIS_FILENAME).write_bytes(assembled.summit_genesis_bytes)
 
 
-def starter_summit_template(name: str) -> str:
-    """Starter authored summit template written by `manifest init` (values
+def starter_summit_genesis(name: str) -> str:
+    """Starter authored summit genesis written by `manifest init` (values
     from summit's example_genesis.toml). Every value is a per-network choice
     for the founder to review; nothing in it is derived.
     """
     # json.dumps emits a valid TOML basic string for these simple values.
     return f"""\
-# Summit network-params template — authored input for `manifest assemble`.
-# Review every value before founding a real network. Two fields are filled
-# elsewhere and do not belong here: eth_genesis_hash (derived from
-# reth-genesis.json at assemble time) and [[validators]] (TEE-born, filled
-# by the genesis ceremony).
+# Summit network parameters. `manifest assemble` prepends the two derived
+# fields above this header — eth_genesis_hash (from reth-genesis.json) and
+# validators (the founding validator set — TEE-born keys gathered from the
+# live cohort) — and ships the completed file as summit-genesis.toml.
+# Review every value before founding a real network.
 leader_timeout_ms = 2000
 notarization_timeout_ms = 4000
 nullify_timeout_ms = 4000
@@ -882,13 +934,13 @@ def init_network_dir(
     name: str,
     reth_genesis: Path,
     measurements: Path,
-    summit_template: Path | None = None,
+    summit_genesis: Path | None = None,
     measurement_id: str | None = None,
 ) -> list[Path]:
     """Scaffold a network directory's three authored inputs under inputs/.
 
     Copies the genesis and measurements in (stamping measurement_id into
-    the latter when given), and writes a starter summit template
+    the latter when given), and writes a starter summit genesis
     (namespace = name) unless one is supplied to copy. The founder edits
     these in place, then `assemble --dir` derives the artifact set into the
     directory's top level — inputs and the committed artifacts live
@@ -901,10 +953,10 @@ def init_network_dir(
     contents = {
         RETH_GENESIS_FILENAME: reth_genesis.read_bytes(),
         MEASUREMENTS_FILENAME: measurements_bytes,
-        SUMMIT_TEMPLATE_FILENAME: (
-            summit_template.read_bytes()
-            if summit_template is not None
-            else starter_summit_template(name).encode()
+        SUMMIT_GENESIS_FILENAME: (
+            summit_genesis.read_bytes()
+            if summit_genesis is not None
+            else starter_summit_genesis(name).encode()
         ),
     }
     inputs_dir = out_dir / INPUTS_DIRNAME
@@ -926,14 +978,16 @@ def init_network_dir(
 def render_network_section(
     manifest_bytes: bytes,
     reth_genesis_bytes: bytes,
+    summit_genesis_bytes: bytes,
     bootnodes: list[str],
 ) -> str:
     """Render the `[network]` config section tdx-init consumes.
 
-    base64 keeps both artifacts opaque through the TOML hop (byte-exactness
+    base64 keeps the artifacts opaque through the TOML hop (byte-exactness
     rule): tdx-init decodes and writes these exact bytes verbatim — the
-    manifest to `network-manifest.json`, the genesis to `reth-genesis.json`
-    (reth's `--chain`).
+    manifest to `network-manifest.json`, the reth genesis to
+    `reth-genesis.json` (reth's `--chain`), the summit genesis to
+    `summit-genesis.toml` (summit's `--genesis-path`).
 
     `bootnodes` is the enode set feeding reth's `--bootnodes` and — derived by
     tdx-init, `http://<host>:7878` with the node's own entry dropped — the
@@ -943,12 +997,14 @@ def render_network_section(
     case), and 400s for a joiner.
     """
     manifest_b64 = base64.standard_b64encode(manifest_bytes).decode("ascii")
-    genesis_b64 = base64.standard_b64encode(reth_genesis_bytes).decode("ascii")
+    reth_b64 = base64.standard_b64encode(reth_genesis_bytes).decode("ascii")
+    summit_b64 = base64.standard_b64encode(summit_genesis_bytes).decode("ascii")
     # json.dumps emits valid TOML basic strings for enode URLs (ASCII).
     bootnodes_toml = ", ".join(json.dumps(b) for b in bootnodes)
     return (
         f'[network]\nmanifest_base64 = "{manifest_b64}"\n'
-        f'reth_genesis_base64 = "{genesis_b64}"\n'
+        f'reth_genesis_base64 = "{reth_b64}"\n'
+        f'summit_genesis_base64 = "{summit_b64}"\n'
         f"bootnodes = [{bootnodes_toml}]\n"
     )
 
@@ -977,6 +1033,30 @@ def validate_reth_genesis_matches(
         )
 
 
+def validate_summit_genesis_matches(
+    manifest: dict[str, Any], summit_genesis_bytes: bytes
+) -> None:
+    """Client-side mirror of tdx-init's POST-time summit-genesis check: valid
+    TOML whose namespace equals the manifest's summit.namespace. Structural
+    only — the *digest* commitment (manifest summit.genesis_config_digest) is
+    enforced by `assemble`/`validate` (via `summit genesis digest`), and live
+    nodes enforce agreement again by deriving their P2P and signing domains
+    from that digest.
+    """
+    try:
+        genesis = tomllib.loads(summit_genesis_bytes.decode("utf-8"))
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError) as e:
+        raise GateError(f"summit genesis is not valid TOML: {e}") from None
+    namespace = genesis.get("namespace")
+    if not isinstance(namespace, str):
+        raise GateError(f"summit genesis namespace is {namespace!r}, not a string")
+    if namespace != manifest["summit"]["namespace"]:
+        raise GateError(
+            f"summit genesis namespace {namespace!r} does not match the "
+            f"manifest's summit.namespace {manifest['summit']['namespace']!r}"
+        )
+
+
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="python -m tee.cli.common.manifest", description=__doc__
@@ -998,14 +1078,22 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "compile the policy into registry genesis storage",
         )
 
+    def add_summit_bin(p: argparse.ArgumentParser) -> None:
+        p.add_argument(
+            "--summit-bin",
+            default=DEFAULT_SUMMIT_BIN,
+            help="summit binary whose `genesis digest` subcommand computes "
+            "summit.genesis_config_digest",
+        )
+
     ini = sub.add_parser("init", help="scaffold a network directory's authored inputs")
     ini.add_argument("dir", type=Path, help="network directory to create")
     ini.add_argument(
         "--name",
         default=None,
-        help="network name for the starter template's namespace; default: the "
-        "directory's basename (which is also what assemble uses as the "
-        "manifest name)",
+        help="network name for the starter summit genesis's namespace; "
+        "default: the directory's basename (which is also what assemble "
+        "uses as the manifest name)",
     )
     ini.add_argument(
         "--reth-genesis",
@@ -1024,12 +1112,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "the PCRs of a real published image, never generated",
     )
     ini.add_argument(
-        "--summit-template",
+        "--summit-genesis",
         type=Path,
         default=None,
-        help="summit template to copy in verbatim. Optional: unlike the two "
-        "inputs above it holds only per-network parameter choices, so the "
-        "default writes an editable starter with namespace = <name>",
+        help="authored summit genesis to copy in verbatim. Optional: unlike "
+        "the two inputs above it holds only per-network parameter choices, "
+        "so the default writes an editable starter with namespace = <name>",
     )
     ini.add_argument(
         "--measurement-id",
@@ -1048,7 +1136,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=Path,
         help=f"network directory from `manifest init`: reads its "
         f"{INPUTS_DIRNAME}/ ({RETH_GENESIS_FILENAME}, "
-        f"{SUMMIT_TEMPLATE_FILENAME}, {MEASUREMENTS_FILENAME}), takes the "
+        f"{SUMMIT_GENESIS_FILENAME}, {MEASUREMENTS_FILENAME}), takes the "
         "network name from its basename, and writes the artifact set at "
         "the top level",
     )
@@ -1075,6 +1163,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     add_reth_bin(asm)
     add_admission_bin(asm)
+    add_summit_bin(asm)
 
     val = sub.add_parser(
         "validate", help="re-run all gates over an assembled network directory"
@@ -1083,10 +1172,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "dir",
         type=Path,
         help="network directory: audits the artifact set `assemble` wrote "
-        "there (manifest, shipped template, policy) against its reth genesis",
+        "there (manifest, summit genesis, policy) against its reth genesis",
     )
     add_reth_bin(val)
     add_admission_bin(val)
+    add_summit_bin(val)
 
     args = parser.parse_args(argv)
 
@@ -1096,13 +1186,13 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         args.name = args.dir.resolve().name
         inputs_dir = args.dir / INPUTS_DIRNAME
         args.reth_genesis = inputs_dir / RETH_GENESIS_FILENAME
-        args.summit_template = inputs_dir / SUMMIT_TEMPLATE_FILENAME
+        args.summit_genesis = inputs_dir / SUMMIT_GENESIS_FILENAME
         args.measurements = inputs_dir / MEASUREMENTS_FILENAME
         args.out = args.dir
     elif args.command == "validate":
         args.manifest = args.dir / MANIFEST_FILENAME
         args.reth_genesis = args.dir / RETH_GENESIS_FILENAME
-        args.summit_template = args.dir / SUMMIT_TEMPLATE_FILENAME
+        args.summit_genesis = args.dir / SUMMIT_GENESIS_FILENAME
         args.measurement_policy = args.dir / POLICY_FILENAME
     return args
 
@@ -1117,7 +1207,7 @@ def main() -> None:
                 args.name,
                 args.reth_genesis,
                 args.measurements,
-                args.summit_template,
+                args.summit_genesis,
                 args.measurement_id,
             )
             for path in written:
@@ -1129,13 +1219,13 @@ def main() -> None:
             )
             print(
                 f"Scaffolded {args.dir}. Edit the inputs (at minimum review "
-                f"{INPUTS_DIRNAME}/{SUMMIT_TEMPLATE_FILENAME}), then:\n"
+                f"{INPUTS_DIRNAME}/{SUMMIT_GENESIS_FILENAME}), then:\n"
                 f"  seismic-tee-network manifest assemble {args.dir}{id_hint}"
             )
         elif args.command == "assemble":
             missing = [
                 p
-                for p in (args.reth_genesis, args.summit_template, args.measurements)
+                for p in (args.reth_genesis, args.summit_genesis, args.measurements)
                 if not p.exists()
             ]
             if missing:
@@ -1154,12 +1244,13 @@ def main() -> None:
             assembled = assemble(
                 name=args.name,
                 reth_genesis=args.reth_genesis,
-                summit_template=args.summit_template,
+                summit_genesis=args.summit_genesis,
                 policy_bytes=policy_bytes,
                 registry=args.registry,
                 authority=args.authority,
                 reth_bin=args.reth_bin,
                 admission_bin=args.admission_bin,
+                summit_bin=args.summit_bin,
             )
             write_artifact_set(args.out, assembled, force=args.force)
             logger.info("wrote %s", args.out / MANIFEST_FILENAME)
@@ -1171,10 +1262,11 @@ def main() -> None:
             manifest = validate_manifest_schema(manifest_bytes)
             ctx = GateContext(
                 reth_genesis=args.reth_genesis,
-                summit_template=args.summit_template,
+                summit_genesis=args.summit_genesis,
                 policy_bytes=args.measurement_policy.read_bytes(),
                 reth_bin=args.reth_bin,
                 admission_bin=args.admission_bin,
+                summit_bin=args.summit_bin,
             )
             run_validation_gates(manifest, ctx)
             print(f"network_id: {compute_network_id(manifest_bytes)}")

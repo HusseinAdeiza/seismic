@@ -1,8 +1,8 @@
-# Summit network-params template — authored input for `manifest assemble`.
-# Review every value before founding a real network. Two fields are filled
-# elsewhere and do not belong here: eth_genesis_hash (derived from
-# reth-genesis.json at assemble time) and [[validators]] (TEE-born, filled
-# by the genesis ceremony).
+# Summit network parameters. `manifest assemble` prepends the two derived
+# fields above this header — eth_genesis_hash (from reth-genesis.json) and
+# validators (the founding validator set — TEE-born keys gathered from the
+# live cohort) — and ships the completed file as summit-genesis.toml.
+# Review every value before founding a real network.
 leader_timeout_ms = 2000
 notarization_timeout_ms = 4000
 nullify_timeout_ms = 4000

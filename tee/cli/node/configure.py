@@ -18,9 +18,10 @@ both CLIs call; `genesis_node=True` is only ever set by the bootstrap side.
 There is no per-node `node.toml`: `[node]` (external_ip + genesis_node) comes
 from the descriptor + role, `[node.domain]` from the descriptor fqdn +
 `--email`, and `[network]` from `--manifest` + `--reth-genesis` +
-`--bootnode`. Those network-wide artifacts stay standalone files, merged only
-at POST time. The node address is *brought by the operator* via a descriptor
-file (see tee/cli/common/descriptor.py), typically
+`--summit-genesis` + `--bootnode`. Those network-wide artifacts stay
+standalone files, merged only at POST time. The node address is *brought
+by the operator* via a descriptor file (see tee/cli/common/descriptor.py),
+typically
 `pulumi stack output --json`. The CLI never provisions infrastructure
 (Pulumi's job).
 
@@ -73,6 +74,24 @@ def resolve_reth_genesis(reth_genesis: Path | None, manifest_path: Path) -> Path
     return path
 
 
+def resolve_summit_genesis(summit_genesis: Path | None, manifest_path: Path) -> Path:
+    """Resolve `--summit-genesis`, defaulting to the artifact-set convention:
+    `summit-genesis.toml` beside the manifest, exactly where `manifest
+    assemble` writes its byte-verbatim copy — so the file POSTed is the one
+    the manifest's `summit.genesis_config_digest` was computed from.
+    """
+    path = summit_genesis or manifest_path.parent / manifest_mod.SUMMIT_GENESIS_FILENAME
+    if not path.is_file():
+        hint = (
+            ""
+            if summit_genesis
+            else " (the default is summit-genesis.toml beside --manifest; pass "
+            "--summit-genesis if it lives elsewhere)"
+        )
+        raise SystemExit(f"summit genesis not found: {path}{hint}")
+    return path
+
+
 def build_config(
     manifest_path: Path,
     fqdn: str,
@@ -80,6 +99,7 @@ def build_config(
     *,
     genesis_node: bool,
     reth_genesis_path: Path,
+    summit_genesis_path: Path,
     external_ip: str,
     bootnodes: list[str],
 ) -> Path:
@@ -88,9 +108,10 @@ def build_config(
     `--nat extip`), the role (→ `[node].genesis_node`), the descriptor's fqdn
     (→ `[node.domain].name`, the cert domain), `--email`
     (→ `[node.domain].email`), and the network manifest + reth genesis +
-    bootnode set (`--manifest`/`--reth-genesis`/`bootnodes` → `[network]`).
-    Written fresh, so there is no operator-supplied TOML that could carry a
-    conflicting `[node]`/`[network]` and fork the network.
+    summit genesis + bootnode set (`--manifest`/`--reth-genesis`/
+    `--summit-genesis`/`bootnodes` → `[network]`). Written fresh, so there is
+    no operator-supplied TOML that could carry a conflicting
+    `[node]`/`[network]` and fork the network.
 
     `external_ip` is the node's own public IP (from its descriptor); reth
     advertises it via `--nat extip` so its enode is dialable, which is what
@@ -135,6 +156,12 @@ def build_config(
     except manifest_mod.GateError as e:
         raise SystemExit(f"--reth-genesis {reth_genesis_path}: {e}") from None
 
+    summit_genesis_bytes = summit_genesis_path.read_bytes()
+    try:
+        manifest_mod.validate_summit_genesis_matches(manifest, summit_genesis_bytes)
+    except manifest_mod.GateError as e:
+        raise SystemExit(f"--summit-genesis {summit_genesis_path}: {e}") from None
+
     # json.dumps emits valid TOML basic strings for these simple ASCII values.
     merged = (
         f"[node]\n"
@@ -142,7 +169,7 @@ def build_config(
         f"genesis_node = {str(genesis_node).lower()}\n\n"
         f"[node.domain]\nname = {json.dumps(fqdn)}\nemail = {json.dumps(email)}\n\n"
         + manifest_mod.render_network_section(
-            manifest_bytes, reth_genesis_bytes, bootnodes
+            manifest_bytes, reth_genesis_bytes, summit_genesis_bytes, bootnodes
         )
     )
     with tempfile.NamedTemporaryFile(
@@ -200,6 +227,7 @@ def deliver_config(
     *,
     genesis_node: bool,
     reth_genesis_path: Path,
+    summit_genesis_path: Path,
     bootnodes: list[str],
 ) -> None:
     """Build + POST one node's config, then watch its first-boot LUKS wipe.
@@ -227,6 +255,7 @@ def deliver_config(
         email,
         genesis_node=genesis_node,
         reth_genesis_path=reth_genesis_path,
+        summit_genesis_path=summit_genesis_path,
         external_ip=public_ip,
         bootnodes=bootnodes,
     )
@@ -321,6 +350,21 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--summit-genesis",
+        type=Path,
+        default=None,
+        metavar="FILE",
+        help=(
+            "summit genesis TOML POSTed to the node as "
+            "[network].summit_genesis_base64; tdx-init writes it to "
+            "/run/seismic/conf/summit-genesis.toml for summit's "
+            "--genesis-path. Must be the file the manifest's "
+            "summit.genesis_config_digest was computed from. Default: "
+            "summit-genesis.toml beside --manifest (the artifact-set layout "
+            "`manifest assemble` produces)."
+        ),
+    )
+    parser.add_argument(
         "--bootnode",
         action="append",
         required=True,
@@ -379,12 +423,14 @@ def main() -> None:
         )
 
     reth_genesis = resolve_reth_genesis(args.reth_genesis, args.manifest)
+    summit_genesis = resolve_summit_genesis(args.summit_genesis, args.manifest)
     deliver_config(
         args.node,
         args.manifest,
         args.email,
         genesis_node=False,
         reth_genesis_path=reth_genesis,
+        summit_genesis_path=summit_genesis,
         bootnodes=args.bootnode,
     )
 

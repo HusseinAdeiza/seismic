@@ -51,6 +51,7 @@ from tee.cli.node.configure import (
     build_config,
     post_config_to_tdx_init,
     resolve_reth_genesis,
+    resolve_summit_genesis,
 )
 from tee.cli.node.status import poll_provisioning
 
@@ -116,6 +117,7 @@ def _configure_node(
     node: Node,
     manifest_path: Path,
     reth_genesis_path: Path,
+    summit_genesis_path: Path,
     email: str,
     states: dict[str, str],
     stop: threading.Event,
@@ -135,6 +137,7 @@ def _configure_node(
             email,
             genesis_node=node.genesis,
             reth_genesis_path=reth_genesis_path,
+            summit_genesis_path=summit_genesis_path,
             external_ip=node.public_ip,
             bootnodes=node.bootnodes,
         )
@@ -154,6 +157,7 @@ def _run_cohort(
     nodes: list[Node],
     manifest_path: Path,
     reth_genesis_path: Path,
+    summit_genesis_path: Path,
     email: str,
 ) -> dict[str, bool]:
     """Configure every node concurrently, refreshing the dashboard until all
@@ -178,6 +182,7 @@ def _run_cohort(
                 node,
                 manifest_path,
                 reth_genesis_path,
+                summit_genesis_path,
                 email,
                 states,
                 stop,
@@ -227,6 +232,7 @@ def _bootstrap_greenfield(
     nodes: list[Node],
     manifest_path: Path,
     reth_genesis_path: Path,
+    summit_genesis_path: Path,
     email: str,
 ) -> dict[str, bool]:
     """Two-stage greenfield bootstrap: genesis first (so its enode exists),
@@ -242,7 +248,9 @@ def _bootstrap_greenfield(
 
     print("Stage 1/2: configuring the genesis node (no bootnodes yet)...")
     genesis.bootnodes = []
-    results = _run_cohort([genesis], manifest_path, reth_genesis_path, email)
+    results = _run_cohort(
+        [genesis], manifest_path, reth_genesis_path, summit_genesis_path, email
+    )
     if not results.get(genesis.name):
         print("Genesis node failed in stage 1 — skipping joiner bootstrap.")
         return results
@@ -259,7 +267,11 @@ def _bootstrap_greenfield(
     print(f"Stage 2/2: configuring {len(joiners)} joining node(s) off genesis enode...")
     for joiner in joiners:
         joiner.bootnodes = [genesis_enode]
-    results.update(_run_cohort(joiners, manifest_path, reth_genesis_path, email))
+    results.update(
+        _run_cohort(
+            joiners, manifest_path, reth_genesis_path, summit_genesis_path, email
+        )
+    )
     return results
 
 
@@ -357,6 +369,17 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--summit-genesis",
+        type=Path,
+        default=None,
+        metavar="FILE",
+        help=(
+            "summit genesis TOML POSTed to every node; → "
+            "[network].summit_genesis_base64. Default: summit-genesis.toml "
+            "beside --manifest (the artifact-set layout)."
+        ),
+    )
+    parser.add_argument(
         "--email",
         default="ops@seismic.systems",
         help=(
@@ -386,6 +409,13 @@ def main() -> None:
         manifest_mod.validate_reth_genesis_matches(manifest, reth_genesis.read_bytes())
     except manifest_mod.GateError as e:
         raise SystemExit(f"--reth-genesis {reth_genesis}: {e}") from None
+    summit_genesis = resolve_summit_genesis(args.summit_genesis, args.manifest)
+    try:
+        manifest_mod.validate_summit_genesis_matches(
+            manifest, summit_genesis.read_bytes()
+        )
+    except manifest_mod.GateError as e:
+        raise SystemExit(f"--summit-genesis {summit_genesis}: {e}") from None
 
     nodes = build_cohort(args.genesis, args.join)
     joiners = [n.name for n in nodes if not n.genesis]
@@ -409,9 +439,13 @@ def main() -> None:
         )
         for node in nodes:
             node.bootnodes = enodes
-        results = _run_cohort(nodes, args.manifest, reth_genesis, args.email)
+        results = _run_cohort(
+            nodes, args.manifest, reth_genesis, summit_genesis, args.email
+        )
     else:
-        results = _bootstrap_greenfield(nodes, args.manifest, reth_genesis, args.email)
+        results = _bootstrap_greenfield(
+            nodes, args.manifest, reth_genesis, summit_genesis, args.email
+        )
 
     # Refresh the founding set from every node's live enode (fresh each run).
     _persist_founding_bootnodes(nodes, results, bootnodes_path)

@@ -36,8 +36,16 @@ from tee.cli.common.manifest import (
     run_validation_gates,
     validate_manifest_schema,
     validate_reth_genesis_matches,
+    validate_summit_genesis_matches,
     write_artifact_set,
 )
+
+
+def _content_digest(path: Path) -> str:
+    """Test stand-in for `summit genesis digest`: content-derived (a byte
+    hash, not summit's SSZ digest), so tamper-detection gates still fire."""
+    return "0x" + hashlib.sha256(path.read_bytes()).hexdigest()
+
 
 # The shared policy-compiler CLI from the enclave repo. Tests of the
 # subprocess boundary run only where it is built (everything else injects
@@ -69,7 +77,6 @@ def promoted_policy_bytes(measurement_id: str = "img.vhd") -> bytes:
 FIXTURE_MANIFEST = {
     "manifest_version": 1,
     "name": "seismic-devnet-3",
-    "genesis_nonce": "0x" + "aa" * 32,
     "eth": {
         "chain_id": 5124,
         "genesis_hash": (
@@ -77,7 +84,7 @@ FIXTURE_MANIFEST = {
         ),
     },
     "summit": {
-        "genesis_template_hash": "0x" + "bb" * 32,
+        "genesis_config_digest": "0x" + "bb" * 32,
         "namespace": "seismic-devnet-3",
     },
     "measurements": {
@@ -94,7 +101,7 @@ FIXTURE_MANIFEST = {
 # this value — it's the same vector the enclave crate's
 # parses_v1_fixture_and_derives_network_id test asserts.
 FIXTURE_NETWORK_ID = (
-    "0xc4d4721b2e287df26022e6d27c8cf772841a872b6be08b1938cbc76d88703747"
+    "0x8ef142e3f2bf15f8b201c4d8cda7848a9e846222c62b5615d4d36c7fccd98a24"
 )
 
 # The node-side parser pins these exact bytes in the enclave repo. Fetch its
@@ -172,7 +179,7 @@ class SchemaTests(unittest.TestCase):
 
     def test_rejects_malformed_hex(self):
         def wrong_length(m):
-            m["genesis_nonce"] = "0x" + "aa" * 31
+            m["summit"]["genesis_config_digest"] = "0x" + "aa" * 31
 
         def missing_prefix(m):
             m["eth"]["genesis_hash"] = "ab" * 32
@@ -277,6 +284,8 @@ class CompilePolicyTests(unittest.TestCase):
 
 
 class NetworkSectionTests(unittest.TestCase):
+    SUMMIT_GENESIS = b'namespace = "seismic-devnet-3"\nvalidators = []\n'
+
     def test_network_section_round_trips_exact_bytes(self):
         import base64
         import tomllib
@@ -284,7 +293,9 @@ class NetworkSectionTests(unittest.TestCase):
         manifest_bytes = render_manifest(FIXTURE_MANIFEST)
         genesis_bytes = json.dumps({"config": {"chainId": 5124}}).encode()
         section = tomllib.loads(
-            render_network_section(manifest_bytes, genesis_bytes, [])
+            render_network_section(
+                manifest_bytes, genesis_bytes, self.SUMMIT_GENESIS, []
+            )
         )
         decoded = base64.standard_b64decode(section["network"]["manifest_base64"])
         self.assertEqual(decoded, manifest_bytes)
@@ -292,6 +303,10 @@ class NetworkSectionTests(unittest.TestCase):
             section["network"]["reth_genesis_base64"]
         )
         self.assertEqual(decoded_genesis, genesis_bytes)
+        decoded_summit = base64.standard_b64decode(
+            section["network"]["summit_genesis_base64"]
+        )
+        self.assertEqual(decoded_summit, self.SUMMIT_GENESIS)
 
     def test_bootnodes_populated_survive_verbatim(self):
         import tomllib
@@ -303,7 +318,9 @@ class NetworkSectionTests(unittest.TestCase):
             "enode://" + "cd" * 64 + "@5.6.7.8:30303",
         ]
         section = tomllib.loads(
-            render_network_section(manifest_bytes, genesis_bytes, bootnodes)
+            render_network_section(
+                manifest_bytes, genesis_bytes, self.SUMMIT_GENESIS, bootnodes
+            )
         )
         self.assertEqual(section["network"]["bootnodes"], bootnodes)
 
@@ -315,7 +332,9 @@ class NetworkSectionTests(unittest.TestCase):
 
         manifest_bytes = render_manifest(FIXTURE_MANIFEST)
         genesis_bytes = json.dumps({"config": {"chainId": 5124}}).encode()
-        rendered = render_network_section(manifest_bytes, genesis_bytes, [])
+        rendered = render_network_section(
+            manifest_bytes, genesis_bytes, self.SUMMIT_GENESIS, []
+        )
         self.assertIn("bootnodes = []", rendered)
         section = tomllib.loads(rendered)
         self.assertEqual(section["network"]["bootnodes"], [])
@@ -343,6 +362,34 @@ class RethGenesisMatchTests(unittest.TestCase):
         for genesis in (b"{}", b'{"config": {}}', self._genesis(True)):
             with self.assertRaises(GateError):
                 validate_reth_genesis_matches(FIXTURE_MANIFEST, genesis)
+
+
+class SummitGenesisMatchTests(unittest.TestCase):
+    """validate_summit_genesis_matches — the client-side mirror of tdx-init's
+    POST-time summit-genesis namespace cross-check."""
+
+    def _genesis(self, namespace: str) -> bytes:
+        return f"namespace = {json.dumps(namespace)}\nvalidators = []\n".encode()
+
+    def test_matching_namespace_passes(self):
+        validate_summit_genesis_matches(
+            FIXTURE_MANIFEST, self._genesis("seismic-devnet-3")
+        )
+
+    def test_namespace_mismatch(self):
+        with self.assertRaises(GateError):
+            validate_summit_genesis_matches(
+                FIXTURE_MANIFEST, self._genesis("seismic-devnet-4")
+            )
+
+    def test_rejects_non_toml(self):
+        with self.assertRaises(GateError):
+            validate_summit_genesis_matches(FIXTURE_MANIFEST, b'{"namespace": "x"}')
+
+    def test_rejects_missing_or_non_string_namespace(self):
+        for genesis in (b"validators = []\n", b"namespace = 5\n"):
+            with self.assertRaises(GateError):
+                validate_summit_genesis_matches(FIXTURE_MANIFEST, genesis)
 
 
 class InjectTests(unittest.TestCase):
@@ -459,9 +506,9 @@ class GateTests(unittest.TestCase):
         root = Path(self.tmp.name)
         self.reth_genesis = root / "reth-genesis.json"
         self._write_genesis()
-        # Authored templates carry no eth_genesis_hash — assemble fills it.
-        self.summit_template = root / "summit-genesis-template.toml"
-        self.summit_template.write_text('namespace = "testnet-1"\n')
+        # Authored inputs carry no eth_genesis_hash — assemble fills it.
+        self.summit_genesis = root / "summit-genesis.toml"
+        self.summit_genesis.write_text('namespace = "testnet-1"\n')
         self.policy_bytes = promoted_policy_bytes()
         self.out_dir = root / "out"
 
@@ -503,11 +550,11 @@ class GateTests(unittest.TestCase):
         kwargs = {
             "name": "testnet-1",
             "reth_genesis": self.reth_genesis,
-            "summit_template": self.summit_template,
+            "summit_genesis": self.summit_genesis,
             "policy_bytes": self.policy_bytes,
-            "genesis_nonce": b"\xaa" * 32,
             "genesis_hash_fn": lambda _p: self.ETH_HASH,
             "compile_fn": self._report,
+            "digest_fn": _content_digest,
         }
         kwargs.update(overrides)
         # ty can't verify a **kwargs dict-splat against typed params.
@@ -516,10 +563,11 @@ class GateTests(unittest.TestCase):
     def _ctx(self, **overrides) -> GateContext:
         kwargs = {
             "reth_genesis": self.reth_genesis,
-            "summit_template": self.summit_template,
+            "summit_genesis": self.summit_genesis,
             "policy_bytes": self.policy_bytes,
             "genesis_hash_fn": lambda _p: self.ETH_HASH,
             "compile_fn": self._report,
+            "digest_fn": _content_digest,
         }
         kwargs.update(overrides)
         # ty can't verify a **kwargs dict-splat against typed params.
@@ -527,10 +575,10 @@ class GateTests(unittest.TestCase):
 
     def _validate(self, assembled: AssembledManifest) -> None:
         """The validate path: gates re-run over the on-disk genesis, with
-        assemble's filled template copy standing in for the shipped file."""
+        assemble's completed summit genesis standing in for the shipped file."""
         run_validation_gates(
             assembled.manifest,
-            self._ctx(summit_template_bytes=assembled.summit_template_bytes),
+            self._ctx(summit_genesis_bytes=assembled.summit_genesis_bytes),
         )
 
     def test_assemble_passes_gates_and_is_deterministic(self):
@@ -540,11 +588,6 @@ class GateTests(unittest.TestCase):
         self.assertEqual(first.network_id, second.network_id)
         self.assertEqual(first.manifest["eth"]["chain_id"], 5124)
         self.assertEqual(first.manifest["eth"]["genesis_hash"], self.ETH_HASH)
-
-    def test_fresh_nonce_uniquifies_clones(self):
-        a = self._assemble(genesis_nonce=None)
-        b = self._assemble(genesis_nonce=None)
-        self.assertNotEqual(a.network_id, b.network_id)
 
     def test_gate_chain_id_mismatch(self):
         manifest = self._assemble().manifest
@@ -559,25 +602,25 @@ class GateTests(unittest.TestCase):
                 manifest, self._ctx(genesis_hash_fn=lambda _p: "0x" + "34" * 32)
             )
 
-    def test_gate_template_hash_mismatch(self):
+    def test_gate_config_digest_mismatch(self):
         manifest = self._assemble().manifest
-        self.summit_template.write_text(
+        self.summit_genesis.write_text(
             f'eth_genesis_hash = "{self.ETH_HASH}"\n'
             'namespace = "testnet-1"\n# tampered\n'
         )
-        with self.assertRaisesRegex(GateError, "genesis_template_hash mismatch"):
+        with self.assertRaisesRegex(GateError, "genesis_config_digest mismatch"):
             run_validation_gates(manifest, self._ctx())
 
-    def test_gate_template_namespace_mismatch(self):
-        # The template-bytes override stands in for the filled artifact-set
-        # copy, so the earlier template-hash gate passes and this one fires.
+    def test_gate_genesis_namespace_mismatch(self):
+        # The genesis-bytes override stands in for the completed artifact-set
+        # copy, so the earlier config-digest gate passes and this one fires.
         assembled = self._assemble()
         manifest = assembled.manifest
         manifest["summit"]["namespace"] = "other"
         with self.assertRaisesRegex(GateError, "namespace"):
             run_validation_gates(
                 manifest,
-                self._ctx(summit_template_bytes=assembled.summit_template_bytes),
+                self._ctx(summit_genesis_bytes=assembled.summit_genesis_bytes),
             )
 
     def test_gate_contract_missing_from_alloc(self):
@@ -588,7 +631,7 @@ class GateTests(unittest.TestCase):
         with self.assertRaisesRegex(GateError, "not in the reth genesis alloc"):
             run_validation_gates(
                 manifest,
-                self._ctx(summit_template_bytes=assembled.summit_template_bytes),
+                self._ctx(summit_genesis_bytes=assembled.summit_genesis_bytes),
             )
 
     def test_gate_policy_hash_mismatch(self):
@@ -598,7 +641,7 @@ class GateTests(unittest.TestCase):
                 assembled.manifest,
                 self._ctx(
                     policy_bytes=self.policy_bytes + b"\n",
-                    summit_template_bytes=assembled.summit_template_bytes,
+                    summit_genesis_bytes=assembled.summit_genesis_bytes,
                 ),
             )
 
@@ -698,37 +741,36 @@ class GateTests(unittest.TestCase):
         raw = "0x" + hashlib.sha256(self.reth_genesis.read_bytes()).hexdigest()
         self.assertNotEqual(injected, raw)
 
-    def test_assemble_fills_template_hash(self):
+    def test_assemble_fills_eth_genesis_hash(self):
         # eth_genesis_hash is derived from reth-genesis.json, not authored:
-        # the computed hash gets prepended, and the filled copy is what the
-        # manifest commits to and the set ships.
+        # the computed hash gets prepended, and the completed copy is what the
+        # manifest commits to and the set ships as summit-genesis.toml.
         assembled = self._assemble()
         filled_line = f'eth_genesis_hash = "{self.ETH_HASH}"\n'.encode()
-        self.assertTrue(assembled.summit_template_bytes.startswith(filled_line))
+        self.assertTrue(assembled.summit_genesis_bytes.startswith(filled_line))
         write_artifact_set(self.out_dir, assembled)
-        written = self.out_dir / "summit-genesis-template.toml"
-        self.assertEqual(written.read_bytes(), assembled.summit_template_bytes)
+        written = self.out_dir / "summit-genesis.toml"
+        self.assertEqual(written.read_bytes(), assembled.summit_genesis_bytes)
         # validate-style round trip: gates re-pass over the written copy.
-        run_validation_gates(assembled.manifest, self._ctx(summit_template=written))
+        run_validation_gates(assembled.manifest, self._ctx(summit_genesis=written))
 
     def test_assemble_fills_empty_validators_placeholder(self):
-        # summit's genesis binary requires the key to *parse* the template
-        # (no serde default) though it replaces the value; entries stay out.
+        # summit requires the key to *parse* a genesis (no serde default); a
+        # template authored without a validator set ships an empty placeholder.
         assembled = self._assemble()
-        template = tomllib.loads(assembled.summit_template_bytes.decode())
-        self.assertEqual(template["validators"], [])
-        self.assertFalse(any("[[validators]]" in w for w in assembled.warnings))
+        genesis = tomllib.loads(assembled.summit_genesis_bytes.decode())
+        self.assertEqual(genesis["validators"], [])
 
     def test_assemble_replaces_declared_genesis_hash(self):
         # A declared value (e.g. from summit's example_genesis.toml) is stale
         # copy-paste by definition: the shipped copy carries the computed
         # value instead, and never the declared one.
         stale = "0x" + "34" * 32
-        self.summit_template.write_text(
+        self.summit_genesis.write_text(
             f'eth_genesis_hash = "{stale}"\nnamespace = "testnet-1"\n'
         )
         assembled = self._assemble()
-        shipped = assembled.summit_template_bytes
+        shipped = assembled.summit_genesis_bytes
         self.assertNotIn(stale.encode(), shipped)
         self.assertTrue(
             shipped.startswith(f'eth_genesis_hash = "{self.ETH_HASH}"\n'.encode())
@@ -739,16 +781,16 @@ class GateTests(unittest.TestCase):
     def test_replace_leaves_table_keys_alone(self):
         # Only the top-level key is derived; a same-named key inside a table
         # (hypothetical) must survive untouched.
-        self.summit_template.write_text(
+        self.summit_genesis.write_text(
             'namespace = "testnet-1"\n[extra]\neth_genesis_hash = "0xdead"\n'
         )
         assembled = self._assemble()
         self.assertIn(
-            b'[extra]\neth_genesis_hash = "0xdead"\n', assembled.summit_template_bytes
+            b'[extra]\neth_genesis_hash = "0xdead"\n', assembled.summit_genesis_bytes
         )
 
     def test_warns_on_default_summit_namespace(self):
-        self.summit_template.write_text('namespace = "_SUMMIT"\n')
+        self.summit_genesis.write_text('namespace = "_SUMMIT"\n')
         assembled = self._assemble()
         self.assertTrue(any("_SUMMIT" in w for w in assembled.warnings))
 
@@ -760,24 +802,22 @@ class GateTests(unittest.TestCase):
         raw = Path(self.tmp.name) / "raw-measurements.json"
         raw.write_text(json.dumps({"measurements": {"4": {"expected": "ab" * 24}}}))
         init_network_dir(net, "testnet-1", self.reth_genesis, raw)
-        authored = (inputs / "summit-genesis-template.toml").read_bytes()
+        authored = (inputs / "summit-genesis.toml").read_bytes()
         assembled = self._assemble(
             reth_genesis=inputs / "reth-genesis.json",
-            summit_template=inputs / "summit-genesis-template.toml",
+            summit_genesis=inputs / "summit-genesis.toml",
         )
         write_artifact_set(net, assembled)
-        # Authored inputs untouched; each same-basename artifact at the top
-        # level carries assemble's derived copy.
-        self.assertEqual(
-            (inputs / "summit-genesis-template.toml").read_bytes(), authored
-        )
+        # Authored inputs untouched; each artifact at the top level carries
+        # assemble's derived copy.
+        self.assertEqual((inputs / "summit-genesis.toml").read_bytes(), authored)
         self.assertEqual(
             (inputs / "reth-genesis.json").read_bytes(),
             self.reth_genesis.read_bytes(),
         )
         self.assertEqual(
-            (net / "summit-genesis-template.toml").read_bytes(),
-            assembled.summit_template_bytes,
+            (net / "summit-genesis.toml").read_bytes(),
+            assembled.summit_genesis_bytes,
         )
         self.assertEqual(
             (net / "reth-genesis.json").read_bytes(), assembled.reth_genesis_bytes
@@ -790,7 +830,7 @@ class GateTests(unittest.TestCase):
             "network-manifest.json",
             "measurement-policy.json",
             "reth-genesis.json",
-            "summit-genesis-template.toml",
+            "summit-genesis.toml",
         ):
             self.assertTrue((self.out_dir / name).exists(), name)
         # Round-trip: written bytes hash back to the same network_id.
@@ -825,26 +865,26 @@ class InitTests(unittest.TestCase):
             [
                 "measurements.json",
                 "reth-genesis.json",
-                "summit-genesis-template.toml",
+                "summit-genesis.toml",
             ],
         )
         self.assertEqual(
             (inputs / "reth-genesis.json").read_bytes(),
             self.reth_genesis.read_bytes(),
         )
-        template = tomllib.loads((inputs / "summit-genesis-template.toml").read_text())
-        self.assertEqual(template["namespace"], "testnet-1")
-        self.assertNotIn("eth_genesis_hash", template)
-        self.assertNotIn("validators", template)
+        starter = tomllib.loads((inputs / "summit-genesis.toml").read_text())
+        self.assertEqual(starter["namespace"], "testnet-1")
+        self.assertNotIn("eth_genesis_hash", starter)
+        self.assertNotIn("validators", starter)
 
-    def test_copies_supplied_template_verbatim(self):
+    def test_copies_supplied_genesis_verbatim(self):
         src = Path(self.tmp.name) / "custom.toml"
         src.write_text('namespace = "custom"\n# comment\n')
         init_network_dir(
             self.out, "testnet-1", self.reth_genesis, self.measurements, src
         )
         self.assertEqual(
-            (self.out / "inputs" / "summit-genesis-template.toml").read_bytes(),
+            (self.out / "inputs" / "summit-genesis.toml").read_bytes(),
             src.read_bytes(),
         )
 
@@ -897,8 +937,8 @@ class DirCliTests(unittest.TestCase):
             args.reth_genesis, Path("networks/testnet-1/inputs/reth-genesis.json")
         )
         self.assertEqual(
-            args.summit_template,
-            Path("networks/testnet-1/inputs/summit-genesis-template.toml"),
+            args.summit_genesis,
+            Path("networks/testnet-1/inputs/summit-genesis.toml"),
         )
         self.assertEqual(
             args.measurements, Path("networks/testnet-1/inputs/measurements.json")
@@ -927,10 +967,8 @@ class DirCliTests(unittest.TestCase):
         args = manifest_mod._parse_args(["validate", "networks/t"])
         self.assertEqual(args.manifest, Path("networks/t/network-manifest.json"))
         self.assertEqual(args.admission_bin, DEFAULT_ADMISSION_BIN)
-        # validate reads the *shipped* template copy, not the authored input.
-        self.assertEqual(
-            args.summit_template, Path("networks/t/summit-genesis-template.toml")
-        )
+        # validate reads the *shipped* summit genesis, not the authored input.
+        self.assertEqual(args.summit_genesis, Path("networks/t/summit-genesis.toml"))
         self.assertEqual(
             args.measurement_policy, Path("networks/t/measurement-policy.json")
         )

@@ -33,9 +33,8 @@ def _manifest_bytes(policy: bytes) -> bytes:
         {
             "manifest_version": 1,
             "name": "t",
-            "genesis_nonce": "0x" + "aa" * 32,
             "eth": {"chain_id": 5124, "genesis_hash": "0x" + "12" * 32},
-            "summit": {"genesis_template_hash": "0x" + "bb" * 32, "namespace": "t"},
+            "summit": {"genesis_config_digest": "0x" + "bb" * 32, "namespace": "t"},
             "measurements": {
                 "bootstrap_policy_hash": "0x" + hashlib.sha256(policy).hexdigest(),
                 "contracts": {
