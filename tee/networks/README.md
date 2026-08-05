@@ -9,10 +9,7 @@ and everything under `inputs/` is provenance. The founding workflow lives
 in the tee README ("Creating a new network").
 
 ![How assemble derives the artifact set, what pins what, and where the
-genesis ceremony picks it up](network-dir.png)
-
-The diagram source is `network-dir.excalidraw`; re-render the PNG when
-editing it.
+genesis ceremony picks it up](network-dir.svg)
 
 Directories are committed because the directory is everything needed to
 (re)configure, join, or debug that network later, and its manifest is the
