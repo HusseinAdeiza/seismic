@@ -17,6 +17,9 @@ by the manifest; everything under `inputs/` is provenance:
     inputs/reth-genesis.json             policy-free genesis
     inputs/summit-genesis.toml           summit parameter choices
     inputs/measurements.json             raw PCR map from `make measure`
+    inputs/founder-withdrawal-credentials.json
+                                         authored, one address per founder
+    inputs/harvest/<node>.json           harvested founding pubkeys + quotes
 
     network-manifest.json         deploy-time facts; SHA-256 = network_id
     reth-genesis.json             the input genesis with the policy's
@@ -123,6 +126,14 @@ INPUTS_DIRNAME = "inputs"
 # network directory. Mutable infra state — regenerated per deploy, deleted by
 # `down` — so it stays gitignored while the artifact set around it commits.
 NODES_DIRNAME = "nodes"
+
+# The founding cohort's inputs: founder-withdrawal-credentials.json is
+# authored (node name -> withdrawal credentials); harvest/ holds what
+# `network harvest` collected from the live cohort (pubkeys, quotes,
+# verification reports) — provenance like measurements.json, but harvested
+# rather than authored.
+FOUNDERS_FILENAME = "founder-withdrawal-credentials.json"
+HARVEST_DIRNAME = "harvest"
 
 
 class ManifestSchemaError(Exception):

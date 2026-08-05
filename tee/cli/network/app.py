@@ -2,7 +2,7 @@
 
 Seismic-internal, NOT a tool node operators run: it provisions a cohort of
 TDX nodes (`up` / `down`) and runs the one-time network-creation steps
-(`manifest`, `genesis-ceremony`). This is the CLI that is *allowed* to wrap
+(`harvest`, `manifest`, `genesis-ceremony`). This is the CLI that is *allowed* to wrap
 Pulumi —
 `up` / `down` drive the seismic_node Automation-API orchestrator. The
 operator CLI (`seismic-tee-node`) deliberately is not; the boundary is the node
@@ -39,6 +39,15 @@ def down(argv: tuple[str, ...]) -> None:
     from tee.cli.network import orchestrator
 
     forward(orchestrator.down_main, "seismic-tee-network down", argv)
+
+
+@app.command(name="harvest", context_settings=PASSTHROUGH, add_help_option=False)
+@click.argument("argv", nargs=-1, type=click.UNPROCESSED)
+def harvest(argv: tuple[str, ...]) -> None:
+    """Harvest + DCAP-verify a founding cohort's summit keys into inputs/."""
+    from tee.cli.network import harvest as harvest_mod
+
+    forward(harvest_mod.main, "seismic-tee-network harvest", argv)
 
 
 @app.command(name="configure", context_settings=PASSTHROUGH, add_help_option=False)
