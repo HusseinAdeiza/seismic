@@ -2,3 +2,9 @@
 # regenerated each deploy; `down --network` deletes them), never committed.
 # Everything else in a network directory is its committable identity.
 */nodes/
+
+# Throwaway foundings (see tee/docs/runbook-devnet.md): the whole directory is
+# ignored, so a scratch cohort can be founded, torn down, and deleted
+# without touching git. A network that matters gets an unprefixed
+# directory — its identity is committed.
+tmp-*/

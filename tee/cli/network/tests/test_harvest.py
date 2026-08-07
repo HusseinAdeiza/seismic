@@ -56,11 +56,13 @@ class ParseArgsTests(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
-        self.dir = Path(self._tmp.name)
+        # Resolved: _parse_args makes every derived path absolute so the
+        # paths harvest prints are clickable.
+        self.dir = Path(self._tmp.name).resolve()
         inputs = self.dir / manifest_mod.INPUTS_DIRNAME
         inputs.mkdir()
         (inputs / manifest_mod.MEASUREMENTS_FILENAME).write_text("{}")
-        (inputs / manifest_mod.FOUNDERS_FILENAME).write_text("{}")
+        (inputs / manifest_mod.FOUNDERS_FILENAME).write_text("[]")
         self.nodes = self.dir / manifest_mod.NODES_DIRNAME
         self.nodes.mkdir()
 
@@ -138,34 +140,35 @@ class LoadFoundersTests(unittest.TestCase):
     def _write(self, obj) -> None:
         self.path.write_text(json.dumps(obj))
 
-    def test_exact_match_returns_map(self):
-        self._write({"node-1": ADDRESS, "node-2": ADDRESS})
+    def test_matching_count_returns_addresses(self):
+        self._write([ADDRESS, ADDRESS])
         founders = harvest.load_founders(self.path, ["node-1", "node-2"])
-        self.assertEqual(founders["node-1"], ADDRESS)
+        self.assertEqual(founders, [ADDRESS, ADDRESS])
 
-    def test_cohort_box_without_entry_aborts(self):
-        self._write({"node-1": ADDRESS})
-        with self.assertRaises(SystemExit) as ctx:
-            harvest.load_founders(self.path, ["node-1", "node-2"])
-        self.assertIn("no founder entry: node-2", str(ctx.exception))
-
-    def test_entry_without_cohort_box_aborts(self):
-        self._write({"node-1": ADDRESS, "node-9": ADDRESS})
-        with self.assertRaises(SystemExit) as ctx:
-            harvest.load_founders(self.path, ["node-1"])
-        self.assertIn("no cohort box: node-9", str(ctx.exception))
-
-    def test_malformed_address_aborts(self):
-        self._write({"node-1": "0x1234"})
-        with self.assertRaises(SystemExit) as ctx:
-            harvest.load_founders(self.path, ["node-1"])
-        self.assertIn("node-1", str(ctx.exception))
-
-    def test_non_object_aborts(self):
+    def test_too_few_credentials_aborts(self):
         self._write([ADDRESS])
         with self.assertRaises(SystemExit) as ctx:
+            harvest.load_founders(self.path, ["node-1", "node-2"])
+        self.assertIn("1 withdrawal credential(s)", str(ctx.exception))
+        self.assertIn("2 box(es)", str(ctx.exception))
+
+    def test_too_many_credentials_aborts(self):
+        self._write([ADDRESS, ADDRESS])
+        with self.assertRaises(SystemExit) as ctx:
             harvest.load_founders(self.path, ["node-1"])
-        self.assertIn("expected a JSON object", str(ctx.exception))
+        self.assertIn("2 withdrawal credential(s)", str(ctx.exception))
+
+    def test_malformed_address_aborts(self):
+        self._write(["0x1234"])
+        with self.assertRaises(SystemExit) as ctx:
+            harvest.load_founders(self.path, ["node-1"])
+        self.assertIn("0x1234", str(ctx.exception))
+
+    def test_non_list_aborts(self):
+        self._write({"node-1": ADDRESS})
+        with self.assertRaises(SystemExit) as ctx:
+            harvest.load_founders(self.path, ["node-1"])
+        self.assertIn("expected a JSON array", str(ctx.exception))
 
 
 class FetchQuoteTests(unittest.TestCase):
@@ -276,8 +279,11 @@ class VerifyQuoteTests(unittest.TestCase):
 
     def _run(self, returncode=0, stdout=b"", stderr=b""):
         completed = mock.Mock(returncode=returncode, stdout=stdout, stderr=stderr)
+        # The shell-out lives in manifest.verify_quote_evidence (shared with
+        # `manifest assemble`'s re-verification); harvest wraps it with the
+        # burn messaging.
         with mock.patch.object(
-            harvest.subprocess, "run", return_value=completed
+            manifest_mod.subprocess, "run", return_value=completed
         ) as run:
             report = harvest.verify_quote(
                 target(),
@@ -319,7 +325,7 @@ class VerifyQuoteTests(unittest.TestCase):
             returncode=0, stdout=json.dumps(self.REPORT).encode(), stderr=b""
         )
         with mock.patch.object(
-            harvest.subprocess, "run", return_value=completed
+            manifest_mod.subprocess, "run", return_value=completed
         ) as run:
             harvest.verify_quote(
                 target(),

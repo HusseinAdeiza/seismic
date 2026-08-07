@@ -28,26 +28,36 @@ by the manifest; everything under `inputs/` is provenance:
                                   (the accepted admission IDs are a
                                   per-network fact); eth.genesis_hash
     summit-genesis.toml           the complete summit genesis every node
-                                  boots from: the input with
-                                  eth_genesis_hash filled and a validators
-                                  set; summit.genesis_config_digest
-    measurement-policy.json       Flashbots-compatible measurement
+                                  boots from: the input completed with
+                                  eth_genesis_hash and the founding
+                                  validator set pinned from the harvest;
+                                  summit.genesis_config_digest
+    measurement-policy-bootstrap.json
+                                  Flashbots-compatible measurement
                                   allowlist promoted from the raw
                                   measurements; bootstrap_policy_hash
 
 Each artifact is its input with derived fields filled in at assemble time;
-the raw measurements become measurement-policy.json because promotion is a
-format transformation.
+the raw measurements become the bootstrap policy because promotion is a
+format transformation. `assemble` also reads the cohort descriptors under
+nodes/ (runtime infra state, written by `up --network`) for each founding
+validator's IP — delivered in the genesis file but excluded from its
+config digest, so IPs never enter network_id.
 
 Usage (one directory per network: `init` gathers the authored inputs — the
 only command that takes loose files — then `assemble`/`validate` operate on
-the directory):
+the directory; between `init` and `assemble` the founding cohort is
+provisioned and harvested, since assemble pins the harvested validator
+set):
 
     uv run python -m tee.cli.common.manifest init tee/networks/seismic-devnet-3 \
         --reth-genesis dev.json \
         --measurements ../seismic-images/build/measurements.json \
-        --measurement-id seismic_2026-06-11.abc123.vhd
-    # edit tee/networks/seismic-devnet-3/inputs/summit-genesis.toml:
+        --measurement-id seismic_2026-06-11.abc123.vhd --founders 4
+    # edit tee/networks/seismic-devnet-3/inputs/summit-genesis.toml and
+    # inputs/founder-withdrawal-credentials.json, then:
+    #   seismic-tee-network up --network tee/networks/seismic-devnet-3 --count N
+    #   seismic-tee-network harvest tee/networks/seismic-devnet-3
     uv run python -m tee.cli.common.manifest assemble tee/networks/seismic-devnet-3
     uv run python -m tee.cli.common.manifest validate tee/networks/seismic-devnet-3
 """
@@ -58,6 +68,7 @@ import hashlib
 import json
 import logging
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -69,7 +80,9 @@ from typing import Any
 
 from eth_utils import keccak
 
+from tee.cli.common.descriptor import load_descriptor, require
 from tee.cli.common.logging_setup import setup_logging
+from tee.cli.common.repo import DEFAULT_STACK_CONFIG
 
 logger = logging.getLogger(__name__)
 
@@ -94,13 +107,27 @@ DEFAULT_ATTESTATION_TYPE = "azure-tdx"
 # a second one in Python.
 DEFAULT_ADMISSION_BIN = "seismic-measurement-admission"
 
-# Summit's node binary; its `genesis digest` subcommand computes
-# summit.genesis_config_digest. The digest is SHA-256 over summit's
-# domain-prefixed SSZ serialization of the complete genesis — summit's own
-# definition of chain identity (its P2P and signing domains derive from it) —
-# so deploy shells out to the one implementation instead of mirroring the
-# SSZ layout in Python.
+# Summit's node binary. Its `genesis digest` subcommand computes
+# summit.genesis_config_digest: SHA-256 over summit's domain-prefixed SSZ
+# serialization of the complete genesis — summit's own definition of chain
+# identity (its P2P and signing domains derive from it). Its `genesis
+# set-validators` subcommand emits the completed genesis the digest is
+# computed over. Both are shell-outs to the one implementation instead of
+# mirroring the SSZ layout / canonical rendering in Python.
 DEFAULT_SUMMIT_BIN = "summit"
+
+# The DCAP verifier from the enclave repo (bin/verify-quote): exit 0 plus
+# one JSON report on stdout ⇔ verified. `network harvest` runs it when the
+# founding keys are collected, and `manifest assemble` re-runs it over the
+# archived evidence before the harvested set is pinned. Verification-only;
+# runs natively on any dev platform (verification is pure computation over
+# the evidence bytes — no TEE hardware involved).
+DEFAULT_VERIFY_QUOTE_BIN = "verify-quote"
+
+# Summit's consensus (BLS) port: each validator entry in the completed
+# summit genesis pins "<ip>:<port>". IPs are operational data — the config
+# digest excludes them — so they are delivered but never pinned.
+SUMMIT_CONSENSUS_PORT = 18551
 
 # Today's hardcoded summit BLS domain separator.
 # two chains sharing it can cross-replay BLS signatures.
@@ -108,7 +135,11 @@ DEFAULT_SUMMIT_BIN = "summit"
 _SUMMIT_DEFAULT_NAMESPACE = "_SUMMIT"
 
 MANIFEST_FILENAME = "network-manifest.json"
-POLICY_FILENAME = "measurement-policy.json"
+# "bootstrap" because this file is only the *founding* allowlist (what the
+# manifest's bootstrap_policy_hash pins and registry genesis storage is
+# compiled from); the live policy is the registry contract's state, which
+# the authority can mutate after genesis.
+POLICY_FILENAME = "measurement-policy-bootstrap.json"
 RETH_GENESIS_FILENAME = "reth-genesis.json"
 # Both the authored input (under inputs/) and the shipped artifact (at the
 # network directory top level) use this basename: same format, the
@@ -128,7 +159,8 @@ INPUTS_DIRNAME = "inputs"
 NODES_DIRNAME = "nodes"
 
 # The founding cohort's inputs: founder-withdrawal-credentials.json is
-# authored (node name -> withdrawal credentials); harvest/ holds what
+# authored (one address per founding node, paired in node-name order by
+# load_founding_set — authorable before any box exists); harvest/ holds what
 # `network harvest` collected from the live cohort (pubkeys, quotes,
 # verification reports) — provenance like measurements.json, but harvested
 # rather than authored.
@@ -300,7 +332,8 @@ def promote_measurements(
     attestation_type: str = DEFAULT_ATTESTATION_TYPE,
     admission_bin: str = DEFAULT_ADMISSION_BIN,
 ) -> bytes:
-    """Promote `make measure` output into measurement-policy.json bytes.
+    """Promote `make measure` output into measurement-policy-bootstrap.json
+    bytes.
 
     Shells out to the admission CLI's `promote`, which selects exactly the
     admission-schema registers from the raw measured-boot output, normalizes
@@ -437,6 +470,344 @@ def _check_hex_or_gate(value: Any, nbytes: int, fieldname: str) -> None:
         _check_hex(value, nbytes, fieldname)
     except ManifestSchemaError as e:
         raise GateError(str(e)) from None
+
+
+def _check_bare_hex(value: Any, nbytes: int, fieldname: str) -> None:
+    """Bare lowercase hex — summit's keystore wire spelling, the form the
+    genesis config_digest commits to. Any other spelling is rejected, never
+    normalized, so nothing non-canonical is laundered into the pinned set."""
+    if not isinstance(value, str) or not re.fullmatch(
+        rf"[0-9a-f]{{{2 * nbytes}}}", value
+    ):
+        raise GateError(
+            f"{fieldname}: expected {nbytes}-byte lowercase bare hex, got {value!r}"
+        )
+
+
+def load_founder_credentials(path: Path) -> list[str]:
+    """Load the authored founder-withdrawal-credentials.json: one
+    0x-prefixed address per founder, in a JSON array.
+
+    A list rather than a node-name mapping so the founders' addresses are
+    authorable before any box exists — they are a fact about the founders,
+    not about the infrastructure. `load_founding_set` pairs the i-th
+    address with the i-th founding validator in node-name order.
+    """
+    if not path.is_file():
+        raise GateError(
+            f"{path} not found — author it as a JSON array of the founders' "
+            "withdrawal credentials (0x-prefixed addresses), one per "
+            "founding node"
+        )
+    try:
+        data = json.loads(path.read_text())
+    except json.JSONDecodeError as e:
+        raise GateError(f"{path}: not valid JSON: {e}") from None
+    if not isinstance(data, list) or not all(isinstance(v, str) for v in data):
+        raise GateError(
+            f"{path}: expected a JSON array of withdrawal credentials "
+            "(0x-prefixed addresses), one per founding node"
+        )
+    bad = sorted({addr for addr in data if not _is_address(addr)})
+    if bad:
+        raise GateError(
+            f"{path}: withdrawal credentials must be 0x + 40 hex chars; bad "
+            f"entr(ies): {', '.join(bad)}"
+        )
+    return data
+
+
+def _is_address(value: str) -> bool:
+    try:
+        _check_hex(value, 20, "withdrawal credentials")
+    except ManifestSchemaError:
+        return False
+    return True
+
+
+def load_harvest_records(harvest_dir: Path) -> dict[str, dict[str, Any]]:
+    """Read the harvested founding records (inputs/harvest/<node>.json).
+
+    Validates the fields the founding set is built from — nonce, both
+    pubkeys, the evidence object — and rejects a pubkey repeated across
+    boxes: summit's genesis keys validator accounts by node pubkey, so a
+    repeated key silently collapses the set, and a shared consensus key is
+    accidental-equivocation material. The records are plain committed
+    files, so everything is re-checked here even though the harvest
+    validated it at collection time.
+    """
+    paths = sorted(harvest_dir.glob("*.json")) if harvest_dir.is_dir() else []
+    if not paths:
+        raise GateError(
+            f"no harvest records in {harvest_dir} — assemble pins the "
+            "founding validator set from them; provision the cohort "
+            "(`up --network`) and run `seismic-tee-network harvest` first"
+        )
+    records: dict[str, dict[str, Any]] = {}
+    for path in paths:
+        try:
+            record = json.loads(path.read_text())
+        except json.JSONDecodeError as e:
+            raise GateError(f"{path}: not valid JSON: {e}") from None
+        if not isinstance(record, dict):
+            raise GateError(f"{path}: expected a JSON object")
+        _check_bare_hex(record.get("harvest_nonce"), 32, f"{path}: harvest_nonce")
+        _check_bare_hex(record.get("node_public_key"), 32, f"{path}: node_public_key")
+        _check_bare_hex(
+            record.get("consensus_public_key"), 48, f"{path}: consensus_public_key"
+        )
+        if not isinstance(record.get("evidence"), dict):
+            raise GateError(
+                f"{path}: no evidence object — without the archived quote the "
+                "record cannot be re-verified, so it must not be pinned"
+            )
+        records[path.stem] = record
+    for key_field in ("node_public_key", "consensus_public_key"):
+        seen: dict[str, str] = {}
+        for name in sorted(records):
+            key = records[name][key_field]
+            if key in seen:
+                raise GateError(
+                    f"{seen[key]} and {name} carry the same {key_field} "
+                    f"({key}); the harvest is not the distinct founder set "
+                    "being pinned — re-found and re-harvest"
+                )
+            seen[key] = name
+    return records
+
+
+@dataclass
+class FoundingSet:
+    """The founding cohort as assemble pins it: the summit validator
+    entries (harvested keys + authored credentials + current IPs) and the
+    harvest records they came from (for quote re-verification)."""
+
+    validators: list[dict[str, str]]
+    records: dict[str, dict[str, Any]]
+
+
+def load_founding_set(network_dir: Path) -> FoundingSet:
+    """Pair the harvested cohort with its authored withdrawal credentials
+    and current IPs into summit validator entries.
+
+    The credentials are positional: the i-th authored address goes to the
+    i-th harvested box in node-name order, and the counts must match
+    exactly — one address short means a box can't be pinned, one too many
+    means the harvest isn't the cohort the founders authored for, and
+    either way assembling would pin a set other than the intended one. The
+    pairing is logged and lands visibly in the emitted genesis, since
+    nothing downstream can tell a swapped pair from an intended one. IPs
+    come from the cohort descriptors under nodes/ ("<ip>:<consensus
+    port>"): delivered in the genesis file but excluded from its config
+    digest, so the committed file is a founding-era snapshot and IP churn
+    never re-founds.
+    """
+    inputs_dir = network_dir / INPUTS_DIRNAME
+    founders = load_founder_credentials(inputs_dir / FOUNDERS_FILENAME)
+    records = load_harvest_records(inputs_dir / HARVEST_DIRNAME)
+    if len(founders) != len(records):
+        raise GateError(
+            f"{inputs_dir / FOUNDERS_FILENAME} carries {len(founders)} "
+            f"withdrawal credential(s) but {len(records)} box(es) were "
+            f"harvested into {inputs_dir / HARVEST_DIRNAME} "
+            f"({', '.join(sorted(records))}) — author one address per "
+            "founding node"
+        )
+    nodes_dir = network_dir / NODES_DIRNAME
+    validators = []
+    for name, credentials in zip(sorted(records), founders, strict=True):
+        descriptor_path = nodes_dir / f"{name}.json"
+        if not descriptor_path.is_file():
+            raise GateError(
+                f"{descriptor_path} not found — the cohort descriptors from "
+                "`up --network` supply each founding validator's IP. A "
+                "harvested box whose descriptor is gone means the cohort "
+                "changed under the harvest: re-found rather than assembling"
+            )
+        try:
+            ip = require(load_descriptor(descriptor_path), "public_ip", descriptor_path)
+        except (json.JSONDecodeError, ValueError) as e:
+            raise GateError(f"{descriptor_path}: {e}") from None
+        logger.info("founding validator %s: withdrawals to %s", name, credentials)
+        validators.append(
+            {
+                "node_public_key": records[name]["node_public_key"],
+                "consensus_public_key": records[name]["consensus_public_key"],
+                "ip_address": f"{ip}:{SUMMIT_CONSENSUS_PORT}",
+                "withdrawal_credentials": credentials,
+            }
+        )
+    return FoundingSet(validators=validators, records=records)
+
+
+def _verify_quote_bin_not_found(verify_quote_bin: str) -> GateError:
+    return GateError(
+        f"{verify_quote_bin!r} not found; build the enclave repo's "
+        "bin/verify-quote and put it on PATH, or pass --verify-quote-bin"
+    )
+
+
+def verify_quote_evidence(
+    evidence: dict[str, Any],
+    *,
+    nonce: str,
+    node_pubkey: str,
+    consensus_pubkey: str,
+    policy_path: Path,
+    verify_quote_bin: str = DEFAULT_VERIFY_QUOTE_BIN,
+    pccs_url: str | None = None,
+    override_azure_outdated_tcb: bool = False,
+) -> dict[str, Any]:
+    """DCAP-verify one founding quote via the enclave repo's `verify-quote`.
+
+    Its contract: exit 0 plus one JSON report on stdout ⇔ the evidence
+    verifies cryptographically, its report_data binds this nonce + these
+    pubkeys, and its measurements satisfy the policy. The evidence goes
+    over stdin, byte-exact with the harvest archive.
+    """
+    cmd = [
+        verify_quote_bin,
+        "--evidence",
+        "-",
+        "--policy",
+        str(policy_path),
+        "--nonce",
+        nonce,
+        "--node-pubkey",
+        node_pubkey,
+        "--consensus-pubkey",
+        consensus_pubkey,
+    ]
+    if pccs_url:
+        cmd += ["--pccs-url", pccs_url]
+    if override_azure_outdated_tcb:
+        cmd.append("--override-azure-outdated-tcb")
+    try:
+        result = subprocess.run(
+            cmd,
+            input=json.dumps(evidence).encode("utf-8"),
+            capture_output=True,
+            # Generous — DCAP verification fetches collateral over the
+            # network (PCCS) — but a hung fetch must not stall the
+            # harvest/assemble forever.
+            timeout=300,
+        )
+    except FileNotFoundError:
+        raise _verify_quote_bin_not_found(verify_quote_bin) from None
+    except subprocess.TimeoutExpired:
+        raise GateError(f"`{' '.join(cmd)}` timed out") from None
+    if result.returncode != 0:
+        detail = result.stderr.decode("utf-8", "replace").strip()
+        raise GateError(f"quote verification failed:\n{detail}")
+    try:
+        report = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        report = None
+    if not isinstance(report, dict) or report.get("verified") is not True:
+        raise GateError(
+            f"`{verify_quote_bin}` exited 0 without a verified report: "
+            f"{result.stdout!r}"
+        )
+    return report
+
+
+def verify_harvest_records(
+    records: dict[str, dict[str, Any]],
+    policy_bytes: bytes,
+    verify_quote_bin: str = DEFAULT_VERIFY_QUOTE_BIN,
+    pccs_url: str | None = None,
+    override_azure_outdated_tcb: bool = False,
+    verify_fn: Callable[[str, dict[str, Any], Path], dict[str, Any]] | None = None,
+) -> None:
+    """Re-verify every archived founding quote against the compiled policy.
+
+    The harvest verified these quotes when it collected them, but assemble
+    is the step that pins the validator set into network_id — so it re-runs
+    the same check over the archived evidence rather than trusting an
+    earlier run's verdict (the records are plain files that may have been
+    copied, committed, and edited between harvest and assemble).
+    """
+    if verify_fn is None and shutil.which(verify_quote_bin) is None:
+        # Tooling, not evidence: a missing verifier fails here, before the
+        # loop whose failures carry burned-founding advice.
+        raise _verify_quote_bin_not_found(verify_quote_bin)
+    with tempfile.NamedTemporaryFile(
+        prefix="measurement-policy-", suffix=".json"
+    ) as policy_file:
+        policy_file.write(policy_bytes)
+        policy_file.flush()
+        policy_path = Path(policy_file.name)
+        run_verify = verify_fn or (
+            lambda _name, record, path: verify_quote_evidence(
+                record["evidence"],
+                nonce=record["harvest_nonce"],
+                node_pubkey=record["node_public_key"],
+                consensus_pubkey=record["consensus_public_key"],
+                policy_path=path,
+                verify_quote_bin=verify_quote_bin,
+                pccs_url=pccs_url,
+                override_azure_outdated_tcb=override_azure_outdated_tcb,
+            )
+        )
+        for name in sorted(records):
+            try:
+                run_verify(name, records[name], policy_path)
+            except GateError as e:
+                raise GateError(
+                    f"{name}: {e}\nA founding key whose archived quote does "
+                    "not verify must not be pinned — re-found (or re-harvest "
+                    "an unchanged cohort) rather than assembling around it"
+                ) from None
+            logger.info("%s: archived founding quote verified", name)
+
+
+def summit_set_validators(
+    template_bytes: bytes,
+    validators: list[dict[str, str]],
+    summit_bin: str = DEFAULT_SUMMIT_BIN,
+) -> bytes:
+    """Emit the completed summit genesis via `summit genesis set-validators`.
+
+    Emission belongs to summit: the subcommand parses the template into
+    summit's own Genesis type, replaces its validator set with
+    `validators`, sorts them by node key (the order config_digest hashes),
+    renders the whole file canonically — summit's hex spellings, no
+    authored comments — and reloads what it emits, so a genesis no node
+    could load fails here rather than at boot. The returned bytes are what
+    the artifact set ships and the manifest's digest commits to.
+    """
+    with (
+        tempfile.NamedTemporaryFile(suffix=".toml") as template_file,
+        tempfile.NamedTemporaryFile(suffix=".json") as validators_file,
+    ):
+        template_file.write(template_bytes)
+        template_file.flush()
+        validators_file.write((json.dumps(validators, indent=2) + "\n").encode())
+        validators_file.flush()
+        cmd = [
+            summit_bin,
+            "genesis",
+            "set-validators",
+            "-i",
+            template_file.name,
+            "-v",
+            validators_file.name,
+        ]
+        try:
+            result = subprocess.run(cmd, capture_output=True, timeout=120, check=True)
+        except FileNotFoundError:
+            raise GateError(
+                f"{summit_bin!r} not found; build summit (the `genesis "
+                "set-validators` subcommand) or pass --summit-bin"
+            ) from None
+        except subprocess.TimeoutExpired:
+            raise GateError(f"`{' '.join(cmd)}` timed out") from None
+        except subprocess.CalledProcessError as e:
+            detail = (e.stderr or e.stdout or b"").decode("utf-8", "replace").strip()
+            raise GateError(f"`{' '.join(cmd)}` failed: {detail}") from None
+    if not result.stdout:
+        raise GateError(f"`{' '.join(cmd)}` emitted nothing on stdout")
+    return result.stdout
 
 
 @dataclass
@@ -668,7 +1039,7 @@ def _validate_registry_account(
             f"registry {addr} genesis storage is empty: the admission policy "
             "must be genesis-pinned. Seed the account with the compiled "
             "registry_genesis_storage (`seismic-measurement-admission "
-            "compile measurement-policy.json`)"
+            "compile measurement-policy-bootstrap.json`)"
         )
     if actual != expected:
         problems = [
@@ -712,12 +1083,13 @@ def fill_eth_genesis_hash(genesis_bytes: bytes, eth_genesis_hash: str) -> bytes:
     value.
 
     The hash is derived from reth-genesis.json — never authored — but summit's
-    genesis-binary parser requires the field to be present in the TOML it
-    reads, so the shipped copy must carry it. Any declared value is dropped
-    (it can only be stale copy-paste, e.g. summit's example_genesis.toml) and
-    the computed one is prepended — always valid TOML for a top-level key, and
-    deterministic, so the filled copy is what `genesis_config_digest` commits
-    to and the artifact set ships.
+    genesis parser requires the field to be present in the TOML it reads, so
+    the template fed to `summit genesis set-validators` must carry it. Any
+    declared value is dropped (it can only be stale copy-paste, e.g. summit's
+    example_genesis.toml) and the computed one is prepended — always valid
+    TOML for a top-level key; set-validators re-renders the completed file,
+    which is what `genesis_config_digest` commits to and the artifact set
+    ships.
     """
     lines, in_table = [], False
     for line in genesis_bytes.splitlines(keepends=True):
@@ -744,6 +1116,7 @@ def assemble(
     reth_genesis: Path,
     summit_genesis: Path,
     policy_bytes: bytes,
+    validators: list[dict[str, str]],
     registry: str = DEFAULT_REGISTRY,
     authority: str = DEFAULT_AUTHORITY,
     reth_bin: str = "seismic-reth",
@@ -752,17 +1125,19 @@ def assemble(
     genesis_hash_fn: Callable[[Path], str] | None = None,
     compile_fn: Callable[[bytes], dict[str, Any]] | None = None,
     digest_fn: Callable[[Path], str] | None = None,
+    set_validators_fn: Callable[[bytes, list[dict[str, str]]], bytes] | None = None,
 ) -> AssembledManifest:
     """Assemble, render, and gate-check a v1 network manifest.
 
     The summit genesis's `eth_genesis_hash` is derived from reth-genesis.json,
     never authored: whatever the input declares (if anything) is replaced with
-    the computed value in the completed copy the artifact set ships —
-    committed bytes never carry a stale hash. The manifest pins that
-    completed genesis via summit's own config digest (`summit genesis
-    digest`), which covers the consensus parameters and the validator set;
-    an input without validators ships an empty placeholder set
-    (`validators = []`).
+    the computed value — committed bytes never carry a stale hash. The
+    `validators` set (the founding cohort's harvested keys, paired with
+    authored credentials and current IPs — see load_founding_set) is filled
+    in by `summit genesis set-validators`, which re-renders the whole file
+    canonically; the artifact set ships summit's emission, and the manifest
+    pins it via summit's own config digest (`summit genesis digest`), which
+    covers the consensus parameters and the validator set but not the IPs.
 
     The registry account's genesis storage is likewise derived, not authored:
     the policy document is compiled and its registry_genesis_storage injected
@@ -798,12 +1173,25 @@ def assemble(
             authored["eth_genesis_hash"],
             eth_hash,
         )
+    if not validators:
+        raise GateError(
+            "no founding validators — the validator set is pinned from the "
+            "harvest, and a founding with an empty set is not a network"
+        )
     if "validators" not in authored:
-        # summit requires the field to *parse* a genesis (its Genesis type has
-        # no serde default); an input authored without a validator set ships
-        # an empty placeholder.
+        # summit requires the field to *parse* a genesis (its Genesis type
+        # has no serde default), and set-validators loads the template
+        # before replacing whatever set it declares — so an input authored
+        # without one gets an empty placeholder purely to make the template
+        # loadable. The shipped set always comes from `validators`.
         authored_bytes = b"validators = []\n" + authored_bytes
-    summit_genesis_bytes = fill_eth_genesis_hash(authored_bytes, eth_hash)
+    template_bytes = fill_eth_genesis_hash(authored_bytes, eth_hash)
+    emit = set_validators_fn or (
+        lambda template, vals: summit_set_validators(
+            template, vals, summit_bin=summit_bin
+        )
+    )
+    summit_genesis_bytes = emit(template_bytes, validators)
     resolve_digest = digest_fn or (
         lambda p: summit_config_digest(p, summit_bin=summit_bin)
     )
@@ -895,10 +1283,11 @@ def starter_summit_genesis(name: str) -> str:
     """
     # json.dumps emits a valid TOML basic string for these simple values.
     return f"""\
-# Summit network parameters. `manifest assemble` prepends the two derived
-# fields above this header — eth_genesis_hash (from reth-genesis.json) and
-# validators (the founding validator set — TEE-born keys gathered from the
-# live cohort) — and ships the completed file as summit-genesis.toml.
+# Summit network parameters. `manifest assemble` completes this input with
+# the two derived fields — eth_genesis_hash (from reth-genesis.json) and
+# validators (the founding set: TEE-born keys harvested from the live
+# cohort) — and ships summit's own rendering of the completed file as
+# summit-genesis.toml, so comments here never reach the artifact.
 # Review every value before founding a real network.
 leader_timeout_ms = 2000
 notarization_timeout_ms = 4000
@@ -947,20 +1336,26 @@ def init_network_dir(
     measurements: Path,
     summit_genesis: Path | None = None,
     measurement_id: str | None = None,
+    founders: int = 0,
+    force: bool = False,
 ) -> list[Path]:
-    """Scaffold a network directory's three authored inputs under inputs/.
+    """Scaffold a network directory's four authored inputs under inputs/.
 
     Copies the genesis and measurements in (stamping measurement_id into
     the latter when given), and writes a starter summit genesis
-    (namespace = name) unless one is supplied to copy. The founder edits
-    these in place, then `assemble --dir` derives the artifact set into the
-    directory's top level — inputs and the committed artifacts live
-    together, so the directory is the whole network (commit it for networks
-    that matter).
+    (namespace = name) unless one is supplied to copy, plus `founders`
+    placeholder withdrawal credentials (`0x00…0<i>` — obviously fake, so a
+    set that survives into a network anyone cares about shows on sight).
+    The founder edits all four in place, then provisions and harvests the
+    cohort (assemble pins the harvested validator set) before
+    `assemble --dir` derives the artifact set into the directory's top
+    level — inputs and the committed artifacts live together, so the
+    directory is the whole network (commit it for networks that matter).
     """
     measurements_bytes = measurements.read_bytes()
     if measurement_id is not None:
         measurements_bytes = stamp_measurement_id(measurements_bytes, measurement_id)
+    credentials = [f"0x{i:040x}" for i in range(1, founders + 1)]
     contents = {
         RETH_GENESIS_FILENAME: reth_genesis.read_bytes(),
         MEASUREMENTS_FILENAME: measurements_bytes,
@@ -969,13 +1364,15 @@ def init_network_dir(
             if summit_genesis is not None
             else starter_summit_genesis(name).encode()
         ),
+        FOUNDERS_FILENAME: (json.dumps(credentials, indent=2) + "\n").encode(),
     }
     inputs_dir = out_dir / INPUTS_DIRNAME
     existing = [n for n in contents if (inputs_dir / n).exists()]
-    if existing:
+    if existing and not force:
         raise GateError(
             f"refusing to overwrite existing input(s) in {inputs_dir}: "
-            f"{', '.join(existing)}"
+            f"{', '.join(existing)} — pass --force to re-author them "
+            "(re-assembling from changed inputs is a new network identity)"
         )
     inputs_dir.mkdir(parents=True, exist_ok=True)
     written = []
@@ -1134,8 +1531,26 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--measurement-id",
         default=None,
         help="image artifact filename the measurements belong to; stamped "
-        f"into {INPUTS_DIRNAME}/{MEASUREMENTS_FILENAME} so assemble needs "
-        "no --measurement-id",
+        f"into {INPUTS_DIRNAME}/{MEASUREMENTS_FILENAME}. Only needed when "
+        "the measurements file carries no measurement_id of its own "
+        "(seismic-images' make measure stamps one)",
+    )
+    ini.add_argument(
+        "--founders",
+        type=int,
+        default=0,
+        metavar="N",
+        help="how many placeholder withdrawal credentials to scaffold into "
+        f"{INPUTS_DIRNAME}/{FOUNDERS_FILENAME} (one per founding node, "
+        "paired in node-name order at assemble time). The placeholders are "
+        "all a throwaway needs; a real founding replaces them with the "
+        "founders' addresses. Default: an empty list to fill in",
+    )
+    ini.add_argument(
+        "--force",
+        action="store_true",
+        help="overwrite existing authored inputs (re-authoring them and "
+        "re-assembling is a new network identity)",
     )
 
     asm = sub.add_parser(
@@ -1172,6 +1587,24 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="overwrite an existing manifest (a new network identity)",
     )
+    asm.add_argument(
+        "--verify-quote-bin",
+        default=DEFAULT_VERIFY_QUOTE_BIN,
+        help="DCAP verifier CLI from the enclave repo (bin/verify-quote), "
+        "used to re-verify the archived harvest quotes before the founding "
+        "set is pinned",
+    )
+    asm.add_argument(
+        "--pccs-url",
+        default=None,
+        metavar="URL",
+        help="forwarded to verify-quote: PCCS URL for DCAP collateral",
+    )
+    asm.add_argument(
+        "--override-azure-outdated-tcb",
+        action="store_true",
+        help="forwarded to verify-quote: allow the Azure outdated-TCB override path",
+    )
     add_reth_bin(asm)
     add_admission_bin(asm)
     add_summit_bin(asm)
@@ -1191,10 +1624,13 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     args = parser.parse_args(argv)
 
+    # Absolute from here on, so every path this CLI prints is clickable in a
+    # terminal and names one directory unambiguously.
+    args.dir = args.dir.resolve()
     if args.command == "init":
-        args.name = args.name or args.dir.resolve().name
+        args.name = args.name or args.dir.name
     elif args.command == "assemble":
-        args.name = args.dir.resolve().name
+        args.name = args.dir.name
         inputs_dir = args.dir / INPUTS_DIRNAME
         args.reth_genesis = inputs_dir / RETH_GENESIS_FILENAME
         args.summit_genesis = inputs_dir / SUMMIT_GENESIS_FILENAME
@@ -1220,18 +1656,39 @@ def main() -> None:
                 args.measurements,
                 args.summit_genesis,
                 args.measurement_id,
+                founders=args.founders,
+                force=args.force,
             )
             for path in written:
                 logger.info("wrote %s", path)
-            id_hint = (
-                ""
-                if args.measurement_id
-                else " --measurement-id <image-artifact-filename>"
+            # Suggest --measurement-id only when the copied measurements
+            # actually lack one (make measure stamps it at the source; a
+            # promoted policy carries one per record).
+            stamped = json.loads(
+                (args.dir / INPUTS_DIRNAME / MEASUREMENTS_FILENAME).read_bytes()
             )
+            needs_id = isinstance(stamped, dict) and "measurement_id" not in stamped
+            id_hint = " --measurement-id <image-artifact-filename>" if needs_id else ""
+            inputs_dir = args.dir / INPUTS_DIRNAME
+            founders_hint = (
+                "update the placeholder addresses in"
+                if args.founders
+                else "fill in one address per founding node in"
+            )
+            # No --count on `up`: the authored credentials size the cohort.
             print(
-                f"Scaffolded {args.dir}. Edit the inputs (at minimum review "
-                f"{INPUTS_DIRNAME}/{SUMMIT_GENESIS_FILENAME}), then:\n"
-                f"  seismic-tee-network manifest assemble {args.dir}{id_hint}"
+                f"Scaffolded {args.dir}. Next:\n"
+                f"  1. review {inputs_dir / SUMMIT_GENESIS_FILENAME}\n"
+                f"  2. {founders_hint}\n"
+                f"     {inputs_dir / FOUNDERS_FILENAME}\n"
+                f"  3. review the stack config the cohort boots from\n"
+                f"     {DEFAULT_STACK_CONFIG}\n"
+                "     (vhd_blob_url must name the image the measurements "
+                "describe;\n"
+                "      region, VM size, and operator_ip_cidr live there too)\n"
+                f"  4. seismic-tee-network up --network {args.dir}\n"
+                f"  5. seismic-tee-network harvest {args.dir}\n"
+                f"  6. seismic-tee-network manifest assemble {args.dir}{id_hint}"
             )
         elif args.command == "assemble":
             missing = [
@@ -1246,17 +1703,31 @@ def main() -> None:
                     + f" — authored inputs live under {INPUTS_DIRNAME}/; "
                     "scaffold them with `manifest init`"
                 )
+            founding = load_founding_set(args.dir)
+            logger.info(
+                "founding set: %d validator(s) from %s",
+                len(founding.validators),
+                args.dir / INPUTS_DIRNAME / HARVEST_DIRNAME,
+            )
             policy_bytes = promote_measurements(
                 args.measurements.read_bytes(),
                 args.measurement_id,
                 args.attestation_type,
                 admission_bin=args.admission_bin,
             )
+            verify_harvest_records(
+                founding.records,
+                policy_bytes,
+                verify_quote_bin=args.verify_quote_bin,
+                pccs_url=args.pccs_url,
+                override_azure_outdated_tcb=args.override_azure_outdated_tcb,
+            )
             assembled = assemble(
                 name=args.name,
                 reth_genesis=args.reth_genesis,
                 summit_genesis=args.summit_genesis,
                 policy_bytes=policy_bytes,
+                validators=founding.validators,
                 registry=args.registry,
                 authority=args.authority,
                 reth_bin=args.reth_bin,
@@ -1267,6 +1738,7 @@ def main() -> None:
             logger.info("wrote %s", args.out / MANIFEST_FILENAME)
             logger.info("wrote %s", args.out / POLICY_FILENAME)
             logger.info("wrote %s", args.out / RETH_GENESIS_FILENAME)
+            logger.info("wrote %s", args.out / SUMMIT_GENESIS_FILENAME)
             print(f"network_id: {assembled.network_id}")
         else:
             manifest_bytes = args.manifest.read_bytes()

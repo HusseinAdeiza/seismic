@@ -18,6 +18,7 @@ from eth_utils import keccak
 from tee.cli.common import manifest as manifest_mod
 from tee.cli.common.manifest import (
     DEFAULT_ADMISSION_BIN,
+    SUMMIT_CONSENSUS_PORT,
     AssembledManifest,
     GateContext,
     GateError,
@@ -27,13 +28,17 @@ from tee.cli.common.manifest import (
     compute_network_id,
     init_network_dir,
     inject_registry_genesis_storage,
+    load_founding_set,
+    load_harvest_records,
     promote_measurements,
     render_manifest,
     render_network_section,
     run_validation_gates,
+    summit_set_validators,
     validate_manifest_schema,
     validate_reth_genesis_matches,
     validate_summit_genesis_matches,
+    verify_harvest_records,
     write_artifact_set,
 )
 
@@ -42,6 +47,31 @@ def _content_digest(path: Path) -> str:
     """Test stand-in for `summit genesis digest`: content-derived (a byte
     hash, not summit's SSZ digest), so tamper-detection gates still fire."""
     return "0x" + hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+# A founding validator entry as load_founding_set builds it (harvested keys
+# in summit's bare-lowercase-hex keystore spelling, authored credentials,
+# descriptor IP + consensus port).
+VALIDATOR = {
+    "node_public_key": "ab" * 32,
+    "consensus_public_key": "cd" * 48,
+    "ip_address": f"203.0.113.7:{SUMMIT_CONSENSUS_PORT}",
+    "withdrawal_credentials": "0x" + "f3" * 20,
+}
+
+
+def _fake_set_validators(template: bytes, validators: list[dict[str, str]]) -> bytes:
+    """Test stand-in for `summit genesis set-validators`: replaces the
+    template's placeholder set with inline-table entries, sorted by node key
+    like summit's canonical emission. Line-level splice (not a re-render), so
+    byte-oriented assertions about the rest of the template stay meaningful."""
+    entries = ", ".join(
+        "{ " + ", ".join(f"{k} = {json.dumps(v[k])}" for k in sorted(v)) + " }"
+        for v in sorted(validators, key=lambda v: v["node_public_key"])
+    )
+    return template.replace(
+        b"validators = []\n", f"validators = [{entries}]\n".encode(), 1
+    )
 
 
 # The shared policy-compiler CLI from the enclave repo. Tests of the
@@ -493,9 +523,11 @@ class GateTests(unittest.TestCase):
             "reth_genesis": self.reth_genesis,
             "summit_genesis": self.summit_genesis,
             "policy_bytes": self.policy_bytes,
+            "validators": [dict(VALIDATOR)],
             "genesis_hash_fn": lambda _p: self.ETH_HASH,
             "compile_fn": self._report,
             "digest_fn": _content_digest,
+            "set_validators_fn": _fake_set_validators,
         }
         kwargs.update(overrides)
         # ty can't verify a **kwargs dict-splat against typed params.
@@ -695,12 +727,28 @@ class GateTests(unittest.TestCase):
         # validate-style round trip: gates re-pass over the written copy.
         run_validation_gates(assembled.manifest, self._ctx(summit_genesis=written))
 
-    def test_assemble_fills_empty_validators_placeholder(self):
-        # summit requires the key to *parse* a genesis (no serde default); a
-        # template authored without a validator set ships an empty placeholder.
+    def test_assemble_ships_the_founding_validator_set(self):
+        # The validator set the artifact ships is exactly the one passed in
+        # (the founding cohort from load_founding_set), filled by the
+        # set-validators emission.
         assembled = self._assemble()
         genesis = tomllib.loads(assembled.summit_genesis_bytes.decode())
-        self.assertEqual(genesis["validators"], [])
+        self.assertEqual(genesis["validators"], [VALIDATOR])
+
+    def test_assemble_rejects_an_empty_validator_set(self):
+        with self.assertRaisesRegex(GateError, "no founding validators"):
+            self._assemble(validators=[])
+
+    def test_digest_commits_to_the_emitted_genesis(self):
+        # The manifest's config digest is computed over set-validators'
+        # output (validator set included), not over the pre-emission
+        # template.
+        assembled = self._assemble()
+        emitted = "0x" + hashlib.sha256(assembled.summit_genesis_bytes).hexdigest()
+        self.assertEqual(assembled.manifest["summit"]["genesis_config_digest"], emitted)
+        self.assertIn(
+            VALIDATOR["node_public_key"].encode(), assembled.summit_genesis_bytes
+        )
 
     def test_assemble_replaces_declared_genesis_hash(self):
         # A declared value (e.g. from summit's example_genesis.toml) is stale
@@ -769,7 +817,7 @@ class GateTests(unittest.TestCase):
         write_artifact_set(self.out_dir, assembled)
         for name in (
             "network-manifest.json",
-            "measurement-policy.json",
+            "measurement-policy-bootstrap.json",
             "reth-genesis.json",
             "summit-genesis.toml",
         ):
@@ -804,10 +852,15 @@ class InitTests(unittest.TestCase):
         self.assertEqual(
             sorted(p.name for p in written),
             [
+                "founder-withdrawal-credentials.json",
                 "measurements.json",
                 "reth-genesis.json",
                 "summit-genesis.toml",
             ],
+        )
+        # No --founders: an empty list to fill in, not a guessed cohort size.
+        self.assertEqual(
+            json.loads((inputs / "founder-withdrawal-credentials.json").read_text()), []
         )
         self.assertEqual(
             (inputs / "reth-genesis.json").read_bytes(),
@@ -829,10 +882,29 @@ class InitTests(unittest.TestCase):
             src.read_bytes(),
         )
 
-    def test_refuses_overwrite(self):
+    def test_refuses_overwrite_unless_forced(self):
         init_network_dir(self.out, "t", self.reth_genesis, self.measurements)
         with self.assertRaisesRegex(GateError, "refusing to overwrite"):
             init_network_dir(self.out, "t", self.reth_genesis, self.measurements)
+        # The re-found/re-author path: --force overwrites the inputs.
+        self.reth_genesis.write_text('{"config": {"chainId": 9999}}')
+        init_network_dir(
+            self.out, "t", self.reth_genesis, self.measurements, force=True
+        )
+        rewritten = (self.out / "inputs" / "reth-genesis.json").read_text()
+        self.assertIn("9999", rewritten)
+
+    def test_founders_scaffolds_placeholder_credentials(self):
+        init_network_dir(
+            self.out, "testnet-1", self.reth_genesis, self.measurements, founders=3
+        )
+        path = self.out / "inputs" / "founder-withdrawal-credentials.json"
+        self.assertEqual(
+            json.loads(path.read_text()),
+            [f"0x{1:040x}", f"0x{2:040x}", f"0x{3:040x}"],
+        )
+        # Placeholders are a usable founder set, not a stub to be rewritten.
+        self.assertEqual(len(manifest_mod.load_founder_credentials(path)), 3)
 
     def test_stamps_measurement_id(self):
         init_network_dir(
@@ -865,26 +937,206 @@ class InitTests(unittest.TestCase):
             )
 
 
+class FoundingSetTests(unittest.TestCase):
+    """load_founding_set / load_harvest_records: pairing the harvest with
+    the authored credentials and the cohort descriptors into the validator
+    entries assemble pins."""
+
+    ADDRESS = "0x" + "f3" * 20
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.net = Path(tmp.name)
+        self.inputs = self.net / manifest_mod.INPUTS_DIRNAME
+        self.harvest = self.inputs / manifest_mod.HARVEST_DIRNAME
+        self.nodes = self.net / manifest_mod.NODES_DIRNAME
+        self.harvest.mkdir(parents=True)
+        self.nodes.mkdir()
+        self._write_founders([self.ADDRESS])
+        self._write_record("node-1")
+        self._write_descriptor("node-1", "203.0.113.7")
+
+    def _write_founders(self, obj) -> None:
+        path = self.inputs / manifest_mod.FOUNDERS_FILENAME
+        path.write_text(json.dumps(obj))
+
+    def _write_record(
+        self,
+        name: str,
+        node_key: str = "ab" * 32,
+        consensus_key: str = "cd" * 48,
+        **overrides,
+    ) -> None:
+        record: dict = {
+            "harvest_nonce": "11" * 32,
+            "node_public_key": node_key,
+            "consensus_public_key": consensus_key,
+            "evidence": {"attestation_type": "azure-tdx"},
+        }
+        record.update(overrides)
+        record = {k: v for k, v in record.items() if v is not None}
+        (self.harvest / f"{name}.json").write_text(json.dumps(record))
+
+    def _write_descriptor(self, name: str, ip: str) -> None:
+        (self.nodes / f"{name}.json").write_text(
+            json.dumps({"public_ip": ip, "fqdn": f"{name}.example.com"})
+        )
+
+    def test_builds_validator_entries_sorted_by_node_name(self):
+        # The authored credentials are positional: the i-th address pairs
+        # with the i-th box in node-name order.
+        self._write_founders([self.ADDRESS, "0x" + "aa" * 20])
+        self._write_record("node-2", node_key="ef" * 32, consensus_key="ab" * 48)
+        self._write_descriptor("node-2", "203.0.113.8")
+        founding = load_founding_set(self.net)
+        self.assertEqual(
+            founding.validators,
+            [
+                {
+                    "node_public_key": "ab" * 32,
+                    "consensus_public_key": "cd" * 48,
+                    "ip_address": f"203.0.113.7:{SUMMIT_CONSENSUS_PORT}",
+                    "withdrawal_credentials": self.ADDRESS,
+                },
+                {
+                    "node_public_key": "ef" * 32,
+                    "consensus_public_key": "ab" * 48,
+                    "ip_address": f"203.0.113.8:{SUMMIT_CONSENSUS_PORT}",
+                    "withdrawal_credentials": "0x" + "aa" * 20,
+                },
+            ],
+        )
+        self.assertEqual(sorted(founding.records), ["node-1", "node-2"])
+
+    def test_missing_harvest_burns_with_harvest_hint(self):
+        for path in self.harvest.glob("*.json"):
+            path.unlink()
+        with self.assertRaisesRegex(GateError, "harvest"):
+            load_founding_set(self.net)
+
+    def test_harvested_box_without_credentials(self):
+        self._write_record("node-2", node_key="ef" * 32, consensus_key="ab" * 48)
+        self._write_descriptor("node-2", "203.0.113.8")
+        with self.assertRaisesRegex(GateError, r"1 withdrawal credential\(s\)"):
+            load_founding_set(self.net)
+
+    def test_more_credentials_than_harvested_boxes(self):
+        self._write_founders([self.ADDRESS, self.ADDRESS])
+        with self.assertRaisesRegex(GateError, r"2 withdrawal credential\(s\)"):
+            load_founding_set(self.net)
+
+    def test_missing_descriptor_burns(self):
+        (self.nodes / "node-1.json").unlink()
+        with self.assertRaisesRegex(GateError, "re-found"):
+            load_founding_set(self.net)
+
+    def test_malformed_credentials_rejected(self):
+        self._write_founders(["0x1234"])
+        with self.assertRaisesRegex(GateError, "0x1234"):
+            load_founding_set(self.net)
+
+    def test_credentials_mapping_rejected(self):
+        self._write_founders({"node-1": self.ADDRESS})
+        with self.assertRaisesRegex(GateError, "expected a JSON array"):
+            load_founding_set(self.net)
+
+    def test_non_canonical_key_spelling_rejected(self):
+        # Uppercase hex would digest differently under summit's v1 spelling
+        # rules — rejected, never normalized.
+        self._write_record("node-1", node_key="AB" * 32)
+        with self.assertRaisesRegex(GateError, "node_public_key"):
+            load_harvest_records(self.harvest)
+
+    def test_record_without_evidence_rejected(self):
+        self._write_record("node-1", evidence=None)
+        with self.assertRaisesRegex(GateError, "evidence"):
+            load_harvest_records(self.harvest)
+
+    def test_duplicate_node_key_across_boxes_rejected(self):
+        self._write_record("node-2", consensus_key="ab" * 48)
+        with self.assertRaisesRegex(GateError, "node_public_key"):
+            load_harvest_records(self.harvest)
+
+
+class VerifyHarvestRecordsTests(unittest.TestCase):
+    """The assemble-time re-verification driver (the verify-quote shell-out
+    itself is exercised through the harvest tests, which mock the same
+    subprocess boundary)."""
+
+    RECORD = {
+        "harvest_nonce": "11" * 32,
+        "node_public_key": "ab" * 32,
+        "consensus_public_key": "cd" * 48,
+        "evidence": {"attestation_type": "azure-tdx"},
+    }
+
+    def test_verifies_every_record_against_the_policy_file(self):
+        calls: list[tuple[str, bytes]] = []
+
+        def verify_fn(name, record, policy_path):
+            calls.append((name, policy_path.read_bytes()))
+            return {"verified": True}
+
+        records = {"node-2": dict(self.RECORD), "node-1": dict(self.RECORD)}
+        verify_harvest_records(records, b"policy bytes", verify_fn=verify_fn)
+        # Every record, deterministic order, against exactly the promoted
+        # policy bytes.
+        self.assertEqual(
+            calls, [("node-1", b"policy bytes"), ("node-2", b"policy bytes")]
+        )
+
+    def test_failure_names_the_box_and_burns(self):
+        def verify_fn(name, record, policy_path):
+            if name == "node-2":
+                raise GateError("quote verification failed")
+            return {"verified": True}
+
+        records = {"node-1": dict(self.RECORD), "node-2": dict(self.RECORD)}
+        with self.assertRaisesRegex(GateError, "node-2.*\n.*not be pinned"):
+            verify_harvest_records(records, b"policy", verify_fn=verify_fn)
+
+    def test_missing_verifier_binary_is_a_gate_error(self):
+        with self.assertRaisesRegex(GateError, "not found") as ctx:
+            verify_harvest_records(
+                {"node-1": dict(self.RECORD)},
+                b"policy",
+                verify_quote_bin="no-such-verify-quote",
+            )
+        # Tooling, not evidence: the preflight fails before the loop, so a
+        # missing verifier never carries the burned-founding advice.
+        self.assertNotIn("re-found", str(ctx.exception))
+
+
+class SetValidatorsTests(unittest.TestCase):
+    """The `summit genesis set-validators` subprocess boundary (emission
+    semantics — sorting, canonical rendering, reload-what-it-wrote — are
+    pinned by summit's own tests)."""
+
+    def test_missing_binary_is_a_gate_error(self):
+        with self.assertRaisesRegex(GateError, "not found"):
+            summit_set_validators(
+                b"validators = []\n", [dict(VALIDATOR)], summit_bin="no-such-summit"
+            )
+
+
 class DirCliTests(unittest.TestCase):
     """assemble/validate take the network directory as their sole positional
-    argument (`_parse_args`); only init handles loose files."""
+    argument (`_parse_args`); only init handles loose files. Every derived
+    path is absolute — the paths this CLI prints have to be clickable."""
+
+    NET = Path("networks/testnet-1").resolve()
 
     def test_assemble_dir_resolution(self):
         args = manifest_mod._parse_args(["assemble", "networks/testnet-1"])
         self.assertEqual(args.name, "testnet-1")
         self.assertEqual(args.admission_bin, DEFAULT_ADMISSION_BIN)
+        self.assertEqual(args.verify_quote_bin, manifest_mod.DEFAULT_VERIFY_QUOTE_BIN)
         # assemble reads the authored inputs under inputs/.
-        self.assertEqual(
-            args.reth_genesis, Path("networks/testnet-1/inputs/reth-genesis.json")
-        )
-        self.assertEqual(
-            args.summit_genesis,
-            Path("networks/testnet-1/inputs/summit-genesis.toml"),
-        )
-        self.assertEqual(
-            args.measurements, Path("networks/testnet-1/inputs/measurements.json")
-        )
-        self.assertEqual(args.out, Path("networks/testnet-1"))
+        self.assertEqual(args.reth_genesis, self.NET / "inputs/reth-genesis.json")
+        self.assertEqual(args.summit_genesis, self.NET / "inputs/summit-genesis.toml")
+        self.assertEqual(args.measurements, self.NET / "inputs/measurements.json")
+        self.assertEqual(args.out, self.NET)
 
     def test_assemble_requires_dir(self):
         with self.assertRaises(SystemExit):
@@ -901,17 +1153,18 @@ class DirCliTests(unittest.TestCase):
                 "m.json",
             ]
         )
-        self.assertEqual(args.dir, Path("networks/testnet-1"))
+        self.assertEqual(args.dir, self.NET)
         self.assertEqual(args.name, "testnet-1")
 
     def test_validate_dir_resolution(self):
+        net = Path("networks/t").resolve()
         args = manifest_mod._parse_args(["validate", "networks/t"])
-        self.assertEqual(args.manifest, Path("networks/t/network-manifest.json"))
+        self.assertEqual(args.manifest, net / "network-manifest.json")
         self.assertEqual(args.admission_bin, DEFAULT_ADMISSION_BIN)
         # validate reads the *shipped* summit genesis, not the authored input.
-        self.assertEqual(args.summit_genesis, Path("networks/t/summit-genesis.toml"))
+        self.assertEqual(args.summit_genesis, net / "summit-genesis.toml")
         self.assertEqual(
-            args.measurement_policy, Path("networks/t/measurement-policy.json")
+            args.measurement_policy, net / "measurement-policy-bootstrap.json"
         )
 
 

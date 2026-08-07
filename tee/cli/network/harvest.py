@@ -32,7 +32,7 @@ collateral, which ages out from under the archived quotes.
 
 Any anomaly burns the whole harvest: a quote window already closed
 (HTTP 410 — the box accepted a config POST), a failed verification, or a
-cohort that doesn't match the authored
+cohort whose size doesn't match the authored
 `inputs/founder-withdrawal-credentials.json` all abort
 the run. A harvested key is trustworthy only if the same box later accepts
 the real configure cleanly — never retry around a burned harvest; re-found
@@ -44,7 +44,6 @@ import json
 import re
 import secrets
 import shutil
-import subprocess
 import tempfile
 import time
 from dataclasses import dataclass
@@ -71,11 +70,10 @@ HARVEST_TIMEOUT_SECONDS = 15 * 60
 WAIT_LOG_INTERVAL_SECONDS = 30
 
 # The DCAP verifier from the enclave repo (bin/verify-quote), expected on
-# PATH like the admission CLI. Verification-only, Linux-only at runtime —
-# macOS callers run it in a Linux container.
-DEFAULT_VERIFY_QUOTE_BIN = "verify-quote"
+# PATH like the admission CLI. Shared constant with `manifest assemble`,
+# which re-verifies the archived quotes before pinning the founding set.
+DEFAULT_VERIFY_QUOTE_BIN = manifest_mod.DEFAULT_VERIFY_QUOTE_BIN
 
-_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 # Holder pubkeys are summit's keystore wire format: lowercase bare hex,
 # exactly as `commonware_utils::hex` renders — the spelling summit's
 # genesis config_digest commits to, so any other form is rejected here
@@ -90,9 +88,9 @@ class QuoteWindowClosed(Exception):
 
 @dataclass(frozen=True)
 class HarvestTarget:
-    """One cohort box: descriptor stem (= its key in the authored
-    founder-withdrawal-credentials.json), its IP, and the fresh 32-byte
-    nonce (hex) minted for this run's quote request."""
+    """One cohort box: descriptor stem (its name in inputs/harvest/), its
+    IP, and the fresh 32-byte nonce (hex) minted for this run's quote
+    request."""
 
     name: str
     public_ip: str
@@ -163,6 +161,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     if not args.dir.is_dir():
         raise SystemExit(f"network directory not found: {args.dir}")
+    # Absolute from here on, so every path this CLI prints is clickable.
+    args.dir = args.dir.resolve()
     inputs_dir = args.dir / manifest_mod.INPUTS_DIRNAME
     args.measurements = inputs_dir / manifest_mod.MEASUREMENTS_FILENAME
     args.founders = inputs_dir / manifest_mod.FOUNDERS_FILENAME
@@ -173,9 +173,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         )
     if not args.founders.is_file():
         raise SystemExit(
-            f"{args.founders} not found — author it as a JSON object mapping "
-            "each cohort node name (descriptor filename stem) to that "
-            "founder's withdrawal credentials (0x-prefixed address)"
+            f"{args.founders} not found — author it as a JSON array of the "
+            "founders' withdrawal credentials (0x-prefixed addresses), one "
+            "per founding node"
         )
     if args.node is None:
         nodes_dir = args.dir / manifest_mod.NODES_DIRNAME
@@ -197,10 +197,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         # cohort list callers expect.
         args.node = [path for group in args.node for path in group]
         # Descriptor filename stems are the harvest's node names (the
-        # founder-credentials keys and the inputs/harvest/ filenames), so
-        # compare stems, not paths: two spellings of one file or two files
-        # sharing a stem would otherwise silently collapse into one
-        # harvested box.
+        # inputs/harvest/ filenames, and the order the authored withdrawal
+        # credentials pair against), so compare stems, not paths: two
+        # spellings of one file or two files sharing a stem would otherwise
+        # silently collapse into one harvested box.
         stems = [p.stem for p in args.node]
         dupes = sorted({s for s in stems if stems.count(s) > 1})
         if dupes:
@@ -214,40 +214,26 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return args
 
 
-def load_founders(path: Path, cohort: list[str]) -> dict[str, str]:
-    """Load inputs/founder-withdrawal-credentials.json and pair it against
+def load_founders(path: Path, cohort: list[str]) -> list[str]:
+    """Load inputs/founder-withdrawal-credentials.json and count it against
     the live cohort.
 
-    The authored founder list and the harvested cohort must agree exactly:
-    a box with no credentials can't be pinned, and an entry with no box
-    means the cohort is incomplete — either way `assemble` would pin a set
-    other than the intended one, so the mismatch aborts the harvest.
+    `assemble` pairs the i-th authored address with the i-th box in
+    node-name order, so a count that doesn't match the cohort would leave a
+    box unpinnable or pin a set other than the one the founders authored
+    for. Checked here too, before any quote is fetched, so the fix costs
+    nothing.
     """
     try:
-        data = json.loads(path.read_text())
-    except json.JSONDecodeError as e:
-        raise SystemExit(f"{path}: not valid JSON: {e}") from None
-    if not isinstance(data, dict) or not all(isinstance(v, str) for v in data.values()):
+        data = manifest_mod.load_founder_credentials(path)
+    except manifest_mod.GateError as e:
+        raise SystemExit(str(e)) from None
+    if len(data) != len(cohort):
         raise SystemExit(
-            f"{path}: expected a JSON object mapping node name -> withdrawal "
-            "credentials (0x-prefixed address)"
+            f"{path} carries {len(data)} withdrawal credential(s) but the "
+            f"cohort has {len(cohort)} box(es) ({', '.join(sorted(cohort))}) "
+            "— author one address per founding node"
         )
-    bad = sorted(name for name, addr in data.items() if not _ADDRESS_RE.match(addr))
-    if bad:
-        raise SystemExit(
-            f"{path}: withdrawal credentials must be 0x + 40 hex chars; bad "
-            f"entr(ies): {', '.join(bad)}"
-        )
-    missing = sorted(set(cohort) - set(data))
-    extra = sorted(set(data) - set(cohort))
-    if missing or extra:
-        lines = []
-        if missing:
-            listing = ", ".join(missing)
-            lines.append(f"  cohort box(es) with no founder entry: {listing}")
-        if extra:
-            lines.append(f"  founder entr(ies) with no cohort box: {', '.join(extra)}")
-        raise SystemExit(f"{path} does not match the cohort:\n" + "\n".join(lines))
     return data
 
 
@@ -382,51 +368,28 @@ def verify_quote(
     pccs_url: str | None,
     override_azure_outdated_tcb: bool,
 ) -> dict[str, Any]:
-    """DCAP-verify one harvested quote via the enclave repo's `verify-quote`.
-
-    Its contract: exit 0 plus one JSON report on stdout ⇔ the evidence
-    verifies cryptographically, its report_data binds this nonce + these
-    pubkeys, and its measurements satisfy the policy. The evidence goes
-    over stdin — the same parsed evidence object the archive records. A
-    failure burns the harvest: a founding key whose quote doesn't verify
-    must never reach `assemble`.
+    """DCAP-verify one harvested quote via the enclave repo's `verify-quote`
+    (the shared shell-out in manifest.py — `assemble` re-runs the same check
+    over the archived evidence before pinning the set). A failure burns the
+    harvest: a founding key whose quote doesn't verify must never reach
+    `assemble`.
     """
-    cmd = [
-        verify_bin,
-        "--evidence",
-        "-",
-        "--policy",
-        str(policy_path),
-        "--nonce",
-        target.nonce,
-        "--node-pubkey",
-        quote["node_public_key"],
-        "--consensus-pubkey",
-        quote["consensus_public_key"],
-    ]
-    if pccs_url:
-        cmd += ["--pccs-url", pccs_url]
-    if override_azure_outdated_tcb:
-        cmd.append("--override-azure-outdated-tcb")
-    result = subprocess.run(
-        cmd, input=json.dumps(quote["evidence"]).encode("utf-8"), capture_output=True
-    )
-    if result.returncode != 0:
-        detail = result.stderr.decode("utf-8", "replace").strip()
-        raise SystemExit(
-            f"{target.name}: quote verification failed — the harvest is "
-            f"burned (re-found rather than retrying):\n{detail}"
-        )
     try:
-        report = json.loads(result.stdout)
-    except json.JSONDecodeError:
-        report = None
-    if not isinstance(report, dict) or report.get("verified") is not True:
-        raise SystemExit(
-            f"{target.name}: `{verify_bin}` exited 0 without a verified "
-            f"report: {result.stdout!r}"
+        return manifest_mod.verify_quote_evidence(
+            quote["evidence"],
+            nonce=target.nonce,
+            node_pubkey=quote["node_public_key"],
+            consensus_pubkey=quote["consensus_public_key"],
+            policy_path=policy_path,
+            verify_quote_bin=verify_bin,
+            pccs_url=pccs_url,
+            override_azure_outdated_tcb=override_azure_outdated_tcb,
         )
-    return report
+    except manifest_mod.GateError as e:
+        raise SystemExit(
+            f"{target.name}: {e}\nThe harvest is burned: re-found rather "
+            "than retrying around it."
+        ) from None
 
 
 def check_overwrite(harvest_dir: Path, names: list[str], force: bool) -> None:
@@ -469,8 +432,7 @@ def main() -> None:
     if verify_bin is None:
         raise SystemExit(
             f"`{args.verify_quote_bin}` not found on PATH. Build the enclave "
-            "repo's bin/verify-quote and put it on PATH. It is Linux-only at "
-            "runtime; on macOS run it in a Linux container."
+            "repo's bin/verify-quote and put it on PATH."
         )
 
     targets = []

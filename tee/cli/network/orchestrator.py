@@ -37,7 +37,6 @@ description.
 
 import argparse
 import getpass
-import hashlib
 import json
 import os
 import re
@@ -50,14 +49,8 @@ import yaml
 from pulumi import automation as auto
 
 from tee.cli.common import manifest as manifest_mod
-
-# The single-node program this orchestrator fans out over. A local-program
-# workspace points at this dir, so the project name / runtime / venv all
-# come from its Pulumi.yaml — identical to running `pulumi` in that dir.
-SEISMIC_NODE_DIR = Path(__file__).parents[2] / "pulumi" / "seismic_node"
-
-# Shared settings are inherited from this stack config unless --config overrides.
-DEFAULT_CONFIG = SEISMIC_NODE_DIR / "Pulumi.dev.yaml"
+from tee.cli.common.repo import DEFAULT_STACK_CONFIG as DEFAULT_CONFIG
+from tee.cli.common.repo import SEISMIC_NODE_DIR
 
 # Per-node descriptors land here when no --network ties the cohort to a
 # network directory (gitignored either way) so a cohort's outputs stay
@@ -69,8 +62,9 @@ DEFAULT_OUT_DIR = SEISMIC_NODE_DIR.parent / "descriptors"
 
 def _resolve_out_dir(out_dir: str | None, network: Path | None) -> Path:
     """Descriptor destination: explicit --out-dir wins; a --network cohort's
-    descriptors live under the network directory's nodes/ subdir (where
-    genesis-ceremony finds them by default); else the shared descriptors/."""
+    descriptors live under the network directory's nodes/ subdir (where the
+    founding steps — harvest, assemble, configure — find them by default);
+    else the shared descriptors/."""
     if out_dir:
         return Path(out_dir)
     if network is not None:
@@ -111,15 +105,20 @@ def _node_config(template: Mapping, name: str) -> dict[str, auto.ConfigValue]:
 
 def _check_vhd_matches_network(template: Mapping, network_dir: Path) -> str:
     """Refuse to provision when the image pin names an artifact the network's
-    measurement policy doesn't cover.
+    measurements input doesn't cover.
 
     Name-level tripwire only: the basename of the config's `vhd_blob_url` is
-    the image artifact filename (`seismic[-dev]_<date>.<commit>.vhd`), which is
-    also the policy records' `measurement_id`. Comparing the two catches a
-    stale or typo'd image pin before any cloud resource exists — hours before
-    the genesis ceremony's block-0 assert would surface it. No VHD bytes are
-    inspected; the *running* VM is verified cryptographically at attestation
-    time, never here.
+    the image artifact filename (`seismic[-dev]_<date>.<commit>.vhd`), which
+    is also the `measurement_id` seismic-images' `make measure` stamps into
+    its measurements output (`manifest init --measurement-id` overrides it;
+    an already-promoted policy carries it per record). Comparing the two
+    catches a stale or typo'd image pin before any cloud resource exists.
+    The *authored input* is checked, not the assembled artifact set,
+    because provisioning precedes assembly — the founding order is
+    up → harvest → assemble, so at `up` time the inputs are all a network
+    directory holds. No VHD bytes are
+    inspected; the running VM is verified cryptographically at harvest and
+    attestation time, never here.
     """
     vhd_url = next(
         (
@@ -133,32 +132,82 @@ def _check_vhd_matches_network(template: Mapping, network_dir: Path) -> str:
         raise SystemExit(
             "--network given but the stack config carries no vhd_blob_url to check"
         )
-    manifest_path = network_dir / manifest_mod.MANIFEST_FILENAME
-    policy_path = network_dir / manifest_mod.POLICY_FILENAME
-    for path in (manifest_path, policy_path):
-        if not path.is_file():
-            raise SystemExit(
-                f"--network {network_dir}: missing {path.name} "
-                "(run `manifest assemble` first)"
-            )
-    manifest = manifest_mod.validate_manifest_schema(manifest_path.read_bytes())
-    policy_bytes = policy_path.read_bytes()
-    policy_hash = "0x" + hashlib.sha256(policy_bytes).hexdigest()
-    if policy_hash != manifest["measurements"]["bootstrap_policy_hash"]:
+    measurements_path = (
+        network_dir / manifest_mod.INPUTS_DIRNAME / manifest_mod.MEASUREMENTS_FILENAME
+    )
+    if not measurements_path.is_file():
         raise SystemExit(
-            f"--network {network_dir}: {policy_path.name} does not hash to the "
-            "manifest's bootstrap_policy_hash — stale or edited artifact set "
-            "(re-run `manifest assemble`, or `manifest validate` to diagnose)"
+            f"--network {network_dir}: missing {manifest_mod.INPUTS_DIRNAME}/"
+            f"{manifest_mod.MEASUREMENTS_FILENAME} — scaffold the network "
+            "directory with `manifest init` before provisioning its cohort"
         )
-    ids = [record["measurement_id"] for record in json.loads(policy_bytes)]
+    try:
+        measurements = json.loads(measurements_path.read_bytes())
+    except json.JSONDecodeError as e:
+        raise SystemExit(f"{measurements_path}: not valid JSON: {e}") from None
+    if isinstance(measurements, list):
+        # An already-promoted policy: each record names its own image.
+        ids = [
+            record["measurement_id"]
+            for record in measurements
+            if isinstance(record, dict)
+            and isinstance(record.get("measurement_id"), str)
+        ]
+    elif isinstance(measurements, dict) and isinstance(
+        measurements.get("measurement_id"), str
+    ):
+        ids = [measurements["measurement_id"]]
+    else:
+        ids = []
+    if not ids:
+        raise SystemExit(
+            f"{measurements_path} carries no measurement_id to check the "
+            "image pin against — regenerate it with seismic-images' `make "
+            "measure` (which stamps the field) or re-run `manifest init "
+            "--measurement-id <image-artifact-filename>` so a stale VHD "
+            "pin can be caught before provisioning"
+        )
     vhd_name = vhd_url.rsplit("/", 1)[-1]
     if vhd_name not in ids:
         raise SystemExit(
-            f"vhd_blob_url points at {vhd_name!r} but the network's measurement "
-            f"policy covers only: {', '.join(ids)}. Stale image pin or wrong "
+            f"vhd_blob_url points at {vhd_name!r} but {measurements_path} "
+            f"covers only: {', '.join(ids)}. Stale image pin or wrong "
             "--network dir; refusing to provision."
         )
     return vhd_name
+
+
+def _cohort_size(count: int | None, network: Path | None) -> int:
+    """How many nodes to provision: the authored founder set, or --count.
+
+    A network directory already states the cohort size — one withdrawal
+    credential per founding node — and harvest and assemble both refuse a
+    cohort that doesn't match it, so taking the count from the inputs is
+    the only spelling that can't drift. --count stays accepted (and
+    required without --network), but must agree.
+    """
+    if network is None:
+        if count is None:
+            raise SystemExit("--count is required without --network")
+        return count
+    path = network / manifest_mod.INPUTS_DIRNAME / manifest_mod.FOUNDERS_FILENAME
+    try:
+        authored = len(manifest_mod.load_founder_credentials(path))
+    except manifest_mod.GateError as e:
+        raise SystemExit(str(e)) from None
+    if not authored:
+        raise SystemExit(
+            f"{path} is empty — it decides the cohort size, so author one "
+            "withdrawal-credentials address per founding node (`manifest "
+            "init --founders N` scaffolds placeholders)"
+        )
+    if count is not None and count != authored:
+        raise SystemExit(
+            f"--count {count} contradicts the {authored} withdrawal "
+            f"credential(s) in {path}, which are the founding set: drop "
+            "--count, or re-author the credentials for the cohort you want"
+        )
+    return authored
 
 
 def _descriptor_from_outputs(outputs: Mapping[str, auto.OutputValue]) -> dict:
@@ -218,7 +267,13 @@ def _parse_up_args() -> argparse.Namespace:
         description="Provision a cohort of TDX nodes (one Pulumi stack each)."
     )
     parser.add_argument(
-        "--count", type=int, required=True, help="Number of nodes to provision."
+        "--count",
+        type=int,
+        default=None,
+        help=(
+            "Number of nodes to provision. Optional with --network, which "
+            "takes the count from the authored withdrawal credentials."
+        ),
     )
     parser.add_argument(
         "--config",
@@ -253,37 +308,41 @@ def _parse_up_args() -> argparse.Namespace:
         default=None,
         metavar="DIR",
         help=(
-            "Network directory (from `manifest assemble`) this cohort is for: "
-            "refuse to provision unless the config's vhd_blob_url basename is "
-            "one of the measurement policy's measurement_id records (catches a "
-            "stale image pin before any resource exists; name check only — "
-            "attestation is the cryptographic gate), and write the descriptors "
-            "to <DIR>/nodes/, where genesis-ceremony finds them by default."
+            "Network directory (from `manifest init`) this cohort is for: "
+            "refuse to provision unless the config's vhd_blob_url basename "
+            "matches the measurement_id in the directory's "
+            "inputs/measurements.json (catches a stale image pin before any "
+            "resource exists; name check only — attestation is the "
+            "cryptographic gate), and write the descriptors to <DIR>/nodes/, "
+            "where harvest and assemble find them by default."
         ),
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    # Absolute from here on, so every path this CLI prints is clickable.
+    if args.network is not None:
+        args.network = args.network.resolve()
+    return args
 
 
 def up_main() -> None:
     args = _parse_up_args()
+    count = _cohort_size(args.count, args.network)
     _ensure_passphrase(confirm=True)
     with open(args.config) as f:
         template = yaml.safe_load(f)
     if args.network is not None:
         vhd_name = _check_vhd_matches_network(template, args.network)
-        print(
-            f"Image pin {vhd_name} is covered by the {args.network} measurement policy."
-        )
+        print(f"Image pin {vhd_name} matches the {args.network} measurements input.")
     prefix = args.stack_prefix or f"{_env_from_config(args.config)}-bootstrap-node"
     out_dir = _resolve_out_dir(args.out_dir, args.network)
     out_dir.mkdir(parents=True, exist_ok=True)
+    names = [f"{prefix}-{i}" for i in range(1, count + 1)]
 
     # Sequential on purpose: clearer logs and gentler on Azure quota for a
     # first cut. The stacks are independent, so a future --parallel can run
     # them on a thread pool without changing anything else here.
-    for i in range(1, args.count + 1):
-        name = f"{prefix}-{i}"
-        print(f"\n=== {name}: provisioning node {i}/{args.count} ===")
+    for i, name in enumerate(names, start=1):
+        print(f"\n=== {name}: provisioning node {i}/{count} ===")
 
         stack = auto.create_or_select_stack(
             stack_name=name, work_dir=str(SEISMIC_NODE_DIR)
@@ -299,45 +358,53 @@ def up_main() -> None:
 
     genesis_desc = out_dir / f"{prefix}-1.json"
     join_flags = "".join(
-        f" --join {out_dir / f'{prefix}-{i}.json'}" for i in range(2, args.count + 1)
+        f" --join {out_dir / f'{prefix}-{i}.json'}" for i in range(2, count + 1)
     )
     if args.network is not None:
-        # The network dir exists and holds the descriptors, so the remaining
-        # steps need no placeholders — and genesis-ceremony finds the cohort
-        # in <network>/nodes/ on its own.
+        # The network dir holds the descriptors, so harvest and assemble
+        # find the cohort in <network>/nodes/ on their own.
         manifest_arg = args.network / manifest_mod.MANIFEST_FILENAME
         print(
-            f"\nProvisioned {args.count} node(s) for {args.network}. Next:\n"
+            f"\nProvisioned {count} node(s) for {args.network}. Next:\n"
             "\n"
-            "1. Configure the cohort (re-run on every node reboot):\n"
+            "1. Harvest the founding keys (polls each box's summit-key-holder,\n"
+            "   DCAP-verifies the quotes, archives them under inputs/harvest/):\n"
+            f"     seismic-tee-network harvest {args.network}\n"
+            "2. Assemble the artifact set (pins the harvested validator set,\n"
+            f"   mints network_id), then commit {args.network}:\n"
+            f"     seismic-tee-network manifest assemble {args.network}\n"
+            "3. Configure the cohort (re-run on every node reboot):\n"
             f"     seismic-tee-network configure --genesis {genesis_desc}"
             f"{join_flags} \\\n"
-            f"       --manifest {manifest_arg}\n"
-            "2. Run the genesis ceremony (one-shot; --node defaults to the\n"
-            f"   descriptors in {out_dir}):\n"
-            f"     seismic-tee-network genesis-ceremony --manifest {manifest_arg}"
+            f"       --manifest {manifest_arg}"
         )
         return
-    node_flags = " ".join(
-        f"--node {out_dir / f'{prefix}-{i}.json'}" for i in range(1, args.count + 1)
-    )
     net = "tee/networks/<name>"
+    moved_genesis = f"{net}/nodes/{prefix}-1.json"
+    moved_joins = "".join(
+        f" --join {net}/nodes/{prefix}-{i}.json" for i in range(2, count + 1)
+    )
     print(
-        f"\nProvisioned {args.count} node(s). To found a network on them:\n"
+        f"\nProvisioned {count} node(s). To found a network on them:\n"
         "\n"
-        "1. Create the network directory (once per network; assemble shells out\n"
-        "   to `seismic-reth genesis-hash`, so seismic-reth must be on PATH):\n"
+        "1. Create the network directory (once per network):\n"
         f"     seismic-tee-network manifest init {net} \\\n"
         "       --reth-genesis <reth-genesis.json> \\\n"
-        "       --measurements <measurements.json> --measurement-id <image.vhd>\n"
-        f"     # edit {net}/inputs/summit-genesis.toml, then:\n"
+        "       --measurements <measurements.json> --measurement-id <image.vhd> \\\n"
+        f"       --founders {count}\n"
+        f"     # edit {net}/inputs/summit-genesis.toml and the scaffolded\n"
+        f"     # {net}/inputs/founder-withdrawal-credentials.json\n"
+        "2. Move the descriptors into the network directory (assemble reads\n"
+        "   each founding validator's IP from them):\n"
+        f"     mkdir -p {net}/nodes && mv {out_dir}/*.json {net}/nodes/\n"
+        "3. Harvest the founding keys from the live cohort:\n"
+        f"     seismic-tee-network harvest {net}\n"
+        "4. Assemble the artifact set (seismic-reth, summit, and the\n"
+        "   admission + verify-quote CLIs must be on PATH), then commit it:\n"
         f"     seismic-tee-network manifest assemble {net}\n"
-        "2. Configure the cohort (re-run on every node reboot):\n"
-        f"     seismic-tee-network configure --genesis {genesis_desc}"
-        f"{join_flags} \\\n"
-        f"       --manifest {net}/network-manifest.json\n"
-        "3. Run the genesis ceremony (one-shot) over the same descriptors:\n"
-        f"     seismic-tee-network genesis-ceremony {node_flags} \\\n"
+        "5. Configure the cohort (re-run on every node reboot):\n"
+        f"     seismic-tee-network configure --genesis {moved_genesis}"
+        f"{moved_joins} \\\n"
         f"       --manifest {net}/network-manifest.json"
     )
 
@@ -390,7 +457,10 @@ def _parse_down_args() -> argparse.Namespace:
             "its nodes/ subdir is where the descriptors get deleted from."
         ),
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.network is not None:
+        args.network = args.network.resolve()
+    return args
 
 
 def _destroy_one(stack_name: str, out_dir: Path) -> None:
