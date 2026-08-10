@@ -2,12 +2,12 @@
 
 Seismic-internal, NOT a tool node operators run: it provisions a cohort of
 TDX nodes (`up` / `down`) and runs the one-time network-creation steps
-(`harvest`, `manifest`, `genesis-ceremony`). This is the CLI that is *allowed* to wrap
+(`harvest`, `manifest`, `configure`). This is the CLI that is *allowed* to wrap
 Pulumi —
 `up` / `down` drive the seismic_node Automation-API orchestrator. The
 operator CLI (`seismic-tee-node`) deliberately is not; the boundary is the node
 descriptor file (see tee/cli/common/descriptor.py), which this CLI produces
-(via provisioning) and consumes (during the genesis ceremony).
+(via provisioning) and consumes (harvest, configure).
 
 Wired via [project.scripts] in pyproject.toml. Each leaf forwards its argv
 to that module's argparse `main()`; see tee/cli/common/plumbing.py.
@@ -57,17 +57,6 @@ def configure(argv: tuple[str, ...]) -> None:
     from tee.cli.network import cohort_configure
 
     forward(cohort_configure.main, "seismic-tee-network configure", argv)
-
-
-@app.command(
-    name="genesis-ceremony", context_settings=PASSTHROUGH, add_help_option=False
-)
-@click.argument("argv", nargs=-1, type=click.UNPROCESSED)
-def genesis_ceremony(argv: tuple[str, ...]) -> None:
-    """One-shot genesis ceremony: build genesis.toml from the cohort, fan it out."""
-    from tee.cli.network import genesis as genesis_mod
-
-    forward(genesis_mod.main, "seismic-tee-network genesis-ceremony", argv)
 
 
 @app.command(name="manifest", context_settings=PASSTHROUGH, add_help_option=False)

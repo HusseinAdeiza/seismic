@@ -3,7 +3,7 @@
 Operator-facing: the commands a node operator runs against their own
 already-provisioned node (configure today; stake / sync later). It is
 cloud-agnostic and descriptor-based — it never wraps Pulumi. Standing up a
-network (provisioning + genesis ceremony) is a Seismic-internal act and
+network (provisioning, harvest, founding) is a Seismic-internal act and
 lives in the separate `seismic-tee-network` CLI.
 
 Wired via [project.scripts] in pyproject.toml. Each leaf forwards its argv

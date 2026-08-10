@@ -17,8 +17,8 @@ stable because each node's devp2p key lives on its encrypted disk.
 `seismic` namespace deliberately keeps nodeInfo public (reth's `admin`
 namespace is disabled on these nodes), see seismic-reth
 crates/seismic/rpc/src/eth/ext.rs. nginx proxies `/rpc` → reth :8545, so we
-query `https://<fqdn>/rpc` with a valid cert, exactly like the genesis
-ceremony's block-0 probe (genesis.py).
+query `https://<fqdn>/rpc` with a valid cert, exactly like the launch
+assertions' block-0 probe (launch_assertions.py).
 
 reth's NodeRecord Display appends `?discport=<udp_port>` when its devp2p UDP
 port differs from its TCP port; tdx-init rejects that form at POST time (the
@@ -131,9 +131,10 @@ def collect_enodes(
     """Poll every `(label, fqdn)` target's `seismic_nodeInfo` until each
     returns an enode, or `timeout` elapses. Returns {label: normalized enode}.
 
-    Round-robin like the genesis ceremony's readiness gathers, so a slow node
-    doesn't serialize behind the others: each pass tries only the nodes not yet
-    answered. A node still silent at the deadline aborts with a per-node report
+    Round-robin like the other cohort gathers (harvest, launch assertions),
+    so a slow node doesn't serialize behind the others: each pass tries only
+    the nodes not yet answered. A node still silent at the deadline aborts
+    with a per-node report
     — a founding node that can't advertise its enode is a real bootstrap
     failure, not something waiting longer fixes. A transport/RPC error is
     retried; a *malformed* enode (fetched but unparseable) fails fast, since

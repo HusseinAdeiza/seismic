@@ -1424,7 +1424,7 @@ def validate_reth_genesis_matches(
     JSON whose config.chainId equals the manifest's eth.chain_id. Structural
     only — the genesis *hash* commitment (manifest eth.genesis_hash) is
     enforced by `assemble`/`validate` (via `seismic-reth genesis-hash`) and
-    re-asserted against every node's reth at ceremony time.
+    re-asserted against every node's live reth by the launch assertions.
     """
     try:
         genesis = json.loads(genesis_bytes)

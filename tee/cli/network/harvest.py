@@ -426,8 +426,7 @@ def save_harvest(harvest_dir: Path, records: dict[str, dict[str, Any]]) -> list[
 def main() -> None:
     args = _parse_args()
 
-    # Fail on a missing verifier before touching the cohort (pattern: the
-    # ceremony's `genesis` binary check).
+    # Fail on a missing verifier before touching the cohort.
     verify_bin = shutil.which(args.verify_quote_bin)
     if verify_bin is None:
         raise SystemExit(

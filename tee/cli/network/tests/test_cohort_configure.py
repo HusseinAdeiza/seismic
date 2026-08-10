@@ -16,7 +16,11 @@ from pathlib import Path
 from unittest import mock
 
 from tee.cli.network import cohort_configure
-from tee.cli.network.cohort_configure import build_cohort
+from tee.cli.network.cohort_configure import (
+    build_cohort,
+    load_founding_facts,
+    splice_validator_ips,
+)
 
 # enode hosts chosen to match the descriptor public_ips below, so the
 # public_ip sanity check stays quiet in these tests.
@@ -184,6 +188,147 @@ class PersistFoundingBootnodesTests(unittest.TestCase):
                     nodes, {"node-1": True, "node-2": True}, path
                 )
             self.assertFalse(path.exists())
+
+
+NODE_KEY_1 = "aa" * 32
+NODE_KEY_2 = "bb" * 32
+CONSENSUS_KEY_1 = "cc" * 48
+CONSENSUS_KEY_2 = "dd" * 48
+
+# The layout summit's emitter (`toml::to_string_pretty`) renders: scalar
+# parameters first, then one [[validators]] block per entry with the fields
+# in struct order.
+GENESIS_TEXT = f"""\
+eth_genesis_hash = "0x{"ab" * 32}"
+leader_timeout_ms = 2000
+namespace = "tmp-devnet-1"
+
+[[validators]]
+node_public_key = "{NODE_KEY_1}"
+consensus_public_key = "{CONSENSUS_KEY_1}"
+ip_address = "192.0.2.1:18551"
+withdrawal_credentials = "0x{"00" * 19}01"
+
+[[validators]]
+node_public_key = "{NODE_KEY_2}"
+consensus_public_key = "{CONSENSUS_KEY_2}"
+ip_address = "192.0.2.2:18551"
+withdrawal_credentials = "0x{"00" * 19}02"
+"""
+
+
+class SpliceValidatorIpsTests(unittest.TestCase):
+    """The splice must rewrite the ip_address lines and not one byte more —
+    the manifest's config digest pins every other field as the exact string
+    summit emitted."""
+
+    def test_replaces_only_the_ip_address_lines(self):
+        spliced = splice_validator_ips(
+            GENESIS_TEXT.encode(),
+            {NODE_KEY_1: "198.51.100.7:18551", NODE_KEY_2: "192.0.2.2:18551"},
+        )
+        expected = GENESIS_TEXT.replace("192.0.2.1:18551", "198.51.100.7:18551")
+        self.assertEqual(spliced.decode(), expected)
+
+    def test_unchanged_ips_round_trip_byte_identical(self):
+        spliced = splice_validator_ips(
+            GENESIS_TEXT.encode(),
+            {NODE_KEY_1: "192.0.2.1:18551", NODE_KEY_2: "192.0.2.2:18551"},
+        )
+        self.assertEqual(spliced, GENESIS_TEXT.encode())
+
+    def test_ips_are_assigned_by_node_pubkey_not_position(self):
+        spliced = splice_validator_ips(
+            GENESIS_TEXT.encode(),
+            {NODE_KEY_2: "198.51.100.2:18551", NODE_KEY_1: "198.51.100.1:18551"},
+        ).decode()
+        block_1, block_2 = spliced.split("[[validators]]")[1:]
+        self.assertIn(NODE_KEY_1, block_1)
+        self.assertIn("198.51.100.1:18551", block_1)
+        self.assertIn(NODE_KEY_2, block_2)
+        self.assertIn("198.51.100.2:18551", block_2)
+
+    def test_pinned_set_and_founding_inputs_must_agree(self):
+        # A pinned validator without a current IP (or vice versa) means the
+        # cohort changed under the founding.
+        with self.assertRaises(SystemExit) as ctx:
+            splice_validator_ips(
+                GENESIS_TEXT.encode(), {NODE_KEY_1: "198.51.100.7:18551"}
+            )
+        self.assertIn("re-found", str(ctx.exception))
+
+    def test_empty_validator_set_rejected(self):
+        text = 'namespace = "x"\nvalidators = []\n'
+        with self.assertRaises(SystemExit) as ctx:
+            splice_validator_ips(text.encode(), {})
+        self.assertIn("no [[validators]]", str(ctx.exception))
+
+    def test_layout_without_ip_address_lines_rejected(self):
+        # An inline validators array parses to the same data but has no
+        # ip_address *lines* to splice — refuse rather than deliver stale IPs.
+        text = (
+            'namespace = "x"\n'
+            f'validators = [{{ node_public_key = "{NODE_KEY_1}", '
+            'ip_address = "192.0.2.1:18551" }]\n'
+        )
+        with self.assertRaises(SystemExit) as ctx:
+            splice_validator_ips(text.encode(), {NODE_KEY_1: "198.51.100.7:18551"})
+        self.assertIn("refusing to splice", str(ctx.exception))
+
+
+class LoadFoundingFactsTests(unittest.TestCase):
+    """The splice map joins the harvest (pinned keys) with the live
+    descriptors (current IPs); a harvested box whose descriptor is gone is a
+    cohort change, not a defaultable value."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = Path(self._tmp.name)
+        (self.dir / "inputs" / "harvest").mkdir(parents=True)
+        (self.dir / "nodes").mkdir()
+
+    def _harvest_record(self, name: str, node_key: str, consensus_key: str) -> None:
+        (self.dir / "inputs" / "harvest" / f"{name}.json").write_text(
+            json.dumps(
+                {
+                    "harvest_nonce": "00" * 32,
+                    "node_public_key": node_key,
+                    "consensus_public_key": consensus_key,
+                    "evidence": {},
+                }
+            )
+        )
+
+    def _node_descriptor(self, name: str, public_ip: str) -> None:
+        (self.dir / "nodes" / f"{name}.json").write_text(
+            json.dumps({"public_ip": public_ip, "fqdn": f"{name}.example"})
+        )
+
+    def test_joins_harvest_keys_with_descriptor_ips(self):
+        self._harvest_record("node-1", NODE_KEY_1, CONSENSUS_KEY_1)
+        self._harvest_record("node-2", NODE_KEY_2, CONSENSUS_KEY_2)
+        self._node_descriptor("node-1", "198.51.100.1")
+        self._node_descriptor("node-2", "198.51.100.2")
+
+        ip_by_pubkey, records = load_founding_facts(self.dir)
+
+        self.assertEqual(
+            ip_by_pubkey,
+            {NODE_KEY_1: "198.51.100.1:18551", NODE_KEY_2: "198.51.100.2:18551"},
+        )
+        self.assertEqual(sorted(records), ["node-1", "node-2"])
+
+    def test_missing_descriptor_is_a_cohort_change(self):
+        self._harvest_record("node-1", NODE_KEY_1, CONSENSUS_KEY_1)
+        with self.assertRaises(SystemExit) as ctx:
+            load_founding_facts(self.dir)
+        self.assertIn("re-found", str(ctx.exception))
+
+    def test_missing_harvest_names_the_prerequisite(self):
+        with self.assertRaises(SystemExit) as ctx:
+            load_founding_facts(self.dir)
+        self.assertIn("harvest", str(ctx.exception))
 
 
 if __name__ == "__main__":
