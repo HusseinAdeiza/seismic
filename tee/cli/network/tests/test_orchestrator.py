@@ -77,7 +77,7 @@ class VhdNetworkCheckTests(unittest.TestCase):
         (self.inputs / manifest_mod.MEASUREMENTS_FILENAME).unlink()
         with self.assertRaises(SystemExit) as ctx:
             _check_vhd_matches_network(self._template(self.URL), self.net)
-        self.assertIn("manifest init", str(ctx.exception))
+        self.assertIn("`init`", str(ctx.exception))
 
     def test_unstamped_wrapper_refused(self):
         # A wrapper without a stamped measurement_id leaves nothing to

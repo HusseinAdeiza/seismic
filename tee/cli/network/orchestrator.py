@@ -110,7 +110,7 @@ def _check_vhd_matches_network(template: Mapping, network_dir: Path) -> str:
     Name-level tripwire only: the basename of the config's `vhd_blob_url` is
     the image artifact filename (`seismic[-dev]_<date>.<commit>.vhd`), which
     is also the `measurement_id` seismic-images' `make measure` stamps into
-    its measurements output (`manifest init --measurement-id` overrides it;
+    its measurements output (`init --measurement-id` overrides it;
     an already-promoted policy carries it per record). Comparing the two
     catches a stale or typo'd image pin before any cloud resource exists.
     The *authored input* is checked, not the assembled artifact set,
@@ -139,7 +139,7 @@ def _check_vhd_matches_network(template: Mapping, network_dir: Path) -> str:
         raise SystemExit(
             f"--network {network_dir}: missing {manifest_mod.INPUTS_DIRNAME}/"
             f"{manifest_mod.MEASUREMENTS_FILENAME} — scaffold the network "
-            "directory with `manifest init` before provisioning its cohort"
+            "directory with `init` before provisioning its cohort"
         )
     try:
         measurements = json.loads(measurements_path.read_bytes())
@@ -163,7 +163,7 @@ def _check_vhd_matches_network(template: Mapping, network_dir: Path) -> str:
         raise SystemExit(
             f"{measurements_path} carries no measurement_id to check the "
             "image pin against — regenerate it with seismic-images' `make "
-            "measure` (which stamps the field) or re-run `manifest init "
+            "measure` (which stamps the field) or re-run `init "
             "--measurement-id <image-artifact-filename>` so a stale VHD "
             "pin can be caught before provisioning"
         )
@@ -308,7 +308,7 @@ def _parse_up_args() -> argparse.Namespace:
         default=None,
         metavar="DIR",
         help=(
-            "Network directory (from `manifest init`) this cohort is for: "
+            "Network directory (from `init`) this cohort is for: "
             "refuse to provision unless the config's vhd_blob_url basename "
             "matches the measurement_id in the directory's "
             "inputs/measurements.json (catches a stale image pin before any "
@@ -372,7 +372,7 @@ def up_main() -> None:
             f"     seismic-tee-network harvest {args.network}\n"
             "2. Assemble the artifact set (pins the harvested validator set,\n"
             f"   mints network_id), then commit {args.network}:\n"
-            f"     seismic-tee-network manifest assemble {args.network}\n"
+            f"     seismic-tee-network assemble {args.network}\n"
             "3. Configure the cohort (re-run on every node reboot):\n"
             f"     seismic-tee-network configure --genesis {genesis_desc}"
             f"{join_flags} \\\n"
@@ -388,7 +388,7 @@ def up_main() -> None:
         f"\nProvisioned {count} node(s). To found a network on them:\n"
         "\n"
         "1. Create the network directory (once per network):\n"
-        f"     seismic-tee-network manifest init {net} \\\n"
+        f"     seismic-tee-network init {net} \\\n"
         "       --reth-genesis <reth-genesis.json> \\\n"
         "       --measurements <measurements.json> --measurement-id <image.vhd> \\\n"
         f"       --founders {count}\n"
@@ -401,7 +401,7 @@ def up_main() -> None:
         f"     seismic-tee-network harvest {net}\n"
         "4. Assemble the artifact set (seismic-reth, summit, and the\n"
         "   admission + verify-quote CLIs must be on PATH), then commit it:\n"
-        f"     seismic-tee-network manifest assemble {net}\n"
+        f"     seismic-tee-network assemble {net}\n"
         "5. Configure the cohort (re-run on every node reboot):\n"
         f"     seismic-tee-network configure --genesis {moved_genesis}"
         f"{moved_joins} \\\n"

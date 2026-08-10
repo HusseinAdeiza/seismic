@@ -4,7 +4,7 @@ A founding cohort boots identity-free: each box's `summit-key-holder`
 generates its summit keypairs in RAM at boot and serves
 `GET /v1/quote?nonce=…` → `{pubkeys, evidence}` on :7879 until the box
 accepts its config POST. Harvest is the step between `up --network` and
-`manifest assemble`: it polls every box's holder, fetches its pubkeys plus
+`assemble`: it polls every box's holder, fetches its pubkeys plus
 a TDX quote over a fresh per-box nonce (`report_data` binds the nonce and
 both pubkeys, so a quote replayed from an earlier harvest can't satisfy
 it), DCAP-verifies each quote against the network's intended image
@@ -70,7 +70,7 @@ HARVEST_TIMEOUT_SECONDS = 15 * 60
 WAIT_LOG_INTERVAL_SECONDS = 30
 
 # The DCAP verifier from the enclave repo (bin/verify-quote), expected on
-# PATH like the admission CLI. Shared constant with `manifest assemble`,
+# PATH like the admission CLI. Shared constant with `assemble`,
 # which re-verifies the archived quotes before pinning the founding set.
 DEFAULT_VERIFY_QUOTE_BIN = manifest_mod.DEFAULT_VERIFY_QUOTE_BIN
 
@@ -103,7 +103,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "dir",
         type=Path,
         help=(
-            "Network directory (from `manifest init`): reads the cohort "
+            "Network directory (from `init`): reads the cohort "
             f"descriptors in {manifest_mod.NODES_DIRNAME}/, the authored "
             f"{manifest_mod.INPUTS_DIRNAME}/{manifest_mod.FOUNDERS_FILENAME} "
             f"and {manifest_mod.INPUTS_DIRNAME}/"
@@ -169,7 +169,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     if not args.measurements.is_file():
         raise SystemExit(
             f"{args.measurements} not found — authored inputs live under "
-            f"{manifest_mod.INPUTS_DIRNAME}/; scaffold them with `manifest init`"
+            f"{manifest_mod.INPUTS_DIRNAME}/; scaffold them with `init`"
         )
     if not args.founders.is_file():
         raise SystemExit(

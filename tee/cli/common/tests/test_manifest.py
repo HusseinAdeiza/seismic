@@ -784,7 +784,7 @@ class GateTests(unittest.TestCase):
         self.assertTrue(any("_SUMMIT" in w for w in assembled.warnings))
 
     def test_init_then_assemble_shares_directory(self):
-        # The `manifest init` → edit → `assemble --dir` loop: authored inputs
+        # The `init` → edit → `assemble` loop: authored inputs
         # under inputs/, the derived artifact set at the top level.
         net = Path(self.tmp.name) / "networks" / "testnet-1"
         inputs = net / "inputs"
@@ -831,7 +831,7 @@ class GateTests(unittest.TestCase):
 
 
 class InitTests(unittest.TestCase):
-    """`manifest init` scaffolds a network directory's authored inputs."""
+    """`init` scaffolds a network directory's authored inputs."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -1122,13 +1122,13 @@ class SetValidatorsTests(unittest.TestCase):
 
 class DirCliTests(unittest.TestCase):
     """assemble/validate take the network directory as their sole positional
-    argument (`_parse_args`); only init handles loose files. Every derived
-    path is absolute — the paths this CLI prints have to be clickable."""
+    argument; only init handles loose files. Every derived path is absolute —
+    the paths this CLI prints have to be clickable."""
 
     NET = Path("networks/testnet-1").resolve()
 
     def test_assemble_dir_resolution(self):
-        args = manifest_mod._parse_args(["assemble", "networks/testnet-1"])
+        args = manifest_mod._parse_assemble_args(["networks/testnet-1"])
         self.assertEqual(args.name, "testnet-1")
         self.assertEqual(args.admission_bin, DEFAULT_ADMISSION_BIN)
         self.assertEqual(args.verify_quote_bin, manifest_mod.DEFAULT_VERIFY_QUOTE_BIN)
@@ -1140,12 +1140,11 @@ class DirCliTests(unittest.TestCase):
 
     def test_assemble_requires_dir(self):
         with self.assertRaises(SystemExit):
-            manifest_mod._parse_args(["assemble"])
+            manifest_mod._parse_assemble_args([])
 
     def test_init_dir_positional_defaults_name(self):
-        args = manifest_mod._parse_args(
+        args = manifest_mod._parse_init_args(
             [
-                "init",
                 "networks/testnet-1",
                 "--reth-genesis",
                 "g.json",
@@ -1158,7 +1157,7 @@ class DirCliTests(unittest.TestCase):
 
     def test_validate_dir_resolution(self):
         net = Path("networks/t").resolve()
-        args = manifest_mod._parse_args(["validate", "networks/t"])
+        args = manifest_mod._parse_validate_args(["networks/t"])
         self.assertEqual(args.manifest, net / "network-manifest.json")
         self.assertEqual(args.admission_bin, DEFAULT_ADMISSION_BIN)
         # validate reads the *shipped* summit genesis, not the authored input.

@@ -3,7 +3,7 @@
 Operator-facing: the commands a node operator runs against their own
 already-provisioned node (configure today; stake / sync later). It is
 cloud-agnostic and descriptor-based — it never wraps Pulumi. Standing up a
-network (provisioning, harvest, founding) is a Seismic-internal act and
+network (provisioning, harvest, founding) is the network founder's act and
 lives in the separate `seismic-tee-network` CLI.
 
 Wired via [project.scripts] in pyproject.toml. Each leaf forwards its argv
@@ -12,10 +12,10 @@ to that module's argparse `main()`; see tee/cli/common/plumbing.py.
 
 import click
 
-from tee.cli.common.plumbing import PASSTHROUGH, forward
+from tee.cli.common.plumbing import PASSTHROUGH, WorkflowOrderGroup, forward
 
 
-@click.group()
+@click.group(cls=WorkflowOrderGroup)
 def app() -> None:
     """Seismic TEE node operator commands."""
 

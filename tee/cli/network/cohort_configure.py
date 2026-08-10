@@ -35,7 +35,7 @@ field. After the whole cohort accepts its config, the launch assertions
 reth block 0 equals `eth.genesis_hash`, and each holder serves exactly the
 founding keys harvested from it. Any mismatch is a hard failure.
 
-Founding is an internal act, so this lives on the bootstrap CLI; joining an
+Founding is the founder's act, so this lives on the network CLI; joining an
 already-live network is the operator `seismic-tee-node configure`. Both go through
 the same `build_config` / `post_config_to_tdx_init` primitives and
 `status.poll_provisioning`, so each node's POSTed config and wipe-watch are
@@ -494,7 +494,7 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         required=True,
         metavar="FILE",
-        help="Network manifest JSON (from `manifest assemble`); → [network].",
+        help="Network manifest JSON (from `assemble`); → [network].",
     )
     parser.add_argument(
         "--reth-genesis",

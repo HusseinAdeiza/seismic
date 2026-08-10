@@ -280,7 +280,7 @@ class VerifyQuoteTests(unittest.TestCase):
     def _run(self, returncode=0, stdout=b"", stderr=b""):
         completed = mock.Mock(returncode=returncode, stdout=stdout, stderr=stderr)
         # The shell-out lives in manifest.verify_quote_evidence (shared with
-        # `manifest assemble`'s re-verification); harvest wraps it with the
+        # `assemble`'s re-verification); harvest wraps it with the
         # burn messaging.
         with mock.patch.object(
             manifest_mod.subprocess, "run", return_value=completed

@@ -191,7 +191,7 @@ class ResolveRethGenesisTests(unittest.TestCase):
             self.assertEqual(resolve_reth_genesis(genesis, manifest), genesis)
 
     def test_defaults_to_manifest_sibling(self):
-        # The artifact-set layout `manifest assemble --out` writes.
+        # The artifact-set layout `assemble` writes.
         with tempfile.TemporaryDirectory() as d:
             manifest = Path(d) / "network-manifest.json"
             sibling = Path(d) / "reth-genesis.json"
@@ -207,7 +207,7 @@ class ResolveRethGenesisTests(unittest.TestCase):
 
 class ResolveSummitGenesisTests(unittest.TestCase):
     def test_defaults_to_manifest_sibling(self):
-        # The artifact-set layout `manifest assemble` writes.
+        # The artifact-set layout `assemble` writes.
         with tempfile.TemporaryDirectory() as d:
             manifest = Path(d) / "network-manifest.json"
             sibling = Path(d) / "summit-genesis.toml"

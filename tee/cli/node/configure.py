@@ -11,7 +11,7 @@ The operator CLI only ever *joins* an existing network (`genesis_node =
 false`): the node fetches `root_key` via `getWrappedRootKey` from a peer
 tdx-init derives from `--bootnode` (`http://<host>:7878` per bootnode).
 Founding a network — designating the one genesis node that mints `root_key`
-locally — is an internal act owned by `seismic-tee-network configure`, not
+locally — is owned by `seismic-tee-network configure`, not
 exposed here. `build_config`/`deliver_config` below are the shared primitives
 both CLIs call; `genesis_node=True` is only ever set by the bootstrap side.
 
@@ -58,8 +58,8 @@ TDX_INIT_RETRY_INTERVAL_SECONDS = 5
 
 def resolve_reth_genesis(reth_genesis: Path | None, manifest_path: Path) -> Path:
     """Resolve `--reth-genesis`, defaulting to the artifact-set convention:
-    `reth-genesis.json` beside the manifest, exactly where `manifest assemble
-    --out` writes its byte-verbatim copy — so the file POSTed is the one the
+    `reth-genesis.json` beside the manifest, exactly where `assemble`
+    writes its byte-verbatim copy — so the file POSTed is the one the
     manifest's `eth.genesis_hash` was computed from.
     """
     path = reth_genesis or manifest_path.parent / manifest_mod.RETH_GENESIS_FILENAME
@@ -76,8 +76,8 @@ def resolve_reth_genesis(reth_genesis: Path | None, manifest_path: Path) -> Path
 
 def resolve_summit_genesis(summit_genesis: Path | None, manifest_path: Path) -> Path:
     """Resolve `--summit-genesis`, defaulting to the artifact-set convention:
-    `summit-genesis.toml` beside the manifest, exactly where `manifest
-    assemble` writes its byte-verbatim copy — so the file POSTed is the one
+    `summit-genesis.toml` beside the manifest, exactly where `assemble`
+    writes its byte-verbatim copy — so the file POSTed is the one
     the manifest's `summit.genesis_config_digest` was computed from.
     """
     path = summit_genesis or manifest_path.parent / manifest_mod.SUMMIT_GENESIS_FILENAME
@@ -330,7 +330,7 @@ def parse_args() -> argparse.Namespace:
         required=True,
         metavar="FILE",
         help=(
-            "Network manifest JSON (from `seismic-tee-network manifest assemble`). "
+            "Network manifest JSON (from `seismic-tee-network assemble`). "
             "Merged into the POSTed config as [network].manifest_base64; shared "
             "across every node, so it lives outside the per-node flags."
         ),
@@ -346,7 +346,7 @@ def parse_args() -> argparse.Namespace:
             "/run/seismic/conf/reth-genesis.json for reth's --chain. Must be "
             "the file the manifest's eth.genesis_hash was computed from. "
             "Default: reth-genesis.json beside --manifest (the artifact-set "
-            "layout `manifest assemble --out` produces)."
+            "layout `assemble` produces)."
         ),
     )
     parser.add_argument(
@@ -361,7 +361,7 @@ def parse_args() -> argparse.Namespace:
             "--genesis-path. Must be the file the manifest's "
             "summit.genesis_config_digest was computed from. Default: "
             "summit-genesis.toml beside --manifest (the artifact-set layout "
-            "`manifest assemble` produces)."
+            "`assemble` produces)."
         ),
     )
     parser.add_argument(

@@ -66,11 +66,11 @@
     <text class="caption" x="1304" y="63">hash commitment</text>
   </g>
 
-  <!-- ================= section 1: manifest assemble ================= -->
+  <!-- ================= section 1: assemble ================= -->
   <!-- inputs/ zone: four authored files + the harvested facts, one per row -->
   <rect class="zone" x="40" y="100" width="360" height="495" rx="8"/>
   <text class="zonelabel" x="56" y="126">inputs/ — authored + harvested</text>
-  <text class="zonelabel" x="440" y="126">manifest assemble</text>
+  <text class="zonelabel" x="440" y="126">assemble</text>
   <text class="zonelabel" x="660" y="126">artifact set — derived, hash-pinned</text>
 
   <!-- row 1: measurements -->

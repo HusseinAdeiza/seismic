@@ -3,7 +3,7 @@
 One directory per network: the committable identity of a founded
 network. The authored inputs live under `inputs/`, joined mid-founding by
 the harvested facts (`inputs/harvest/` — the cohort's TEE-born founding
-keys and their quotes); `seismic-tee-network manifest assemble` derives
+keys and their quotes); `seismic-tee-network assemble` derives
 the artifact set from them at the top level. Everything top-level is
 hash-pinned by `network-manifest.json` — whose SHA-256 is the network's
 `network_id` — and everything under `inputs/` is provenance.
@@ -77,7 +77,7 @@ manifest pin matches its file), so schema-level tooling can be exercised
 against it.
 
 To found any network, throwaway or real, don't reuse or copy this
-directory: run `manifest init <new-dir>`, author fresh inputs, and follow
+directory: run `init <new-dir>`, author fresh inputs, and follow
 the founding workflow in the tee README. `namespace` (the BLS signature
 domain separator) and `chainId` must be unique per network that matters
 (cohorts sharing them can cross-replay signatures).

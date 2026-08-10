@@ -1,4 +1,4 @@
-# Summit network parameters. `manifest assemble` prepends the two derived
+# Summit network parameters. `assemble` prepends the two derived
 # fields above this header — eth_genesis_hash (from reth-genesis.json) and
 # validators (the founding validator set — TEE-born keys gathered from the
 # live cohort) — and ships the completed file as summit-genesis.toml.

@@ -29,7 +29,7 @@ network manifest pins, both hard failures:
 Each node is located by its cohort descriptor (public_ip/fqdn); the
 expected keys come from the committed harvest records
 (`inputs/harvest/<node>.json`), whose pairing with the pinned validator
-set `manifest assemble` already enforced.
+set `assemble` already enforced.
 """
 
 import time

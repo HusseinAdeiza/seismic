@@ -1,6 +1,6 @@
 eth_genesis_hash = "0x7c1c5d208fe9b8f1b4287c1cf1e696d466f89091c935d20dc661fa4333f68b6a"
 validators = []
-# Summit network parameters. `manifest assemble` prepends the two derived
+# Summit network parameters. `assemble` prepends the two derived
 # fields above this header — eth_genesis_hash (from reth-genesis.json) and
 # validators (the founding validator set — TEE-born keys gathered from the
 # live cohort) — and ships the completed file as summit-genesis.toml.

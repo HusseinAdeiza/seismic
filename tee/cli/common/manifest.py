@@ -50,7 +50,7 @@ the directory; between `init` and `assemble` the founding cohort is
 provisioned and harvested, since assemble pins the harvested validator
 set):
 
-    uv run python -m tee.cli.common.manifest init tee/networks/seismic-devnet-3 \
+    uv run seismic-tee-network init tee/networks/seismic-devnet-3 \
         --reth-genesis dev.json \
         --measurements ../seismic-images/build/measurements.json \
         --measurement-id seismic_2026-06-11.abc123.vhd --founders 4
@@ -58,8 +58,8 @@ set):
     # inputs/founder-withdrawal-credentials.json, then:
     #   seismic-tee-network up --network tee/networks/seismic-devnet-3 --count N
     #   seismic-tee-network harvest tee/networks/seismic-devnet-3
-    uv run python -m tee.cli.common.manifest assemble tee/networks/seismic-devnet-3
-    uv run python -m tee.cli.common.manifest validate tee/networks/seismic-devnet-3
+    uv run seismic-tee-network assemble tee/networks/seismic-devnet-3
+    uv run seismic-tee-network validate tee/networks/seismic-devnet-3
 """
 
 import argparse
@@ -78,7 +78,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from eth_utils import keccak
+from eth_utils.crypto import keccak
 
 from tee.cli.common.descriptor import load_descriptor, require
 from tee.cli.common.logging_setup import setup_logging
@@ -118,7 +118,7 @@ DEFAULT_SUMMIT_BIN = "summit"
 
 # The DCAP verifier from the enclave repo (bin/verify-quote): exit 0 plus
 # one JSON report on stdout ⇔ verified. `network harvest` runs it when the
-# founding keys are collected, and `manifest assemble` re-runs it over the
+# founding keys are collected, and `assemble` re-runs it over the
 # archived evidence before the harvested set is pinned. Verification-only;
 # runs natively on any dev platform (verification is pure computation over
 # the evidence bytes — no TEE hardware involved).
@@ -1277,13 +1277,13 @@ def write_artifact_set(
 
 
 def starter_summit_genesis(name: str) -> str:
-    """Starter authored summit genesis written by `manifest init` (values
+    """Starter authored summit genesis written by `init` (values
     from summit's example_genesis.toml). Every value is a per-network choice
     for the founder to review; nothing in it is derived.
     """
     # json.dumps emits a valid TOML basic string for these simple values.
     return f"""\
-# Summit network parameters. `manifest assemble` completes this input with
+# Summit network parameters. `assemble` completes this input with
 # the two derived fields — eth_genesis_hash (from reth-genesis.json) and
 # validators (the founding set: TEE-born keys harvested from the live
 # cohort) — and ships summit's own rendering of the completed file as
@@ -1465,45 +1465,45 @@ def validate_summit_genesis_matches(
         )
 
 
-def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        prog="python -m tee.cli.common.manifest", description=__doc__
+def _add_reth_bin(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--reth-bin",
+        default="seismic-reth",
+        help="seismic-reth binary used to recompute eth_genesis_hash",
     )
-    sub = parser.add_subparsers(dest="command", required=True)
 
-    def add_reth_bin(p: argparse.ArgumentParser) -> None:
-        p.add_argument(
-            "--reth-bin",
-            default="seismic-reth",
-            help="seismic-reth binary used to recompute eth_genesis_hash",
-        )
 
-    def add_admission_bin(p: argparse.ArgumentParser) -> None:
-        p.add_argument(
-            "--admission-bin",
-            default=DEFAULT_ADMISSION_BIN,
-            help="policy-compiler CLI used to promote measurements and "
-            "compile the policy into registry genesis storage",
-        )
+def _add_admission_bin(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--admission-bin",
+        default=DEFAULT_ADMISSION_BIN,
+        help="policy-compiler CLI used to promote measurements and "
+        "compile the policy into registry genesis storage",
+    )
 
-    def add_summit_bin(p: argparse.ArgumentParser) -> None:
-        p.add_argument(
-            "--summit-bin",
-            default=DEFAULT_SUMMIT_BIN,
-            help="summit binary whose `genesis digest` subcommand computes "
-            "summit.genesis_config_digest",
-        )
 
-    ini = sub.add_parser("init", help="scaffold a network directory's authored inputs")
-    ini.add_argument("dir", type=Path, help="network directory to create")
-    ini.add_argument(
+def _add_summit_bin(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--summit-bin",
+        default=DEFAULT_SUMMIT_BIN,
+        help="summit binary whose `genesis digest` subcommand computes "
+        "summit.genesis_config_digest",
+    )
+
+
+def _parse_init_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="scaffold a network directory's authored inputs"
+    )
+    parser.add_argument("dir", type=Path, help="network directory to create")
+    parser.add_argument(
         "--name",
         default=None,
         help="network name for the starter summit genesis's namespace; "
         "default: the directory's basename (which is also what assemble "
         "uses as the manifest name)",
     )
-    ini.add_argument(
+    parser.add_argument(
         "--reth-genesis",
         type=Path,
         required=True,
@@ -1511,7 +1511,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         f"{INPUTS_DIRNAME}/{RETH_GENESIS_FILENAME}. Required: an external "
         "fact (chain state + contract alloc) init cannot invent",
     )
-    ini.add_argument(
+    parser.add_argument(
         "--measurements",
         type=Path,
         required=True,
@@ -1519,7 +1519,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         f"copied in as {INPUTS_DIRNAME}/{MEASUREMENTS_FILENAME}. Required: "
         "the PCRs of a real published image, never generated",
     )
-    ini.add_argument(
+    parser.add_argument(
         "--summit-genesis",
         type=Path,
         default=None,
@@ -1527,7 +1527,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "the two inputs above it holds only per-network parameter choices, "
         "so the default writes an editable starter with namespace = <name>",
     )
-    ini.add_argument(
+    parser.add_argument(
         "--measurement-id",
         default=None,
         help="image artifact filename the measurements belong to; stamped "
@@ -1535,7 +1535,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "the measurements file carries no measurement_id of its own "
         "(seismic-images' make measure stamps one)",
     )
-    ini.add_argument(
+    parser.add_argument(
         "--founders",
         type=int,
         default=0,
@@ -1546,218 +1546,237 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "all a throwaway needs; a real founding replaces them with the "
         "founders' addresses. Default: an empty list to fill in",
     )
-    ini.add_argument(
+    parser.add_argument(
         "--force",
         action="store_true",
         help="overwrite existing authored inputs (re-authoring them and "
         "re-assembling is a new network identity)",
     )
+    args = parser.parse_args(argv)
+    # Absolute, so every path this CLI prints is clickable in a terminal and
+    # names one directory unambiguously.
+    args.dir = args.dir.resolve()
+    args.name = args.name or args.dir.name
+    return args
 
-    asm = sub.add_parser(
-        "assemble",
-        help="derive the artifact set from a network directory's inputs",
+
+def _parse_assemble_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="derive the artifact set from a network directory's inputs"
     )
-    asm.add_argument(
+    parser.add_argument(
         "dir",
         type=Path,
-        help=f"network directory from `manifest init`: reads its "
+        help=f"network directory from `init`: reads its "
         f"{INPUTS_DIRNAME}/ ({RETH_GENESIS_FILENAME}, "
         f"{SUMMIT_GENESIS_FILENAME}, {MEASUREMENTS_FILENAME}), takes the "
         "network name from its basename, and writes the artifact set at "
         "the top level",
     )
-    asm.add_argument(
+    parser.add_argument(
         "--measurement-id",
         help="policy record id (image artifact filename); overrides the one "
         f"init stamped into {INPUTS_DIRNAME}/{MEASUREMENTS_FILENAME}",
     )
-    asm.add_argument("--attestation-type", default=DEFAULT_ATTESTATION_TYPE)
-    asm.add_argument(
+    parser.add_argument("--attestation-type", default=DEFAULT_ATTESTATION_TYPE)
+    parser.add_argument(
         "--registry",
         default=DEFAULT_REGISTRY,
         help="measurement-registry contract address in the genesis alloc",
     )
-    asm.add_argument(
+    parser.add_argument(
         "--authority",
         default=DEFAULT_AUTHORITY,
         help="registry mutation-authority contract address",
     )
-    asm.add_argument(
+    parser.add_argument(
         "--force",
         action="store_true",
         help="overwrite an existing manifest (a new network identity)",
     )
-    asm.add_argument(
+    parser.add_argument(
         "--verify-quote-bin",
         default=DEFAULT_VERIFY_QUOTE_BIN,
         help="DCAP verifier CLI from the enclave repo (bin/verify-quote), "
         "used to re-verify the archived harvest quotes before the founding "
         "set is pinned",
     )
-    asm.add_argument(
+    parser.add_argument(
         "--pccs-url",
         default=None,
         metavar="URL",
         help="forwarded to verify-quote: PCCS URL for DCAP collateral",
     )
-    asm.add_argument(
+    parser.add_argument(
         "--override-azure-outdated-tcb",
         action="store_true",
         help="forwarded to verify-quote: allow the Azure outdated-TCB override path",
     )
-    add_reth_bin(asm)
-    add_admission_bin(asm)
-    add_summit_bin(asm)
+    _add_reth_bin(parser)
+    _add_admission_bin(parser)
+    _add_summit_bin(parser)
+    args = parser.parse_args(argv)
+    # Absolute, so every path this CLI prints is clickable in a terminal and
+    # names one directory unambiguously.
+    args.dir = args.dir.resolve()
+    args.name = args.dir.name
+    inputs_dir = args.dir / INPUTS_DIRNAME
+    args.reth_genesis = inputs_dir / RETH_GENESIS_FILENAME
+    args.summit_genesis = inputs_dir / SUMMIT_GENESIS_FILENAME
+    args.measurements = inputs_dir / MEASUREMENTS_FILENAME
+    args.out = args.dir
+    return args
 
-    val = sub.add_parser(
-        "validate", help="re-run all gates over an assembled network directory"
+
+def _parse_validate_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="re-run all gates over an assembled network directory"
     )
-    val.add_argument(
+    parser.add_argument(
         "dir",
         type=Path,
         help="network directory: audits the artifact set `assemble` wrote "
         "there (manifest, summit genesis, policy) against its reth genesis",
     )
-    add_reth_bin(val)
-    add_admission_bin(val)
-    add_summit_bin(val)
-
+    _add_reth_bin(parser)
+    _add_admission_bin(parser)
+    _add_summit_bin(parser)
     args = parser.parse_args(argv)
-
-    # Absolute from here on, so every path this CLI prints is clickable in a
-    # terminal and names one directory unambiguously.
+    # Absolute, so every path this CLI prints is clickable in a terminal and
+    # names one directory unambiguously.
     args.dir = args.dir.resolve()
-    if args.command == "init":
-        args.name = args.name or args.dir.name
-    elif args.command == "assemble":
-        args.name = args.dir.name
-        inputs_dir = args.dir / INPUTS_DIRNAME
-        args.reth_genesis = inputs_dir / RETH_GENESIS_FILENAME
-        args.summit_genesis = inputs_dir / SUMMIT_GENESIS_FILENAME
-        args.measurements = inputs_dir / MEASUREMENTS_FILENAME
-        args.out = args.dir
-    elif args.command == "validate":
-        args.manifest = args.dir / MANIFEST_FILENAME
-        args.reth_genesis = args.dir / RETH_GENESIS_FILENAME
-        args.summit_genesis = args.dir / SUMMIT_GENESIS_FILENAME
-        args.measurement_policy = args.dir / POLICY_FILENAME
+    args.manifest = args.dir / MANIFEST_FILENAME
+    args.reth_genesis = args.dir / RETH_GENESIS_FILENAME
+    args.summit_genesis = args.dir / SUMMIT_GENESIS_FILENAME
+    args.measurement_policy = args.dir / POLICY_FILENAME
     return args
 
 
-def main() -> None:
+def init_main() -> None:
     setup_logging()
-    args = _parse_args()
+    args = _parse_init_args()
     try:
-        if args.command == "init":
-            written = init_network_dir(
-                args.dir,
-                args.name,
-                args.reth_genesis,
-                args.measurements,
-                args.summit_genesis,
-                args.measurement_id,
-                founders=args.founders,
-                force=args.force,
-            )
-            for path in written:
-                logger.info("wrote %s", path)
-            # Suggest --measurement-id only when the copied measurements
-            # actually lack one (make measure stamps it at the source; a
-            # promoted policy carries one per record).
-            stamped = json.loads(
-                (args.dir / INPUTS_DIRNAME / MEASUREMENTS_FILENAME).read_bytes()
-            )
-            needs_id = isinstance(stamped, dict) and "measurement_id" not in stamped
-            id_hint = " --measurement-id <image-artifact-filename>" if needs_id else ""
-            inputs_dir = args.dir / INPUTS_DIRNAME
-            founders_hint = (
-                "update the placeholder addresses in"
-                if args.founders
-                else "fill in one address per founding node in"
-            )
-            # No --count on `up`: the authored credentials size the cohort.
-            print(
-                f"Scaffolded {args.dir}. Next:\n"
-                f"  1. review {inputs_dir / SUMMIT_GENESIS_FILENAME}\n"
-                f"  2. {founders_hint}\n"
-                f"     {inputs_dir / FOUNDERS_FILENAME}\n"
-                f"  3. review the stack config the cohort boots from\n"
-                f"     {DEFAULT_STACK_CONFIG}\n"
-                "     (vhd_blob_url must name the image the measurements "
-                "describe;\n"
-                "      region, VM size, and operator_ip_cidr live there too)\n"
-                f"  4. seismic-tee-network up --network {args.dir}\n"
-                f"  5. seismic-tee-network harvest {args.dir}\n"
-                f"  6. seismic-tee-network manifest assemble {args.dir}{id_hint}"
-            )
-        elif args.command == "assemble":
-            missing = [
-                p
-                for p in (args.reth_genesis, args.summit_genesis, args.measurements)
-                if not p.exists()
-            ]
-            if missing:
-                raise GateError(
-                    "missing authored input(s): "
-                    + ", ".join(str(p) for p in missing)
-                    + f" — authored inputs live under {INPUTS_DIRNAME}/; "
-                    "scaffold them with `manifest init`"
-                )
-            founding = load_founding_set(args.dir)
-            logger.info(
-                "founding set: %d validator(s) from %s",
-                len(founding.validators),
-                args.dir / INPUTS_DIRNAME / HARVEST_DIRNAME,
-            )
-            policy_bytes = promote_measurements(
-                args.measurements.read_bytes(),
-                args.measurement_id,
-                args.attestation_type,
-                admission_bin=args.admission_bin,
-            )
-            verify_harvest_records(
-                founding.records,
-                policy_bytes,
-                verify_quote_bin=args.verify_quote_bin,
-                pccs_url=args.pccs_url,
-                override_azure_outdated_tcb=args.override_azure_outdated_tcb,
-            )
-            assembled = assemble(
-                name=args.name,
-                reth_genesis=args.reth_genesis,
-                summit_genesis=args.summit_genesis,
-                policy_bytes=policy_bytes,
-                validators=founding.validators,
-                registry=args.registry,
-                authority=args.authority,
-                reth_bin=args.reth_bin,
-                admission_bin=args.admission_bin,
-                summit_bin=args.summit_bin,
-            )
-            write_artifact_set(args.out, assembled, force=args.force)
-            logger.info("wrote %s", args.out / MANIFEST_FILENAME)
-            logger.info("wrote %s", args.out / POLICY_FILENAME)
-            logger.info("wrote %s", args.out / RETH_GENESIS_FILENAME)
-            logger.info("wrote %s", args.out / SUMMIT_GENESIS_FILENAME)
-            print(f"network_id: {assembled.network_id}")
-        else:
-            manifest_bytes = args.manifest.read_bytes()
-            manifest = validate_manifest_schema(manifest_bytes)
-            ctx = GateContext(
-                reth_genesis=args.reth_genesis,
-                summit_genesis=args.summit_genesis,
-                policy_bytes=args.measurement_policy.read_bytes(),
-                reth_bin=args.reth_bin,
-                admission_bin=args.admission_bin,
-                summit_bin=args.summit_bin,
-            )
-            run_validation_gates(manifest, ctx)
-            print(f"network_id: {compute_network_id(manifest_bytes)}")
-            logger.info("all validation gates passed")
+        written = init_network_dir(
+            args.dir,
+            args.name,
+            args.reth_genesis,
+            args.measurements,
+            args.summit_genesis,
+            args.measurement_id,
+            founders=args.founders,
+            force=args.force,
+        )
+        for path in written:
+            logger.info("wrote %s", path)
+        # Suggest --measurement-id only when the copied measurements
+        # actually lack one (make measure stamps it at the source; a
+        # promoted policy carries one per record).
+        stamped = json.loads(
+            (args.dir / INPUTS_DIRNAME / MEASUREMENTS_FILENAME).read_bytes()
+        )
+        needs_id = isinstance(stamped, dict) and "measurement_id" not in stamped
+        id_hint = " --measurement-id <image-artifact-filename>" if needs_id else ""
+        inputs_dir = args.dir / INPUTS_DIRNAME
+        founders_hint = (
+            "update the placeholder addresses in"
+            if args.founders
+            else "fill in one address per founding node in"
+        )
+        # No --count on `up`: the authored credentials size the cohort.
+        print(
+            f"Scaffolded {args.dir}. Next:\n"
+            f"  1. review {inputs_dir / SUMMIT_GENESIS_FILENAME}\n"
+            f"  2. {founders_hint}\n"
+            f"     {inputs_dir / FOUNDERS_FILENAME}\n"
+            f"  3. review the stack config the cohort boots from\n"
+            f"     {DEFAULT_STACK_CONFIG}\n"
+            "     (vhd_blob_url must name the image the measurements "
+            "describe;\n"
+            "      region, VM size, and operator_ip_cidr live there too)\n"
+            f"  4. seismic-tee-network up --network {args.dir}\n"
+            f"  5. seismic-tee-network harvest {args.dir}\n"
+            f"  6. seismic-tee-network assemble {args.dir}{id_hint}"
+        )
     except (GateError, ManifestSchemaError) as e:
         logger.error("%s", e)
         sys.exit(1)
 
 
-if __name__ == "__main__":
-    main()
+def assemble_main() -> None:
+    setup_logging()
+    args = _parse_assemble_args()
+    try:
+        missing = [
+            p
+            for p in (args.reth_genesis, args.summit_genesis, args.measurements)
+            if not p.exists()
+        ]
+        if missing:
+            raise GateError(
+                "missing authored input(s): "
+                + ", ".join(str(p) for p in missing)
+                + f" — authored inputs live under {INPUTS_DIRNAME}/; "
+                "scaffold them with `init`"
+            )
+        founding = load_founding_set(args.dir)
+        logger.info(
+            "founding set: %d validator(s) from %s",
+            len(founding.validators),
+            args.dir / INPUTS_DIRNAME / HARVEST_DIRNAME,
+        )
+        policy_bytes = promote_measurements(
+            args.measurements.read_bytes(),
+            args.measurement_id,
+            args.attestation_type,
+            admission_bin=args.admission_bin,
+        )
+        verify_harvest_records(
+            founding.records,
+            policy_bytes,
+            verify_quote_bin=args.verify_quote_bin,
+            pccs_url=args.pccs_url,
+            override_azure_outdated_tcb=args.override_azure_outdated_tcb,
+        )
+        assembled = assemble(
+            name=args.name,
+            reth_genesis=args.reth_genesis,
+            summit_genesis=args.summit_genesis,
+            policy_bytes=policy_bytes,
+            validators=founding.validators,
+            registry=args.registry,
+            authority=args.authority,
+            reth_bin=args.reth_bin,
+            admission_bin=args.admission_bin,
+            summit_bin=args.summit_bin,
+        )
+        write_artifact_set(args.out, assembled, force=args.force)
+        logger.info("wrote %s", args.out / MANIFEST_FILENAME)
+        logger.info("wrote %s", args.out / POLICY_FILENAME)
+        logger.info("wrote %s", args.out / RETH_GENESIS_FILENAME)
+        logger.info("wrote %s", args.out / SUMMIT_GENESIS_FILENAME)
+        print(f"network_id: {assembled.network_id}")
+    except (GateError, ManifestSchemaError) as e:
+        logger.error("%s", e)
+        sys.exit(1)
+
+
+def validate_main() -> None:
+    setup_logging()
+    args = _parse_validate_args()
+    try:
+        manifest_bytes = args.manifest.read_bytes()
+        manifest = validate_manifest_schema(manifest_bytes)
+        ctx = GateContext(
+            reth_genesis=args.reth_genesis,
+            summit_genesis=args.summit_genesis,
+            policy_bytes=args.measurement_policy.read_bytes(),
+            reth_bin=args.reth_bin,
+            admission_bin=args.admission_bin,
+            summit_bin=args.summit_bin,
+        )
+        run_validation_gates(manifest, ctx)
+        print(f"network_id: {compute_network_id(manifest_bytes)}")
+        logger.info("all validation gates passed")
+    except (GateError, ManifestSchemaError) as e:
+        logger.error("%s", e)
+        sys.exit(1)

@@ -1,7 +1,7 @@
 """Where this checkout keeps the things the CLIs point at.
 
 Layout facts, not configuration. Both front-ends name them — the
-orchestrator provisions from the Pulumi program, `manifest init` points
+orchestrator provisions from the Pulumi program, `init` points
 the founder at its stack config — so they are spelled once here rather
 than derived from `__file__` in each module that needs them.
 """
