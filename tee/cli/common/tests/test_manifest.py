@@ -6,14 +6,13 @@ Run with:
 
 import hashlib
 import json
-import shutil
 import tempfile
 import tomllib
 import unittest
 from pathlib import Path
 from typing import Any
 
-from eth_utils import keccak
+from eth_utils.crypto import keccak
 
 from tee.cli.common import manifest as manifest_mod
 from tee.cli.common.manifest import (
@@ -24,7 +23,6 @@ from tee.cli.common.manifest import (
     GateError,
     ManifestSchemaError,
     assemble,
-    compile_measurement_policy,
     compute_network_id,
     init_network_dir,
     inject_registry_genesis_storage,
@@ -74,10 +72,16 @@ def _fake_set_validators(template: bytes, validators: list[dict[str, str]]) -> b
     )
 
 
-# The shared policy-compiler CLI from the enclave repo. Tests of the
-# subprocess boundary run only where it is built (everything else injects
-# compile_fn / crafts policy bytes directly, mirroring genesis_hash_fn).
-ADMISSION_BIN = shutil.which(DEFAULT_ADMISSION_BIN)
+# A raw `make measure` wrapper as seismic-images emits it: numeric keys,
+# `expected` (not `expected_any`), and a zero register the schema drops.
+RAW_MEASUREMENTS = {
+    "measurements": {
+        "4": {"expected": "ab" * 32},
+        "8": {"expected": "00" * 32},
+        "9": {"expected": "cd" * 32},
+        "11": {"expected": "ef" * 32},
+    }
+}
 
 
 def promoted_policy_bytes(measurement_id: str = "img.vhd") -> bytes:
@@ -100,7 +104,9 @@ def promoted_policy_bytes(measurement_id: str = "img.vhd") -> bytes:
 # Mirrors https://github.com/SeismicSystems/enclave/blob/seismic/crates/network-manifest/fixtures/network-manifest-v1.json
 # The network_id vector below is asserted by that crate's
 # parses_v1_fixture_and_derives_network_id test; together they pin the deploy
-# emitter and the node-side parser to byte-identical rendering.
+# emitter and the node-side parser to byte-identical rendering. That crate
+# pins the fixture's exact bytes, and drift_test_manifest.py
+# (`make test-drift`) checks this emitter against them.
 FIXTURE_MANIFEST = {
     "manifest_version": 1,
     "name": "seismic-devnet-3",
@@ -130,10 +136,6 @@ FIXTURE_MANIFEST = {
 FIXTURE_NETWORK_ID = (
     "0x8ef142e3f2bf15f8b201c4d8cda7848a9e846222c62b5615d4d36c7fccd98a24"
 )
-
-# The node-side parser pins the fixture's exact bytes in the enclave repo;
-# the live byte-parity check against it lives in live_test_manifest.py
-# (network-required, `make test-live`).
 
 
 class RenderTests(unittest.TestCase):
@@ -204,87 +206,14 @@ class SchemaTests(unittest.TestCase):
 
 
 class PromoteTests(unittest.TestCase):
-    """The `promote` subprocess boundary. Promotion semantics themselves
-    (register selection, normalization, pass-through, compile-validation)
-    are pinned by the admission crate's own tests and fixtures; these tests
-    cover the shell-out and its failure surfacing."""
-
-    RAW = {
-        "measurements": {
-            "4": {"expected": "ab" * 32},
-            "8": {"expected": "00" * 32},
-            "9": {"expected": "cd" * 32},
-            "11": {"expected": "ef" * 32},
-        }
-    }
+    """The `promote` shell-out's failure surfacing. Running the real CLI —
+    promotion, pass-through, compiler diagnostics — needs the binary, so it
+    lives in drift_test_manifest.py (`make test-drift`)."""
 
     def test_missing_binary_is_a_gate_error(self):
-        # Runs everywhere: the actionable build-or-point-at-it message must
-        # not depend on having the binary.
-        raw = json.dumps(self.RAW).encode()
+        raw = json.dumps(RAW_MEASUREMENTS).encode()
         with self.assertRaisesRegex(GateError, "not found"):
             promote_measurements(raw, "img.vhd", admission_bin="no-such-admission-cli")
-
-    @unittest.skipUnless(ADMISSION_BIN, "seismic-measurement-admission not in PATH")
-    def test_promotes_make_measure_wrapper_to_schema_registers(self):
-        raw = json.dumps(self.RAW).encode()
-        policy = json.loads(promote_measurements(raw, "../build/img.vhd"))
-        record = policy[0]
-        # Path ids reduce to the bare filename; the promoted record binds
-        # exactly the named schema registers, single-value expected_any.
-        self.assertEqual(record["measurement_id"], "img.vhd")
-        self.assertEqual(record["attestation_type"], "azure-tdx")
-        self.assertEqual(list(record["measurements"]), ["pcr4", "pcr9", "pcr11"])
-        self.assertEqual(record["measurements"]["pcr4"], {"expected_any": ["ab" * 32]})
-
-    @unittest.skipUnless(ADMISSION_BIN, "seismic-measurement-admission not in PATH")
-    def test_already_promoted_policy_passes_through_verbatim(self):
-        # Odd-but-valid formatting must survive untouched: the manifest
-        # commits to these exact bytes.
-        raw = (
-            b'[{"measurement_id": "x", "attestation_type": "azure-tdx",'
-            b'   "measurements": {"4": {"expected": "'
-            + b"ab" * 32
-            + b'"}, "9": {"expected": "'
-            + b"cd" * 32
-            + b'"}, "11": {"expected": "'
-            + b"ef" * 32
-            + b'"}}}]'
-        )
-        self.assertEqual(promote_measurements(raw, None), raw)
-
-    @unittest.skipUnless(ADMISSION_BIN, "seismic-measurement-admission not in PATH")
-    def test_promote_failure_surfaces_compiler_diagnostics(self):
-        raw = json.dumps({"measurements": {"4": {"expected": "ab" * 32}}}).encode()
-        with self.assertRaisesRegex(GateError, "pcr9"):
-            promote_measurements(raw, "img.vhd")
-
-    @unittest.skipUnless(ADMISSION_BIN, "seismic-measurement-admission not in PATH")
-    def test_requires_measurement_id(self):
-        raw = json.dumps(self.RAW).encode()
-        with self.assertRaisesRegex(GateError, "measurement_id"):
-            promote_measurements(raw, None)
-
-
-class CompilePolicyTests(unittest.TestCase):
-    """The `compile` subprocess boundary (report consumed by the gates)."""
-
-    @unittest.skipUnless(ADMISSION_BIN, "seismic-measurement-admission not in PATH")
-    def test_compile_report_shape(self):
-        policy = promoted_policy_bytes()
-        report = compile_measurement_policy(policy)
-        self.assertEqual(report["policy_hash"], manifest_mod._sha256_hex(policy))
-        self.assertEqual(report["accepted_count"], 1)
-        # 4 field slots (policy hashes, revision, count) + 1 status slot.
-        self.assertEqual(len(report["registry_genesis_storage"]), 5)
-        manifest_mod._check_hex(
-            report["registry_runtime_code_hash"], 32, "registry_runtime_code_hash"
-        )
-
-    @unittest.skipUnless(ADMISSION_BIN, "seismic-measurement-admission not in PATH")
-    def test_compile_failure_is_a_gate_error(self):
-        with self.assertRaisesRegex(GateError, "failed"):
-            compile_measurement_policy(b"[]")
 
 
 class NetworkSectionTests(unittest.TestCase):
@@ -440,11 +369,6 @@ class InjectTests(unittest.TestCase):
         for report in ({}, {"registry_genesis_storage": {}}):
             with self.assertRaisesRegex(GateError, "registry_genesis_storage"):
                 inject_registry_genesis_storage(genesis, self.REGISTRY, report)
-
-
-# The registry runtime-code drift guard (admission binary's pin vs the
-# monorepo's MeasurementRegistry artifact) lives in live_test_manifest.py
-# (network-required, `make test-live`).
 
 
 class GateTests(unittest.TestCase):

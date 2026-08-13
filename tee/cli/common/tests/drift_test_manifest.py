@@ -1,0 +1,273 @@
+"""Cross-repo drift guards (run via `make test-drift`).
+
+These tests check this repo against the current state of its sibling repos,
+reached either by fetching a pinned artifact over HTTP or by running a
+binary built from a sibling branch. Every test needing something outside
+this repo belongs here, so `make test` stays hermetic with nothing to skip
+and every test runs in exactly one CI job. CI runs this module as its own
+non-required job, where a failure names the exact cross-repo check.
+
+The suite never skips — a missing prerequisite is a failure, because a
+guard that quietly passes when its tooling is missing is how a committed
+artifact goes stale unnoticed. It needs:
+
+- network reach to raw.githubusercontent.com (the cross-repo tests fetch
+  pinned artifacts from sibling repos);
+- `seismic-measurement-admission` on PATH — the enclave repo's admission
+  CLI (`cargo install --features cli` from crates/measurement-admission;
+  CI builds it from enclave's seismic branch);
+- `seismic-reth` on PATH, for the `genesis-hash` subcommand (CI installs a
+  prebuilt release with the setup-sreth action).
+
+Run with:
+    make test-drift
+"""
+
+import http.client
+import json
+import shutil
+import subprocess
+import unittest
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+from eth_utils.crypto import keccak
+
+from tee.cli.common import manifest as manifest_mod
+from tee.cli.common.manifest import (
+    DEFAULT_ADMISSION_BIN,
+    MANIFEST_FILENAME,
+    POLICY_FILENAME,
+    RETH_GENESIS_FILENAME,
+    SUMMIT_GENESIS_FILENAME,
+    GateContext,
+    GateError,
+    compile_measurement_policy,
+    promote_measurements,
+    render_manifest,
+    run_validation_gates,
+    validate_manifest_schema,
+)
+from tee.cli.common.tests.test_manifest import (
+    FIXTURE_MANIFEST,
+    RAW_MEASUREMENTS,
+    promoted_policy_bytes,
+)
+
+REPO_ROOT = Path(__file__).resolve().parents[4]
+NETWORKS_DIR = REPO_ROOT / "tee" / "networks"
+ADMISSION_BIN = shutil.which(DEFAULT_ADMISSION_BIN)
+MISSING_ADMISSION_BIN = (
+    f"{DEFAULT_ADMISSION_BIN} not on PATH — this suite fails rather than "
+    "skips; build the enclave repo's admission CLI (`cargo install "
+    "--features cli` from crates/measurement-admission)"
+)
+
+
+def _fetch_live(url: str) -> bytes:
+    """Fetch a cross-repo artifact, failing the calling test if it can't.
+
+    An HTTP 4xx/5xx means the artifact moved or the ref is gone — a real
+    drift signal, not flaky network — so it propagates directly. A
+    transport-level failure (unreachable, timeout, truncated body) is
+    retried once, then fails: this suite never skips.
+    """
+    last: Exception | None = None
+    for _ in range(2):
+        try:
+            with urllib.request.urlopen(url, timeout=10) as resp:
+                return resp.read()
+        except urllib.error.HTTPError:
+            raise
+        except (urllib.error.URLError, TimeoutError, http.client.HTTPException) as e:
+            last = e
+    raise AssertionError(
+        f"cross-repo artifact unreachable after retry: {last}"
+    ) from last
+
+
+def _committed_network_dirs() -> list[Path]:
+    """Network directories git tracks.
+
+    A real deployment writes its network directory here too, so enumerating
+    the filesystem would validate whichever devnet the developer last
+    founded. Only the committed ones are this repo's to keep passing.
+    """
+    listed = subprocess.run(
+        ["git", "ls-files", "-z", "--", str(NETWORKS_DIR)],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        check=True,
+        text=True,
+    ).stdout
+    return sorted(
+        {
+            (REPO_ROOT / path).parent
+            for path in listed.split("\0")
+            if path.endswith("/" + MANIFEST_FILENAME)
+        }
+    )
+
+
+class ManifestFixtureParityTests(unittest.TestCase):
+    """Byte-parity with the node-side manifest parser.
+
+    The enclave repo pins the manifest fixture's exact bytes; deploy's
+    emitter must render the same dict to the same bytes. Fetched from
+    GitHub (the `seismic` branch) rather than assuming a sibling checkout
+    on disk, so the check runs in CI too. The fixture's network_id is also
+    pinned offline by test_manifest's
+    test_render_matches_enclave_network_id_vector; this adds the live
+    byte-level drift guard on top.
+    """
+
+    ENCLAVE_FIXTURE_URL = (
+        "https://raw.githubusercontent.com/SeismicSystems/enclave/seismic/"
+        "crates/network-manifest/fixtures/network-manifest-v1.json"
+    )
+
+    def test_render_matches_enclave_fixture_bytes(self):
+        fixture = _fetch_live(self.ENCLAVE_FIXTURE_URL)
+        self.assertEqual(render_manifest(FIXTURE_MANIFEST), fixture)
+
+
+class RuntimeCodeDriftTests(unittest.TestCase):
+    """Cross-repo drift guard for the registry runtime-code pin.
+
+    The admission CLI pins keccak256 of the canonical MeasurementRegistry
+    deployed bytecode; the gates enforce that pin against the genesis alloc,
+    so a stale pin already fails assembly loudly. This test is the early
+    warning: the pin reported by the binary on PATH must match the artifact
+    the reth genesis builder installs.
+    """
+
+    REGISTRY_ARTIFACT_URL = (
+        "https://raw.githubusercontent.com/SeismicSystems/seismic/main/"
+        "contracts/artifacts/MeasurementRegistry.json"
+    )
+
+    def test_admission_crate_pins_current_registry_runtime(self):
+        self.assertIsNotNone(ADMISSION_BIN, MISSING_ADMISSION_BIN)
+        report = compile_measurement_policy(promoted_policy_bytes())
+        artifact = json.loads(_fetch_live(self.REGISTRY_ARTIFACT_URL))
+        runtime = artifact["deployedBytecode"]["object"].removeprefix("0x")
+        self.assertEqual(
+            report["registry_runtime_code_hash"],
+            "0x" + keccak(bytes.fromhex(runtime)).hex(),
+        )
+
+
+class PromoteBoundaryTests(unittest.TestCase):
+    """The `promote` subprocess boundary, against the real CLI.
+
+    Promotion semantics (register selection, normalization, pass-through,
+    compile-validation) are pinned by the admission crate's own tests and
+    fixtures; these cover the shell-out and what it surfaces. The
+    missing-binary error path needs no CLI and stays in test_manifest.py.
+    """
+
+    def setUp(self):
+        self.assertIsNotNone(ADMISSION_BIN, MISSING_ADMISSION_BIN)
+
+    def test_promotes_make_measure_wrapper_to_schema_registers(self):
+        raw = json.dumps(RAW_MEASUREMENTS).encode()
+        policy = json.loads(promote_measurements(raw, "../build/img.vhd"))
+        record = policy[0]
+        # Path ids reduce to the bare filename; the promoted record binds
+        # exactly the named schema registers, single-value expected_any.
+        self.assertEqual(record["measurement_id"], "img.vhd")
+        self.assertEqual(record["attestation_type"], "azure-tdx")
+        self.assertEqual(list(record["measurements"]), ["pcr4", "pcr9", "pcr11"])
+        self.assertEqual(record["measurements"]["pcr4"], {"expected_any": ["ab" * 32]})
+
+    def test_already_promoted_policy_passes_through_verbatim(self):
+        # Odd-but-valid formatting must survive untouched: the manifest
+        # commits to these exact bytes.
+        raw = (
+            b'[{"measurement_id": "x", "attestation_type": "azure-tdx",'
+            b'   "measurements": {"4": {"expected": "'
+            + b"ab" * 32
+            + b'"}, "9": {"expected": "'
+            + b"cd" * 32
+            + b'"}, "11": {"expected": "'
+            + b"ef" * 32
+            + b'"}}}]'
+        )
+        self.assertEqual(promote_measurements(raw, None), raw)
+
+    def test_promote_failure_surfaces_compiler_diagnostics(self):
+        raw = json.dumps({"measurements": {"4": {"expected": "ab" * 32}}}).encode()
+        with self.assertRaisesRegex(GateError, "pcr9"):
+            promote_measurements(raw, "img.vhd")
+
+    def test_requires_measurement_id(self):
+        raw = json.dumps(RAW_MEASUREMENTS).encode()
+        with self.assertRaisesRegex(GateError, "measurement_id"):
+            promote_measurements(raw, None)
+
+
+class CompileBoundaryTests(unittest.TestCase):
+    """The `compile` subprocess boundary: the report shape the gates consume."""
+
+    def setUp(self):
+        self.assertIsNotNone(ADMISSION_BIN, MISSING_ADMISSION_BIN)
+
+    def test_compile_report_shape(self):
+        policy = promoted_policy_bytes()
+        report = compile_measurement_policy(policy)
+        self.assertEqual(report["policy_hash"], manifest_mod._sha256_hex(policy))
+        self.assertEqual(report["accepted_count"], 1)
+        # 4 field slots (policy hashes, revision, count) + 1 status slot.
+        self.assertEqual(len(report["registry_genesis_storage"]), 5)
+        manifest_mod._check_hex(
+            report["registry_runtime_code_hash"], 32, "registry_runtime_code_hash"
+        )
+
+    def test_compile_failure_is_a_gate_error(self):
+        with self.assertRaisesRegex(GateError, "failed"):
+            compile_measurement_policy(b"[]")
+
+
+class CommittedNetworkDirTests(unittest.TestCase):
+    """Committed network directories still pass their own gates.
+
+    `tee/networks/example-devnet/` is the documented example of the
+    network-directory shape — what `tee/README.md` and `tee/networks/README.md`
+    point a reader at — and the hermetic suite builds its own artifacts, so
+    nothing else reads it. Re-running the real gates over it keeps the
+    example honest, and turns a semantic change in the admission compiler or
+    in reth's genesis-header encoding into a failure here rather than a
+    surprise at the next `assemble`.
+
+    One gate does not recompute here: `summit genesis digest` needs a summit
+    build, and summit publishes no release binary, so this test feeds the
+    committed digest back in. Every other gate — genesis hash, chain id,
+    policy hash, contract accounts, and the exact registry-account storage —
+    runs against the real artifacts.
+    """
+
+    def test_committed_network_dirs_pass_their_gates(self):
+        self.assertIsNotNone(ADMISSION_BIN, MISSING_ADMISSION_BIN)
+        networks = _committed_network_dirs()
+        self.assertTrue(
+            networks, f"no committed network directory found under {NETWORKS_DIR}"
+        )
+        for network in networks:
+            with self.subTest(network=network.name):
+                manifest_bytes = (network / MANIFEST_FILENAME).read_bytes()
+                manifest = validate_manifest_schema(manifest_bytes)
+                digest = manifest["summit"]["genesis_config_digest"]
+                run_validation_gates(
+                    manifest,
+                    GateContext(
+                        reth_genesis=network / RETH_GENESIS_FILENAME,
+                        summit_genesis=network / SUMMIT_GENESIS_FILENAME,
+                        policy_bytes=(network / POLICY_FILENAME).read_bytes(),
+                        digest_fn=lambda _path, digest=digest: digest,
+                    ),
+                )
+
+
+if __name__ == "__main__":
+    unittest.main()

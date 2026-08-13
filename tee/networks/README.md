@@ -76,6 +76,11 @@ the directory shape — the artifacts are internally consistent (every
 manifest pin matches its file), so schema-level tooling can be exercised
 against it.
 
+That consistency is enforced, not just claimed: `make test-drift` re-runs
+the deploy gates over every committed network directory, so an example
+that falls behind the admission compiler or the genesis-header encoding
+fails CI instead of misleading a reader.
+
 To found any network, throwaway or real, don't reuse or copy this
 directory: run `init <new-dir>`, author fresh inputs, and follow
 the founding workflow in the tee README. `namespace` (the BLS signature
