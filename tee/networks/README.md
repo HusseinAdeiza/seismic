@@ -6,7 +6,10 @@ the harvested facts (`inputs/harvest/` — the cohort's TEE-born founding
 keys and their quotes); `seismic-tee-network assemble` derives
 the artifact set from them at the top level. Everything top-level is
 hash-pinned by `network-manifest.json` — whose SHA-256 is the network's
-`network_id` — and everything under `inputs/` is provenance.
+`network_id` — and everything under `inputs/` is provenance. What the
+manifest's fields mean, what `network_id` transitively commits to, and why it
+hashes the exact file bytes:
+[the network manifest doc](https://github.com/SeismicSystems/seismic/blob/main/docs/tee/network-manifest.md).
 
 ```text
 tee/networks/<name>/
