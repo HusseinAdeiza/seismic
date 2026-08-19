@@ -54,6 +54,7 @@ from typing import Any
 import requests
 
 from tee.cli.common import manifest as manifest_mod
+from tee.cli.common import shell_outs
 from tee.cli.common.descriptor import load_descriptor, require
 from tee.cli.network import bootnodes as bootnodes_mod
 
@@ -72,7 +73,7 @@ WAIT_LOG_INTERVAL_SECONDS = 30
 # The DCAP verifier from the enclave repo (bin/verify-quote), expected on
 # PATH like the admission CLI. Shared constant with `assemble`,
 # which re-verifies the archived quotes before pinning the founding set.
-DEFAULT_VERIFY_QUOTE_BIN = manifest_mod.DEFAULT_VERIFY_QUOTE_BIN
+DEFAULT_VERIFY_QUOTE_BIN = shell_outs.DEFAULT_VERIFY_QUOTE_BIN
 
 # Holder pubkeys are summit's keystore wire format: lowercase bare hex,
 # exactly as `commonware_utils::hex` renders — the spelling summit's
@@ -133,12 +134,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--admission-bin",
-        default=manifest_mod.DEFAULT_ADMISSION_BIN,
+        default=shell_outs.DEFAULT_ADMISSION_BIN,
         help="policy-compiler CLI used to promote the measurements into the "
         "policy each quote is verified against",
     )
     parser.add_argument(
-        "--attestation-type", default=manifest_mod.DEFAULT_ATTESTATION_TYPE
+        "--attestation-type", default=shell_outs.DEFAULT_ATTESTATION_TYPE
     )
     parser.add_argument(
         "--pccs-url",
@@ -369,13 +370,13 @@ def verify_quote(
     override_azure_outdated_tcb: bool,
 ) -> dict[str, Any]:
     """DCAP-verify one harvested quote via the enclave repo's `verify-quote`
-    (the shared shell-out in manifest.py — `assemble` re-runs the same check
+    (the shared shell-out in shell_outs.py — `assemble` re-runs the same check
     over the archived evidence before pinning the set). A failure burns the
     harvest: a founding key whose quote doesn't verify must never reach
     `assemble`.
     """
     try:
-        return manifest_mod.verify_quote_evidence(
+        return shell_outs.verify_quote_evidence(
             quote["evidence"],
             nonce=target.nonce,
             node_pubkey=quote["node_public_key"],
@@ -451,7 +452,7 @@ def main() -> None:
     check_overwrite(harvest_dir, [t.name for t in targets], args.force)
 
     try:
-        policy_bytes = manifest_mod.promote_measurements(
+        policy_bytes = shell_outs.promote_measurements(
             args.measurements.read_bytes(),
             args.attestation_type,
             admission_bin=args.admission_bin,

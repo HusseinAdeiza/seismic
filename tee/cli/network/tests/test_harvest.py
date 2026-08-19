@@ -18,6 +18,7 @@ from unittest import mock
 import requests
 
 from tee.cli.common import manifest as manifest_mod
+from tee.cli.common import shell_outs
 from tee.cli.network import bootnodes, harvest
 
 NODE_KEY = "ab" * 32
@@ -279,11 +280,11 @@ class VerifyQuoteTests(unittest.TestCase):
 
     def _run(self, returncode=0, stdout=b"", stderr=b""):
         completed = mock.Mock(returncode=returncode, stdout=stdout, stderr=stderr)
-        # The shell-out lives in manifest.verify_quote_evidence (shared with
+        # The shell-out lives in shell_outs.verify_quote_evidence (shared with
         # `assemble`'s re-verification); harvest wraps it with the
         # burn messaging.
         with mock.patch.object(
-            manifest_mod.subprocess, "run", return_value=completed
+            shell_outs.subprocess, "run", return_value=completed
         ) as run:
             report = harvest.verify_quote(
                 target(),
@@ -326,7 +327,7 @@ class VerifyQuoteTests(unittest.TestCase):
             returncode=0, stdout=json.dumps(self.REPORT).encode(), stderr=b""
         )
         with mock.patch.object(
-            manifest_mod.subprocess, "run", return_value=completed
+            shell_outs.subprocess, "run", return_value=completed
         ) as run:
             harvest.verify_quote(
                 target(),

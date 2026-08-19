@@ -37,18 +37,20 @@ from eth_utils.crypto import keccak
 
 from tee.cli.common import manifest as manifest_mod
 from tee.cli.common.manifest import (
-    DEFAULT_ADMISSION_BIN,
     MANIFEST_FILENAME,
     POLICY_FILENAME,
     RETH_GENESIS_FILENAME,
     SUMMIT_GENESIS_FILENAME,
     GateContext,
     GateError,
-    compile_measurement_policy,
-    promote_measurements,
     render_manifest,
     run_validation_gates,
     validate_manifest_schema,
+)
+from tee.cli.common.shell_outs import (
+    DEFAULT_ADMISSION_BIN,
+    compile_measurement_policy,
+    promote_measurements,
 )
 from tee.cli.common.tests.test_manifest import (
     FIXTURE_MANIFEST,

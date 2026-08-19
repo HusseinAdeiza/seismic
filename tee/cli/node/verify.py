@@ -46,6 +46,7 @@ import subprocess
 from pathlib import Path
 
 from tee.cli.common import manifest as manifest_mod
+from tee.cli.common import shell_outs
 from tee.cli.common.descriptor import load_descriptor, require
 from tee.cli.common.logging_setup import setup_logging
 from tee.cli.node.status import ENCLAVE_PORT
@@ -91,12 +92,12 @@ def add_policy_source_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--admission-bin",
-        default=manifest_mod.DEFAULT_ADMISSION_BIN,
+        default=shell_outs.DEFAULT_ADMISSION_BIN,
         help="policy-compiler CLI used to promote --measurements into a policy",
     )
     parser.add_argument(
         "--attestation-type",
-        default=manifest_mod.DEFAULT_ATTESTATION_TYPE,
+        default=shell_outs.DEFAULT_ATTESTATION_TYPE,
         help="platform the policy promoted from --measurements pins",
     )
 
@@ -115,7 +116,7 @@ def add_tooling_args(parser: argparse.ArgumentParser) -> None:
     """
     parser.add_argument(
         "--verify-quote-bin",
-        default=manifest_mod.DEFAULT_VERIFY_QUOTE_BIN,
+        default=shell_outs.DEFAULT_VERIFY_QUOTE_BIN,
         help="quote-verifier CLI from the enclave repo (bin/verify-quote)",
     )
     parser.add_argument(
@@ -174,7 +175,7 @@ def resolve_policy(args: argparse.Namespace, *, offer_no_verify: bool = False) -
     """
     if args.measurements is not None:
         try:
-            return manifest_mod.promote_measurements(
+            return shell_outs.promote_measurements(
                 args.measurements.read_bytes(),
                 args.attestation_type,
                 admission_bin=args.admission_bin,
@@ -242,7 +243,7 @@ def verify_deployment(
     """
     logger.info(f"Deploy-verifying {fqdn} ({public_ip})...")
     try:
-        report = manifest_mod.verify_node_deployment(
+        report = shell_outs.verify_node_deployment(
             f"http://{public_ip}:{ENCLAVE_PORT}",
             manifest_path=args.manifest,
             policy_bytes=policy_bytes,

@@ -16,8 +16,8 @@ from unittest import mock
 from eth_utils.crypto import keccak
 
 from tee.cli.common import manifest as manifest_mod
+from tee.cli.common import shell_outs
 from tee.cli.common.manifest import (
-    DEFAULT_ADMISSION_BIN,
     SUMMIT_CONSENSUS_PORT,
     AssembledManifest,
     GateContext,
@@ -29,17 +29,20 @@ from tee.cli.common.manifest import (
     inject_registry_genesis_storage,
     load_founding_set,
     load_harvest_records,
-    promote_measurements,
     render_manifest,
     render_network_section,
     run_validation_gates,
-    summit_set_validators,
     validate_manifest_schema,
     validate_reth_genesis_matches,
     validate_summit_genesis_matches,
     verify_harvest_records,
-    verify_node_deployment,
     write_artifact_set,
+)
+from tee.cli.common.shell_outs import (
+    DEFAULT_ADMISSION_BIN,
+    promote_measurements,
+    summit_set_validators,
+    verify_node_deployment,
 )
 
 
@@ -1255,7 +1258,7 @@ class VerifyNodeDeploymentTests(unittest.TestCase):
             return mock.Mock(returncode=returncode, stdout=stdout, stderr=stderr)
 
         with mock.patch.object(
-            manifest_mod.subprocess, "run", side_effect=fake_run
+            shell_outs.subprocess, "run", side_effect=fake_run
         ) as run:
             report = verify_node_deployment(
                 self.ENDPOINT,
@@ -1329,7 +1332,7 @@ class DirCliTests(unittest.TestCase):
         args = manifest_mod._parse_assemble_args(["networks/testnet-1"])
         self.assertEqual(args.name, "testnet-1")
         self.assertEqual(args.admission_bin, DEFAULT_ADMISSION_BIN)
-        self.assertEqual(args.verify_quote_bin, manifest_mod.DEFAULT_VERIFY_QUOTE_BIN)
+        self.assertEqual(args.verify_quote_bin, shell_outs.DEFAULT_VERIFY_QUOTE_BIN)
         # assemble reads the authored inputs under inputs/.
         self.assertEqual(args.reth_genesis, self.NET / "inputs/reth-genesis.json")
         self.assertEqual(args.summit_genesis, self.NET / "inputs/summit-genesis.toml")

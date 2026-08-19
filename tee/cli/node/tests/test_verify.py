@@ -134,7 +134,7 @@ class ResolvePolicyTests(unittest.TestCase):
         # hash-checked against the manifest here.
         self.policy.write_bytes(b"not the manifest's policy\n")
         with mock.patch.object(
-            verify.manifest_mod, "promote_measurements", return_value=b"promoted"
+            verify.shell_outs, "promote_measurements", return_value=b"promoted"
         ) as promote:
             self.assertEqual(self._resolve(measurements=measurements), b"promoted")
         promote.assert_called_once_with(
@@ -147,7 +147,7 @@ class ResolvePolicyTests(unittest.TestCase):
         measurements = _write(".json", b"{}")
         self.addCleanup(measurements.unlink)
         with mock.patch.object(
-            verify.manifest_mod,
+            verify.shell_outs,
             "promote_measurements",
             side_effect=GateError("no measurement_id"),
         ):
@@ -215,7 +215,7 @@ class VerifyDeploymentTests(unittest.TestCase):
 
     def test_challenges_the_node_with_the_manifest_and_policy(self):
         with mock.patch.object(
-            verify.manifest_mod,
+            verify.shell_outs,
             "verify_node_deployment",
             return_value={"verified": True},
         ) as verified:
@@ -231,7 +231,7 @@ class VerifyDeploymentTests(unittest.TestCase):
 
     def test_failure_is_a_nonzero_exit_naming_the_node(self):
         with mock.patch.object(
-            verify.manifest_mod,
+            verify.shell_outs,
             "verify_node_deployment",
             side_effect=GateError("measurement mismatch"),
         ):

@@ -72,7 +72,6 @@ import json
 import logging
 import re
 import shutil
-import subprocess
 import sys
 import tempfile
 import tomllib
@@ -85,8 +84,23 @@ import requests
 from eth_utils.crypto import keccak
 
 from tee.cli.common.descriptor import load_descriptor, require
+from tee.cli.common.errors import GateError, ManifestSchemaError
 from tee.cli.common.logging_setup import setup_logging
 from tee.cli.common.repo import DEFAULT_STACK_CONFIG
+from tee.cli.common.shell_outs import (
+    DEFAULT_ADMISSION_BIN,
+    DEFAULT_ATTESTATION_TYPE,
+    DEFAULT_RETH_BIN,
+    DEFAULT_SUMMIT_BIN,
+    DEFAULT_VERIFY_QUOTE_BIN,
+    compile_measurement_policy,
+    promote_measurements,
+    reth_genesis_hash,
+    summit_config_digest,
+    summit_set_validators,
+    verify_quote_bin_not_found,
+    verify_quote_evidence,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -100,36 +114,6 @@ MANIFEST_VERSION = 1
 # exactly the genesis storage its policy artifact compiles to.
 DEFAULT_REGISTRY = "0x1000000000000000000000000000000000000001"
 DEFAULT_AUTHORITY = "0x1000000000000000000000000000000000000002"
-
-DEFAULT_ATTESTATION_TYPE = "azure-tdx"
-
-# The shared policy-compiler CLI from the enclave repo's
-# seismic-measurement-admission crate. Promotion and policy->genesis-storage
-# compilation are schema knowledge (which registers form guest identity,
-# which value forms are canonical, how admission IDs key registry storage),
-# so deploy shells out to the one shared implementation instead of carrying
-# a second one in Python.
-DEFAULT_ADMISSION_BIN = "seismic-measurement-admission"
-
-# Summit's node binary. Its `genesis digest` subcommand computes
-# summit.genesis_config_digest: SHA-256 over summit's domain-prefixed SSZ
-# serialization of the complete genesis — summit's own definition of chain
-# identity (its P2P and signing domains derive from it). Its `genesis
-# set-validators` subcommand emits the completed genesis the digest is
-# computed over. Both are shell-outs to the one implementation instead of
-# mirroring the SSZ layout / canonical rendering in Python.
-DEFAULT_SUMMIT_BIN = "summit"
-
-# The quote verifier from the enclave repo (bin/verify-quote): exit 0 plus
-# one JSON report on stdout ⇔ verified. Its `harvest` subcommand checks
-# founding quotes — `network harvest` runs it when the founding keys are
-# collected, and `assemble` re-runs it over the archived evidence before
-# the harvested set is pinned. Its `deploy` subcommand deploy-verifies a
-# freshly provisioned node — `node verify`, and `node configure` once the
-# node is up, run it. Verification-only; runs natively on any dev platform
-# (verification is pure computation over the evidence bytes — no TEE
-# hardware involved).
-DEFAULT_VERIFY_QUOTE_BIN = "verify-quote"
 
 # Summit's consensus (BLS) port: each validator entry in the completed
 # summit genesis pins "<ip>:<port>". IPs are operational data — the config
@@ -173,14 +157,6 @@ NODES_DIRNAME = "nodes"
 # rather than authored.
 FOUNDERS_FILENAME = "founder-withdrawal-credentials.json"
 HARVEST_DIRNAME = "harvest"
-
-
-class ManifestSchemaError(Exception):
-    """Manifest bytes don't satisfy the strict v1 schema."""
-
-
-class GateError(Exception):
-    """A cross-artifact validation gate failed (fail at deploy, not at boot)."""
 
 
 def render_manifest(manifest: dict[str, Any]) -> bytes:
@@ -308,68 +284,6 @@ def validate_manifest_schema(manifest_bytes: bytes) -> dict[str, Any]:
     return obj
 
 
-def _admission_cli(admission_bin: str, *args: str, input_bytes: bytes) -> bytes:
-    """Run the shared policy-compiler CLI, feeding the document on stdin.
-
-    Byte streams both ways: promoted policy bytes are hash-committed, so
-    nothing may re-render them between the CLI and the artifact set.
-    """
-    cmd = [admission_bin, *args, "-"]
-    try:
-        result = subprocess.run(
-            cmd, input=input_bytes, capture_output=True, timeout=120, check=True
-        )
-    except FileNotFoundError:
-        raise GateError(
-            f"{admission_bin!r} not found; build the policy-compiler CLI from "
-            "the enclave repo (cargo build -p seismic-measurement-admission "
-            "--features cli) or pass --admission-bin"
-        ) from None
-    except subprocess.TimeoutExpired:
-        raise GateError(f"`{' '.join(cmd)}` timed out") from None
-    except subprocess.CalledProcessError as e:
-        detail = (e.stderr or e.stdout or b"").decode("utf-8", "replace").strip()
-        raise GateError(f"`{' '.join(cmd)}` failed: {detail}") from None
-    return result.stdout
-
-
-def promote_measurements(
-    raw_bytes: bytes,
-    attestation_type: str = DEFAULT_ATTESTATION_TYPE,
-    admission_bin: str = DEFAULT_ADMISSION_BIN,
-) -> bytes:
-    """Promote `make measure` output into measurement-policy-bootstrap.json
-    bytes.
-
-    Shells out to the admission CLI's `promote`, which selects exactly the
-    admission-schema registers from the raw measured-boot output, normalizes
-    them to named `pcrN` keys binding a single-value `expected_any`, wraps
-    them into one Flashbots-compatible policy record, and compiles its own
-    output before returning it. The record's `measurement_id` — which image
-    these PCRs measure — comes from the measurements file itself, where
-    `make measure` stamped it; nothing binds the policy to an image out of
-    band. If the input already *is* a record list it is passed through
-    byte-verbatim (the manifest commits to the policy file by hash, so an
-    already-published policy must not be re-rendered) — but still compiled,
-    which is the whole promoted-policy validation: a document the compiler
-    accepts is exactly a document that can seed registry genesis storage.
-    """
-    args = ["promote"]
-    if attestation_type:
-        args += ["--attestation-type", attestation_type]
-    return _admission_cli(admission_bin, *args, input_bytes=raw_bytes)
-
-
-def compile_measurement_policy(
-    policy_bytes: bytes, admission_bin: str = DEFAULT_ADMISSION_BIN
-) -> dict[str, Any]:
-    """Compile a policy document via the admission CLI; returns its report:
-    policy hash, admission IDs, the canonical registry runtime-code hash, and
-    the complete registry genesis storage map."""
-    report = _admission_cli(admission_bin, "compile", input_bytes=policy_bytes)
-    return json.loads(report)
-
-
 def inject_registry_genesis_storage(
     genesis_bytes: bytes, registry: str, report: dict[str, Any]
 ) -> bytes:
@@ -416,66 +330,6 @@ def _hash_of_bytes(data: bytes, hash_fn: Callable[[Path], str], suffix: str) -> 
         tf.write(data)
         tf.flush()
         return hash_fn(Path(tf.name))
-
-
-def reth_genesis_hash(reth_genesis: Path, reth_bin: str = "seismic-reth") -> str:
-    """Compute eth_genesis_hash offline via `seismic-reth genesis-hash`.
-
-    Same genesis parse path as `seismic-reth node --chain <file>`, so the
-    result is exactly the genesis hash a node booted from this file computes.
-    """
-    cmd = [reth_bin, "genesis-hash", "--chain", str(reth_genesis)]
-    try:
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=120, check=True
-        )
-    except FileNotFoundError:
-        raise GateError(
-            f"{reth_bin!r} not found; build seismic-reth (the genesis-hash "
-            "subcommand) or pass --reth-bin"
-        ) from None
-    except subprocess.CalledProcessError as e:
-        raise GateError(
-            f"`{' '.join(cmd)}` failed: {e.stderr.strip() or e.stdout.strip()}"
-        ) from None
-    out = result.stdout.strip()
-    _check_hex_or_gate(out, 32, f"`{' '.join(cmd)}` output")
-    return out.lower()
-
-
-def summit_config_digest(
-    summit_genesis: Path, summit_bin: str = DEFAULT_SUMMIT_BIN
-) -> str:
-    """Compute summit.genesis_config_digest offline via `summit genesis digest`.
-
-    The file is loaded down the same parse path a starting validator takes, so
-    a successful digest doubles as a verdict that the genesis is well formed:
-    anything this accepts a validator accepts.
-    """
-    cmd = [summit_bin, "genesis", "digest", str(summit_genesis)]
-    try:
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=120, check=True
-        )
-    except FileNotFoundError:
-        raise GateError(
-            f"{summit_bin!r} not found; build summit (the `genesis digest` "
-            "subcommand) or pass --summit-bin"
-        ) from None
-    except subprocess.CalledProcessError as e:
-        raise GateError(
-            f"`{' '.join(cmd)}` failed: {e.stderr.strip() or e.stdout.strip()}"
-        ) from None
-    out = result.stdout.strip()
-    _check_hex_or_gate(out, 32, f"`{' '.join(cmd)}` output")
-    return out.lower()
-
-
-def _check_hex_or_gate(value: Any, nbytes: int, fieldname: str) -> None:
-    try:
-        _check_hex(value, nbytes, fieldname)
-    except ManifestSchemaError as e:
-        raise GateError(str(e)) from None
 
 
 def _check_bare_hex(value: Any, nbytes: int, fieldname: str) -> None:
@@ -646,127 +500,6 @@ def load_founding_set(network_dir: Path) -> FoundingSet:
     return FoundingSet(validators=validators, records=records)
 
 
-def _verify_quote_bin_not_found(verify_quote_bin: str) -> GateError:
-    return GateError(
-        f"{verify_quote_bin!r} not found; build the enclave repo's "
-        "bin/verify-quote and put it on PATH, or pass --verify-quote-bin"
-    )
-
-
-def _run_verify_quote(
-    cmd: list[str], *, input_bytes: bytes | None = None
-) -> dict[str, Any]:
-    """Run one verify-quote invocation and enforce its contract: exit 0 plus
-    one JSON `{"verified": true, ...}` report on stdout ⇔ verified; anything
-    else is a GateError.
-    """
-    try:
-        result = subprocess.run(
-            cmd,
-            input=input_bytes,
-            capture_output=True,
-            # Generous — DCAP verification fetches collateral over the
-            # network (PCCS) — but a hung fetch must not stall the
-            # caller forever.
-            timeout=300,
-        )
-    except FileNotFoundError:
-        raise _verify_quote_bin_not_found(cmd[0]) from None
-    except subprocess.TimeoutExpired:
-        raise GateError(f"`{' '.join(cmd)}` timed out") from None
-    if result.returncode != 0:
-        detail = result.stderr.decode("utf-8", "replace").strip()
-        raise GateError(f"quote verification failed:\n{detail}")
-    try:
-        report = json.loads(result.stdout)
-    except json.JSONDecodeError:
-        report = None
-    if not isinstance(report, dict) or report.get("verified") is not True:
-        raise GateError(
-            f"`{cmd[0]}` exited 0 without a verified report: {result.stdout!r}"
-        )
-    return report
-
-
-def verify_quote_evidence(
-    evidence: dict[str, Any],
-    *,
-    nonce: str,
-    node_pubkey: str,
-    consensus_pubkey: str,
-    policy_path: Path,
-    verify_quote_bin: str = DEFAULT_VERIFY_QUOTE_BIN,
-    pccs_url: str | None = None,
-    override_azure_outdated_tcb: bool = False,
-) -> dict[str, Any]:
-    """DCAP-verify one founding quote via `verify-quote harvest`.
-
-    The evidence must verify cryptographically, its report_data must bind
-    this nonce + these pubkeys, and its measurements must satisfy the
-    policy. The evidence goes over stdin, byte-exact with the harvest
-    archive.
-    """
-    cmd = [
-        verify_quote_bin,
-        "harvest",
-        "--evidence",
-        "-",
-        "--policy",
-        str(policy_path),
-        "--nonce",
-        nonce,
-        "--node-pubkey",
-        node_pubkey,
-        "--consensus-pubkey",
-        consensus_pubkey,
-    ]
-    if pccs_url:
-        cmd += ["--pccs-url", pccs_url]
-    if override_azure_outdated_tcb:
-        cmd.append("--override-azure-outdated-tcb")
-    return _run_verify_quote(cmd, input_bytes=json.dumps(evidence).encode("utf-8"))
-
-
-def verify_node_deployment(
-    endpoint: str,
-    *,
-    manifest_path: Path,
-    policy_bytes: bytes,
-    verify_quote_bin: str = DEFAULT_VERIFY_QUOTE_BIN,
-    pccs_url: str | None = None,
-    override_azure_outdated_tcb: bool = False,
-) -> dict[str, Any]:
-    """Deploy-verify one freshly provisioned node via `verify-quote deploy`.
-
-    The verifier owns the whole relying-party flow: it mints a fresh
-    deployment_nonce, requests evidence from the node's attestation service
-    (`getDeployVerificationEvidence` at `endpoint`), recomputes the deploy
-    verification binding from the manifest's network identity and the nonce,
-    and verifies the envelope against the policy. A pass proves a measured
-    node holding this manifest answered this exact request.
-    """
-    with tempfile.NamedTemporaryFile(
-        prefix="measurement-policy-", suffix=".json"
-    ) as policy_file:
-        policy_file.write(policy_bytes)
-        policy_file.flush()
-        cmd = [
-            verify_quote_bin,
-            "deploy",
-            "--endpoint",
-            endpoint,
-            "--manifest",
-            str(manifest_path),
-            "--policy",
-            policy_file.name,
-        ]
-        if pccs_url:
-            cmd += ["--pccs-url", pccs_url]
-        if override_azure_outdated_tcb:
-            cmd.append("--override-azure-outdated-tcb")
-        return _run_verify_quote(cmd)
-
-
 def verify_harvest_records(
     records: dict[str, dict[str, Any]],
     policy_bytes: bytes,
@@ -786,7 +519,7 @@ def verify_harvest_records(
     if verify_fn is None and shutil.which(verify_quote_bin) is None:
         # Tooling, not evidence: a missing verifier fails here, before the
         # loop whose failures carry burned-founding advice.
-        raise _verify_quote_bin_not_found(verify_quote_bin)
+        raise verify_quote_bin_not_found(verify_quote_bin)
     with tempfile.NamedTemporaryFile(
         prefix="measurement-policy-", suffix=".json"
     ) as policy_file:
@@ -817,55 +550,6 @@ def verify_harvest_records(
             logger.info("%s: archived founding quote verified", name)
 
 
-def summit_set_validators(
-    template_bytes: bytes,
-    validators: list[dict[str, str]],
-    summit_bin: str = DEFAULT_SUMMIT_BIN,
-) -> bytes:
-    """Emit the completed summit genesis via `summit genesis set-validators`.
-
-    Emission belongs to summit: the subcommand parses the template into
-    summit's own Genesis type, replaces its validator set with
-    `validators`, sorts them by node key (the order config_digest hashes),
-    renders the whole file canonically — summit's hex spellings, no
-    authored comments — and reloads what it emits, so a genesis no node
-    could load fails here rather than at boot. The returned bytes are what
-    the artifact set ships and the manifest's digest commits to.
-    """
-    with (
-        tempfile.NamedTemporaryFile(suffix=".toml") as template_file,
-        tempfile.NamedTemporaryFile(suffix=".json") as validators_file,
-    ):
-        template_file.write(template_bytes)
-        template_file.flush()
-        validators_file.write((json.dumps(validators, indent=2) + "\n").encode())
-        validators_file.flush()
-        cmd = [
-            summit_bin,
-            "genesis",
-            "set-validators",
-            "-i",
-            template_file.name,
-            "-v",
-            validators_file.name,
-        ]
-        try:
-            result = subprocess.run(cmd, capture_output=True, timeout=120, check=True)
-        except FileNotFoundError:
-            raise GateError(
-                f"{summit_bin!r} not found; build summit (the `genesis "
-                "set-validators` subcommand) or pass --summit-bin"
-            ) from None
-        except subprocess.TimeoutExpired:
-            raise GateError(f"`{' '.join(cmd)}` timed out") from None
-        except subprocess.CalledProcessError as e:
-            detail = (e.stderr or e.stdout or b"").decode("utf-8", "replace").strip()
-            raise GateError(f"`{' '.join(cmd)}` failed: {detail}") from None
-    if not result.stdout:
-        raise GateError(f"`{' '.join(cmd)}` emitted nothing on stdout")
-    return result.stdout
-
-
 @dataclass
 class GateContext:
     """Artifact set a manifest is validated against (deploy-side gates)."""
@@ -873,7 +557,7 @@ class GateContext:
     reth_genesis: Path
     summit_genesis: Path
     policy_bytes: bytes
-    reth_bin: str = "seismic-reth"
+    reth_bin: str = DEFAULT_RETH_BIN
     admission_bin: str = DEFAULT_ADMISSION_BIN
     summit_bin: str = DEFAULT_SUMMIT_BIN
     # Injectable for tests; default to shelling out to seismic-reth, the
@@ -1168,7 +852,7 @@ def assemble(
     validators: list[dict[str, str]],
     registry: str = DEFAULT_REGISTRY,
     authority: str = DEFAULT_AUTHORITY,
-    reth_bin: str = "seismic-reth",
+    reth_bin: str = DEFAULT_RETH_BIN,
     admission_bin: str = DEFAULT_ADMISSION_BIN,
     summit_bin: str = DEFAULT_SUMMIT_BIN,
     genesis_hash_fn: Callable[[Path], str] | None = None,
@@ -1610,7 +1294,7 @@ def validate_policy_matches(manifest: dict[str, Any], policy_bytes: bytes) -> st
 def _add_reth_bin(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--reth-bin",
-        default="seismic-reth",
+        default=DEFAULT_RETH_BIN,
         help="seismic-reth binary used to recompute eth_genesis_hash",
     )
 
