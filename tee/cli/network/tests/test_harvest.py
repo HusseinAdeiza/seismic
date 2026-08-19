@@ -3,7 +3,7 @@
 Covers the offline logic: arg parsing, cohort/founder pairing, the
 quote-poll loop and its burn conditions (fetch mocked — no live network
 calls), the verify-quote shell-out contract (subprocess mocked), and the
-inputs/harvest/ archive.
+harvest record — what it carries, and the inputs/harvest/ archive.
 
 Run with:
     uv run python -m unittest discover -b
@@ -275,20 +275,20 @@ class AssertUniqueKeysTests(unittest.TestCase):
         self.assertIn("node_public_key", str(ctx.exception))
 
 
-class VerifyQuoteTests(unittest.TestCase):
+class VerifyRecordTests(unittest.TestCase):
     REPORT = {"verified": True, "attestation_type": "azure-tdx", "pcrs": {}}
 
     def _run(self, returncode=0, stdout=b"", stderr=b""):
         completed = mock.Mock(returncode=returncode, stdout=stdout, stderr=stderr)
-        # The shell-out lives in shell_outs.verify_quote_evidence (shared with
+        # The shell-out lives in shell_outs.verify_harvest_record (shared with
         # `assemble`'s re-verification); harvest wraps it with the
         # burn messaging.
         with mock.patch.object(
             shell_outs.subprocess, "run", return_value=completed
         ) as run:
-            report = harvest.verify_quote(
+            report = harvest.verify_record(
                 target(),
-                quote_body(),
+                harvest.build_record(target(), quote_body()),
                 Path("/tmp/policy.json"),
                 "verify-quote",
                 pccs_url=None,
@@ -296,15 +296,22 @@ class VerifyQuoteTests(unittest.TestCase):
             )
         return report, run
 
-    def test_success_returns_report_and_binds_nonce_and_pubkeys(self):
+    def test_success_returns_report_and_verifies_the_whole_record(self):
         report, run = self._run(stdout=json.dumps(self.REPORT).encode())
         self.assertTrue(report["verified"])
         cmd = run.call_args.args[0]
-        self.assertEqual(cmd[:2], ["verify-quote", "harvest"])
-        for expected in (NONCE, NODE_KEY, CONSENSUS_KEY, "-"):
-            self.assertIn(expected, cmd)
-        # The evidence travels over stdin, byte-exact with the archive.
-        self.assertEqual(json.loads(run.call_args.kwargs["input"]), EVIDENCE)
+        self.assertEqual(cmd[:4], ["verify-quote", "harvest", "--record", "-"])
+        # The record travels over stdin as one document: the claims and the
+        # evidence the archive keeps, verified together.
+        self.assertEqual(
+            json.loads(run.call_args.kwargs["input"]),
+            {
+                "harvest_nonce": NONCE,
+                "node_public_key": NODE_KEY,
+                "consensus_public_key": CONSENSUS_KEY,
+                "evidence": EVIDENCE,
+            },
+        )
 
     def test_nonzero_exit_burns_with_stderr(self):
         with self.assertRaises(SystemExit) as ctx:
@@ -329,9 +336,9 @@ class VerifyQuoteTests(unittest.TestCase):
         with mock.patch.object(
             shell_outs.subprocess, "run", return_value=completed
         ) as run:
-            harvest.verify_quote(
+            harvest.verify_record(
                 target(),
-                quote_body(),
+                harvest.build_record(target(), quote_body()),
                 Path("/tmp/policy.json"),
                 "verify-quote",
                 pccs_url="https://pccs.example",
@@ -350,10 +357,7 @@ class ArchiveTests(unittest.TestCase):
 
     def test_save_writes_one_pretty_json_per_box(self):
         record = {
-            "harvest_nonce": NONCE,
-            "node_public_key": NODE_KEY,
-            "consensus_public_key": CONSENSUS_KEY,
-            "evidence": EVIDENCE,
+            **harvest.build_record(target(), quote_body()),
             "harvested_at": "2026-08-04T00:00:00+00:00",
             "verification": {"verified": True},
         }

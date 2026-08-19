@@ -11,8 +11,9 @@ at boot is the hash the node's own code computes.
       promote / compile                      the bootstrap policy, its hash,
                                              and the registry genesis storage
                                              its admission IDs compile to
-    verify-quote harvest / deploy            DCAP verdicts on founding quotes
-                                             and on a provisioned node
+    verify-quote harvest / deploy            DCAP verdicts on a founding
+                                             harvest record and on a
+                                             provisioned node
 
 Each function here owns one subcommand's contract — argv, what travels on
 stdin/stdout, and what a failure means — and reports every failure as a
@@ -54,10 +55,10 @@ DEFAULT_ADMISSION_BIN = "seismic-measurement-admission"
 DEFAULT_SUMMIT_BIN = "summit"
 
 # The quote verifier from the enclave repo (bin/verify-quote): exit 0 plus
-# one JSON report on stdout ⇔ verified. Its `harvest` subcommand checks
-# founding quotes — `network harvest` runs it when the founding keys are
-# collected, and `assemble` re-runs it over the archived evidence before
-# the harvested set is pinned. Its `deploy` subcommand deploy-verifies a
+# one JSON report on stdout ⇔ verified. Its `harvest` subcommand checks one
+# founding harvest record — `network harvest` runs it on the record it is
+# about to archive, and `assemble` re-runs it over each archived record
+# before the harvested set is pinned. Its `deploy` subcommand deploy-verifies a
 # freshly provisioned node — `node verify`, and `node configure` once the
 # node is up, run it. Verification-only; runs natively on any dev platform
 # (verification is pure computation over the evidence bytes — no TEE
@@ -221,43 +222,35 @@ def _run_verify_quote(
     return report
 
 
-def verify_quote_evidence(
-    evidence: dict[str, Any],
+def verify_harvest_record(
+    record: dict[str, Any],
     *,
-    nonce: str,
-    node_pubkey: str,
-    consensus_pubkey: str,
     policy_path: Path,
     verify_quote_bin: str = DEFAULT_VERIFY_QUOTE_BIN,
     pccs_url: str | None = None,
     override_azure_outdated_tcb: bool = False,
 ) -> dict[str, Any]:
-    """DCAP-verify one founding quote via `verify-quote harvest`.
+    """DCAP-verify one founding harvest record via `verify-quote harvest`.
 
-    The evidence must verify cryptographically, its report_data must bind
-    this nonce + these pubkeys, and its measurements must satisfy the
-    policy. The evidence goes over stdin, byte-exact with the harvest
-    archive.
+    The verifier owns the whole check: the record's evidence must verify
+    cryptographically, its report_data must bind the record's own nonce and
+    pubkeys, and its measurements must satisfy the policy. The record goes
+    over stdin as one document — the same one the archive keeps, so what is
+    archived is what was verified.
     """
     cmd = [
         verify_quote_bin,
         "harvest",
-        "--evidence",
+        "--record",
         "-",
         "--policy",
         str(policy_path),
-        "--nonce",
-        nonce,
-        "--node-pubkey",
-        node_pubkey,
-        "--consensus-pubkey",
-        consensus_pubkey,
     ]
     if pccs_url:
         cmd += ["--pccs-url", pccs_url]
     if override_azure_outdated_tcb:
         cmd.append("--override-azure-outdated-tcb")
-    return _run_verify_quote(cmd, input_bytes=json.dumps(evidence).encode("utf-8"))
+    return _run_verify_quote(cmd, input_bytes=json.dumps(record).encode("utf-8"))
 
 
 def verify_node_deployment(

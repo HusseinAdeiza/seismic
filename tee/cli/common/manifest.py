@@ -98,8 +98,8 @@ from tee.cli.common.shell_outs import (
     reth_genesis_hash,
     summit_config_digest,
     summit_set_validators,
+    verify_harvest_record,
     verify_quote_bin_not_found,
-    verify_quote_evidence,
 )
 
 logger = logging.getLogger(__name__)
@@ -508,11 +508,11 @@ def verify_harvest_records(
     override_azure_outdated_tcb: bool = False,
     verify_fn: Callable[[str, dict[str, Any], Path], dict[str, Any]] | None = None,
 ) -> None:
-    """Re-verify every archived founding quote against the compiled policy.
+    """Re-verify every archived founding record against the compiled policy.
 
-    The harvest verified these quotes when it collected them, but assemble
-    is the step that pins the validator set into network_id — so it re-runs
-    the same check over the archived evidence rather than trusting an
+    The harvest verified these records when it collected them, but assemble
+    is the step that pins the validator set into network_id — so it hands
+    each archived record back to the verifier rather than trusting an
     earlier run's verdict (the records are plain files that may have been
     copied, committed, and edited between harvest and assemble).
     """
@@ -527,11 +527,8 @@ def verify_harvest_records(
         policy_file.flush()
         policy_path = Path(policy_file.name)
         run_verify = verify_fn or (
-            lambda _name, record, path: verify_quote_evidence(
-                record["evidence"],
-                nonce=record["harvest_nonce"],
-                node_pubkey=record["node_public_key"],
-                consensus_pubkey=record["consensus_public_key"],
+            lambda _name, record, path: verify_harvest_record(
+                record,
                 policy_path=path,
                 verify_quote_bin=verify_quote_bin,
                 pccs_url=pccs_url,

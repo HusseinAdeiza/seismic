@@ -21,9 +21,11 @@ shells out to the enclave repo's `verify-quote` (exit 0 plus one JSON
 report on stdout ⇔ verified), against the policy promoted from
 `inputs/measurements.json` by the same admission CLI `assemble` uses.
 This check is purely preventive: future users and joiners should re-run
-the same verification against the archived evidence (each record keeps
-the quote plus the nonce it binds) and the published collateral, rather
-than trust this run's verdict.
+the same verification against the archive and the published collateral,
+rather than trust this run's verdict. Each archived record is a complete
+input to that check — `verify-quote harvest --record
+inputs/harvest/<node>.json --policy measurement-policy-bootstrap.json`,
+and nothing from this repo.
 
 TODO: snapshot the DCAP collateral into inputs/harvest/dcap-collateral/
 once the capture mechanism is resolved (open question from the
@@ -360,27 +362,39 @@ def assert_unique_keys(quotes: dict[str, dict[str, Any]]) -> None:
             seen[key] = name
 
 
-def verify_quote(
+def build_record(target: HarvestTarget, quote: dict[str, Any]) -> dict[str, Any]:
+    """One box's harvest record: the nonce this run minted, the pubkeys its
+    holder served, and the evidence whose report_data binds all three.
+
+    Built before verification and archived afterwards unchanged, so the
+    document the verifier passed is the document a later reader re-verifies.
+    """
+    return {
+        "harvest_nonce": target.nonce,
+        "node_public_key": quote["node_public_key"],
+        "consensus_public_key": quote["consensus_public_key"],
+        "evidence": quote["evidence"],
+    }
+
+
+def verify_record(
     target: HarvestTarget,
-    quote: dict[str, Any],
+    record: dict[str, Any],
     policy_path: Path,
     verify_bin: str,
     *,
     pccs_url: str | None,
     override_azure_outdated_tcb: bool,
 ) -> dict[str, Any]:
-    """DCAP-verify one harvested quote via the enclave repo's `verify-quote`
+    """DCAP-verify one harvest record via the enclave repo's `verify-quote`
     (the shared shell-out in shell_outs.py — `assemble` re-runs the same check
-    over the archived evidence before pinning the set). A failure burns the
+    over each archived record before pinning the set). A failure burns the
     harvest: a founding key whose quote doesn't verify must never reach
     `assemble`.
     """
     try:
-        return shell_outs.verify_quote_evidence(
-            quote["evidence"],
-            nonce=target.nonce,
-            node_pubkey=quote["node_public_key"],
-            consensus_pubkey=quote["consensus_public_key"],
+        return shell_outs.verify_harvest_record(
+            record,
             policy_path=policy_path,
             verify_quote_bin=verify_bin,
             pccs_url=pccs_url,
@@ -472,10 +486,10 @@ def main() -> None:
         policy_file.write(policy_bytes)
         policy_file.flush()
         for target in targets:
-            quote = quotes[target.name]
-            report = verify_quote(
+            record = build_record(target, quotes[target.name])
+            report = verify_record(
                 target,
-                quote,
+                record,
                 Path(policy_file.name),
                 verify_bin,
                 pccs_url=args.pccs_url,
@@ -483,10 +497,7 @@ def main() -> None:
             )
             print(f"  ✓ {target.name}: quote DCAP-verified against the policy")
             records[target.name] = {
-                "harvest_nonce": target.nonce,
-                "node_public_key": quote["node_public_key"],
-                "consensus_public_key": quote["consensus_public_key"],
-                "evidence": quote["evidence"],
+                **record,
                 "harvested_at": harvested_at,
                 "verification": report,
             }
