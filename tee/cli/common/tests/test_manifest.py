@@ -38,6 +38,7 @@ from tee.cli.common.manifest import (
     validate_reth_genesis_matches,
     validate_summit_genesis_matches,
     verify_harvest_records,
+    verify_node_deployment,
     write_artifact_set,
 )
 
@@ -1234,6 +1235,75 @@ class VerifyHarvestRecordsTests(unittest.TestCase):
         # Tooling, not evidence: the preflight fails before the loop, so a
         # missing verifier never carries the burned-founding advice.
         self.assertNotIn("re-found", str(ctx.exception))
+
+
+class VerifyNodeDeploymentTests(unittest.TestCase):
+    """The `verify-quote deploy` shell-out contract. The verifier owns the
+    whole relying-party flow (nonce, RPC, binding, verification); this side
+    only assembles the argv and enforces the exit-0-plus-report contract."""
+
+    ENDPOINT = "http://203.0.113.7:7878"
+    REPORT = {"verified": True, "attestation_type": "azure-tdx", "pcrs": {}}
+
+    def _verify(self, returncode=0, stdout=b"", stderr=b"", **kwargs):
+        policy_at_call: list[bytes] = []
+
+        def fake_run(cmd, **run_kwargs):
+            # The policy tempfile is gone once verify_node_deployment
+            # returns, so capture its bytes at call time.
+            policy_at_call.append(Path(cmd[cmd.index("--policy") + 1]).read_bytes())
+            return mock.Mock(returncode=returncode, stdout=stdout, stderr=stderr)
+
+        with mock.patch.object(
+            manifest_mod.subprocess, "run", side_effect=fake_run
+        ) as run:
+            report = verify_node_deployment(
+                self.ENDPOINT,
+                manifest_path=Path("/nets/devnet/network-manifest.json"),
+                policy_bytes=b"policy bytes",
+                verify_quote_bin="verify-quote",
+                **kwargs,
+            )
+        return report, run, policy_at_call[0]
+
+    def test_success_passes_endpoint_manifest_and_policy(self):
+        report, run, policy = self._verify(stdout=json.dumps(self.REPORT).encode())
+        self.assertTrue(report["verified"])
+        cmd = run.call_args.args[0]
+        self.assertEqual(cmd[:2], ["verify-quote", "deploy"])
+        self.assertIn(self.ENDPOINT, cmd)
+        self.assertIn("/nets/devnet/network-manifest.json", cmd)
+        # The verifier is challenged against exactly the promoted policy.
+        self.assertEqual(policy, b"policy bytes")
+        # Nothing goes over stdin: the verifier fetches the evidence itself.
+        self.assertIsNone(run.call_args.kwargs["input"])
+
+    def test_nonzero_exit_is_a_gate_error_with_stderr(self):
+        with self.assertRaisesRegex(GateError, "binding mismatch"):
+            self._verify(returncode=1, stderr=b"binding mismatch")
+
+    def test_exit_zero_without_verified_report_is_a_gate_error(self):
+        with self.assertRaisesRegex(GateError, "without a verified report"):
+            self._verify(stdout=b'{"verified": false}')
+
+    def test_optional_flags_forwarded(self):
+        _, run, _ = self._verify(
+            stdout=json.dumps(self.REPORT).encode(),
+            pccs_url="https://pccs.example",
+            override_azure_outdated_tcb=True,
+        )
+        cmd = run.call_args.args[0]
+        self.assertIn("https://pccs.example", cmd)
+        self.assertIn("--override-azure-outdated-tcb", cmd)
+
+    def test_missing_verifier_binary_is_a_gate_error(self):
+        with self.assertRaisesRegex(GateError, "not found"):
+            verify_node_deployment(
+                self.ENDPOINT,
+                manifest_path=Path("/nets/devnet/network-manifest.json"),
+                policy_bytes=b"policy",
+                verify_quote_bin="no-such-verify-quote",
+            )
 
 
 class SetValidatorsTests(unittest.TestCase):

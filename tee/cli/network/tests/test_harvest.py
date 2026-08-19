@@ -299,6 +299,7 @@ class VerifyQuoteTests(unittest.TestCase):
         report, run = self._run(stdout=json.dumps(self.REPORT).encode())
         self.assertTrue(report["verified"])
         cmd = run.call_args.args[0]
+        self.assertEqual(cmd[:2], ["verify-quote", "harvest"])
         for expected in (NONCE, NODE_KEY, CONSENSUS_KEY, "-"):
             self.assertIn(expected, cmd)
         # The evidence travels over stdin, byte-exact with the archive.

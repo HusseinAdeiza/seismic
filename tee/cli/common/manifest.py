@@ -120,12 +120,15 @@ DEFAULT_ADMISSION_BIN = "seismic-measurement-admission"
 # mirroring the SSZ layout / canonical rendering in Python.
 DEFAULT_SUMMIT_BIN = "summit"
 
-# The DCAP verifier from the enclave repo (bin/verify-quote): exit 0 plus
-# one JSON report on stdout ⇔ verified. `network harvest` runs it when the
-# founding keys are collected, and `assemble` re-runs it over the
-# archived evidence before the harvested set is pinned. Verification-only;
-# runs natively on any dev platform (verification is pure computation over
-# the evidence bytes — no TEE hardware involved).
+# The quote verifier from the enclave repo (bin/verify-quote): exit 0 plus
+# one JSON report on stdout ⇔ verified. Its `harvest` subcommand checks
+# founding quotes — `network harvest` runs it when the founding keys are
+# collected, and `assemble` re-runs it over the archived evidence before
+# the harvested set is pinned. Its `deploy` subcommand deploy-verifies a
+# freshly provisioned node — `node verify`, and `node configure` once the
+# node is up, run it. Verification-only; runs natively on any dev platform
+# (verification is pure computation over the evidence bytes — no TEE
+# hardware involved).
 DEFAULT_VERIFY_QUOTE_BIN = "verify-quote"
 
 # Summit's consensus (BLS) port: each validator entry in the completed
@@ -650,6 +653,41 @@ def _verify_quote_bin_not_found(verify_quote_bin: str) -> GateError:
     )
 
 
+def _run_verify_quote(
+    cmd: list[str], *, input_bytes: bytes | None = None
+) -> dict[str, Any]:
+    """Run one verify-quote invocation and enforce its contract: exit 0 plus
+    one JSON `{"verified": true, ...}` report on stdout ⇔ verified; anything
+    else is a GateError.
+    """
+    try:
+        result = subprocess.run(
+            cmd,
+            input=input_bytes,
+            capture_output=True,
+            # Generous — DCAP verification fetches collateral over the
+            # network (PCCS) — but a hung fetch must not stall the
+            # caller forever.
+            timeout=300,
+        )
+    except FileNotFoundError:
+        raise _verify_quote_bin_not_found(cmd[0]) from None
+    except subprocess.TimeoutExpired:
+        raise GateError(f"`{' '.join(cmd)}` timed out") from None
+    if result.returncode != 0:
+        detail = result.stderr.decode("utf-8", "replace").strip()
+        raise GateError(f"quote verification failed:\n{detail}")
+    try:
+        report = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        report = None
+    if not isinstance(report, dict) or report.get("verified") is not True:
+        raise GateError(
+            f"`{cmd[0]}` exited 0 without a verified report: {result.stdout!r}"
+        )
+    return report
+
+
 def verify_quote_evidence(
     evidence: dict[str, Any],
     *,
@@ -661,15 +699,16 @@ def verify_quote_evidence(
     pccs_url: str | None = None,
     override_azure_outdated_tcb: bool = False,
 ) -> dict[str, Any]:
-    """DCAP-verify one founding quote via the enclave repo's `verify-quote`.
+    """DCAP-verify one founding quote via `verify-quote harvest`.
 
-    Its contract: exit 0 plus one JSON report on stdout ⇔ the evidence
-    verifies cryptographically, its report_data binds this nonce + these
-    pubkeys, and its measurements satisfy the policy. The evidence goes
-    over stdin, byte-exact with the harvest archive.
+    The evidence must verify cryptographically, its report_data must bind
+    this nonce + these pubkeys, and its measurements must satisfy the
+    policy. The evidence goes over stdin, byte-exact with the harvest
+    archive.
     """
     cmd = [
         verify_quote_bin,
+        "harvest",
         "--evidence",
         "-",
         "--policy",
@@ -685,33 +724,47 @@ def verify_quote_evidence(
         cmd += ["--pccs-url", pccs_url]
     if override_azure_outdated_tcb:
         cmd.append("--override-azure-outdated-tcb")
-    try:
-        result = subprocess.run(
-            cmd,
-            input=json.dumps(evidence).encode("utf-8"),
-            capture_output=True,
-            # Generous — DCAP verification fetches collateral over the
-            # network (PCCS) — but a hung fetch must not stall the
-            # harvest/assemble forever.
-            timeout=300,
-        )
-    except FileNotFoundError:
-        raise _verify_quote_bin_not_found(verify_quote_bin) from None
-    except subprocess.TimeoutExpired:
-        raise GateError(f"`{' '.join(cmd)}` timed out") from None
-    if result.returncode != 0:
-        detail = result.stderr.decode("utf-8", "replace").strip()
-        raise GateError(f"quote verification failed:\n{detail}")
-    try:
-        report = json.loads(result.stdout)
-    except json.JSONDecodeError:
-        report = None
-    if not isinstance(report, dict) or report.get("verified") is not True:
-        raise GateError(
-            f"`{verify_quote_bin}` exited 0 without a verified report: "
-            f"{result.stdout!r}"
-        )
-    return report
+    return _run_verify_quote(cmd, input_bytes=json.dumps(evidence).encode("utf-8"))
+
+
+def verify_node_deployment(
+    endpoint: str,
+    *,
+    manifest_path: Path,
+    policy_bytes: bytes,
+    verify_quote_bin: str = DEFAULT_VERIFY_QUOTE_BIN,
+    pccs_url: str | None = None,
+    override_azure_outdated_tcb: bool = False,
+) -> dict[str, Any]:
+    """Deploy-verify one freshly provisioned node via `verify-quote deploy`.
+
+    The verifier owns the whole relying-party flow: it mints a fresh
+    deployment_nonce, requests evidence from the node's attestation service
+    (`getDeployVerificationEvidence` at `endpoint`), recomputes the deploy
+    verification binding from the manifest's network identity and the nonce,
+    and verifies the envelope against the policy. A pass proves a measured
+    node holding this manifest answered this exact request.
+    """
+    with tempfile.NamedTemporaryFile(
+        prefix="measurement-policy-", suffix=".json"
+    ) as policy_file:
+        policy_file.write(policy_bytes)
+        policy_file.flush()
+        cmd = [
+            verify_quote_bin,
+            "deploy",
+            "--endpoint",
+            endpoint,
+            "--manifest",
+            str(manifest_path),
+            "--policy",
+            policy_file.name,
+        ]
+        if pccs_url:
+            cmd += ["--pccs-url", pccs_url]
+        if override_azure_outdated_tcb:
+            cmd.append("--override-azure-outdated-tcb")
+        return _run_verify_quote(cmd)
 
 
 def verify_harvest_records(
@@ -931,14 +984,7 @@ def run_validation_gates(manifest: dict[str, Any], ctx: GateContext) -> None:
             "running the same image can cross-replay BLS signatures"
         )
 
-    # measurements.bootstrap_policy_hash == SHA-256(policy bytes)
-    policy_hash = _sha256_hex(ctx.policy_bytes)
-    if manifest["measurements"]["bootstrap_policy_hash"] != policy_hash:
-        raise GateError(
-            f"measurements.bootstrap_policy_hash mismatch: manifest has "
-            f"{manifest['measurements']['bootstrap_policy_hash']}, computed "
-            f"{policy_hash}"
-        )
+    policy_hash = validate_policy_matches(manifest, ctx.policy_bytes)
 
     # Contract addresses must exist in the genesis alloc (with code).
     alloc = {addr.lower(): acct for addr, acct in genesis.get("alloc", {}).items()}
@@ -1538,6 +1584,27 @@ def validate_summit_genesis_matches(
             f"summit genesis namespace {namespace!r} does not match the "
             f"manifest's summit.namespace {manifest['summit']['namespace']!r}"
         )
+
+
+def validate_policy_matches(manifest: dict[str, Any], policy_bytes: bytes) -> str:
+    """The policy document is the one this manifest commits to:
+    measurements.bootstrap_policy_hash == SHA-256(policy bytes). Returns that
+    agreed hash, which callers with more policy checks to run compare against.
+
+    A byte hash, so it holds for the exact file — the same document the
+    registry's genesis-seeded admission IDs were compiled from. Every consumer
+    of a network's policy artifact runs this before use: `assemble`/`validate`
+    over the artifact set, `seismic-tee-node verify` over the copy it appraises
+    a node against.
+    """
+    policy_hash = _sha256_hex(policy_bytes)
+    if manifest["measurements"]["bootstrap_policy_hash"] != policy_hash:
+        raise GateError(
+            f"measurements.bootstrap_policy_hash mismatch: manifest has "
+            f"{manifest['measurements']['bootstrap_policy_hash']}, computed "
+            f"{policy_hash}"
+        )
+    return policy_hash
 
 
 def _add_reth_bin(p: argparse.ArgumentParser) -> None:

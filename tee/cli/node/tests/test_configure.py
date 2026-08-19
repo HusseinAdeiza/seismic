@@ -9,12 +9,14 @@ import tempfile
 import tomllib
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tee.cli.common.manifest import render_manifest
 
 # Reuse the canonical valid manifest from the manifest tests rather than
 # duplicate the schema here; build_config validates it before merging.
 from tee.cli.common.tests.test_manifest import FIXTURE_MANIFEST
+from tee.cli.node import configure
 from tee.cli.node.configure import (
     build_config,
     resolve_reth_genesis,
@@ -203,6 +205,141 @@ class ResolveRethGenesisTests(unittest.TestCase):
             manifest = Path(d) / "network-manifest.json"
             with self.assertRaises(SystemExit):
                 resolve_reth_genesis(None, manifest)
+
+
+class MainVerificationFlowTests(unittest.TestCase):
+    """The ordering around deliver_config for the inline verify step, which
+    runs unless `--no-verify` says otherwise: tooling and policy failures come
+    before the POST, the challenge only after a confirmed-ready node, and the
+    success summary only after the challenge passes."""
+
+    def setUp(self):
+        self.descriptor = _write(
+            ".json", json.dumps({"public_ip": "203.0.113.7", "fqdn": FQDN})
+        )
+        self.addCleanup(self.descriptor.unlink)
+        self.manifest = _write(".json", render_manifest(FIXTURE_MANIFEST))
+        self.addCleanup(self.manifest.unlink)
+        self.argv = [
+            "seismic-tee-node configure",
+            "--node",
+            str(self.descriptor),
+            "--manifest",
+            str(self.manifest),
+            "--bootnode",
+            BOOTNODE,
+        ]
+
+    def _run_main(self, *, ready: bool):
+        with (
+            mock.patch("sys.argv", self.argv),
+            mock.patch.object(
+                configure.verify_mod, "prepare_policy", return_value=b"p"
+            ),
+            mock.patch.object(configure, "resolve_reth_genesis"),
+            mock.patch.object(configure, "resolve_summit_genesis"),
+            mock.patch.object(
+                configure, "deliver_config", return_value=ready
+            ) as deliver,
+            mock.patch.object(configure.verify_mod, "verify_deployment") as verify,
+            mock.patch.object(configure, "_print_summary") as summary,
+        ):
+            configure.main()
+        return deliver, verify, summary
+
+    def test_missing_verifier_aborts_before_any_delivery(self):
+        with (
+            mock.patch("sys.argv", self.argv + ["--verify-quote-bin", "no-such"]),
+            mock.patch.object(configure, "deliver_config") as deliver,
+        ):
+            with self.assertRaises(SystemExit):
+                configure.main()
+        deliver.assert_not_called()
+
+    def test_no_verify_delivers_without_appraising(self):
+        # Delivery alone: no tooling is resolved, no node is challenged, and
+        # the delivery path prints its own summary.
+        with (
+            mock.patch("sys.argv", self.argv + ["--no-verify"]),
+            mock.patch.object(configure, "resolve_reth_genesis"),
+            mock.patch.object(configure, "resolve_summit_genesis"),
+            mock.patch.object(
+                configure, "deliver_config", return_value=True
+            ) as deliver,
+            mock.patch.object(configure.verify_mod, "prepare_policy") as prepare,
+            mock.patch.object(configure.verify_mod, "verify_deployment") as verify,
+            mock.patch.object(configure, "_print_summary") as summary,
+        ):
+            configure.main()
+        prepare.assert_not_called()
+        verify.assert_not_called()
+        self.assertIs(deliver.call_args.kwargs["print_summary"], True)
+        summary.assert_not_called()
+
+    def test_missing_policy_artifact_aborts_before_any_delivery(self):
+        # The manifest here has no measurement-policy-bootstrap.json sibling,
+        # so the default policy source is absent — a verified run cannot
+        # happen, and delivery must not proceed as if it could.
+        with (
+            mock.patch("sys.argv", self.argv),
+            mock.patch.object(
+                configure.verify_mod.shutil, "which", return_value="/bin/vq"
+            ),
+            mock.patch.object(
+                configure.verify_mod.subprocess,
+                "run",
+                return_value=mock.Mock(returncode=0),
+            ),
+            mock.patch.object(configure, "deliver_config") as deliver,
+        ):
+            with self.assertRaises(SystemExit) as ctx:
+                configure.main()
+        self.assertIn("--no-verify", str(ctx.exception))
+        deliver.assert_not_called()
+
+    def test_no_verify_contradicts_a_policy_source(self):
+        argv = self.argv + ["--no-verify", "--policy", str(self.manifest)]
+        with mock.patch("sys.argv", argv):
+            with self.assertRaises(SystemExit) as ctx:
+                configure.main()
+        self.assertIn("--no-verify", str(ctx.exception))
+
+    def test_verifies_once_the_node_is_confirmed_ready(self):
+        deliver, verify, summary = self._run_main(ready=True)
+        deliver.assert_called_once()
+        verify.assert_called_once()
+        self.assertEqual(verify.call_args.args[1], b"p")
+        # The delivery path stays quiet; main prints the banner once
+        # verification passed.
+        self.assertIs(deliver.call_args.kwargs["print_summary"], False)
+        summary.assert_called_once_with(FQDN, "203.0.113.7")
+
+    def test_failed_verification_prints_no_success_banner(self):
+        """A failed check must not be preceded by NODE CONFIGURED + endpoints:
+        the summary reads as go-ahead, and there isn't one."""
+        with (
+            mock.patch("sys.argv", self.argv),
+            mock.patch.object(
+                configure.verify_mod, "prepare_policy", return_value=b"p"
+            ),
+            mock.patch.object(configure, "resolve_reth_genesis"),
+            mock.patch.object(configure, "resolve_summit_genesis"),
+            mock.patch.object(configure, "deliver_config", return_value=True),
+            mock.patch.object(
+                configure.verify_mod,
+                "verify_deployment",
+                side_effect=SystemExit("FAILED"),
+            ),
+            mock.patch.object(configure, "_print_summary") as summary,
+        ):
+            with self.assertRaises(SystemExit):
+                configure.main()
+            summary.assert_not_called()
+
+    def test_skipped_watch_skips_verification_and_exits_nonzero(self):
+        with self.assertRaises(SystemExit) as ctx:
+            self._run_main(ready=False)
+        self.assertIn("not confirmed ready", str(ctx.exception))
 
 
 class ResolveSummitGenesisTests(unittest.TestCase):

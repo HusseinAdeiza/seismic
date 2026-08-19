@@ -12,8 +12,22 @@ false`): the node fetches `root_key` via `getWrappedRootKey` from a peer
 tdx-init derives from `--bootnode` (`http://<host>:7878` per bootnode).
 Founding a network — designating the one genesis node that mints `root_key`
 locally — is owned by `seismic-tee-network configure`, not
-exposed here. `build_config`/`deliver_config` below are the shared primitives
-both CLIs call; `genesis_node=True` is only ever set by the bootstrap side.
+exposed here. `build_config`/`post_config_to_tdx_init` below are the shared
+primitives both CLIs call; `genesis_node=True` is only ever set by the
+bootstrap side.
+
+The node is deploy-verified once it reaches a ready state — the
+`seismic-tee-node verify` step, run inline here so a node is appraised in the
+same breath it is configured. See verify.py for what the check proves and
+which measurement policy it appraises against. The configured summary is
+printed only after it passes, so it never reads as success over a failed
+verification. Delivery is once per boot (tdx-init accepts one config POST)
+while the check is re-runnable, so anything that interrupts the check points
+at `verify` rather than at another configure run.
+
+Verification is the default because the artifact set already carries
+everything it needs: the policy sits beside `--manifest`, pinned by it. An
+operator who wants delivery alone asks for it with `--no-verify`.
 
 There is no per-node `node.toml`: `[node]` (external_ip + genesis_node) comes
 from the descriptor + role, `[node.domain]` from the descriptor fqdn +
@@ -43,7 +57,7 @@ import requests
 from tee.cli.common import manifest as manifest_mod
 from tee.cli.common.descriptor import load_descriptor, require
 from tee.cli.common.logging_setup import setup_logging
-from tee.cli.node.proxy import ProxyClient
+from tee.cli.node import verify as verify_mod
 from tee.cli.node.status import watch_luks_provisioning
 
 logger = logging.getLogger(__name__)
@@ -229,11 +243,11 @@ def deliver_config(
     reth_genesis_path: Path,
     summit_genesis_path: Path,
     bootnodes: list[str],
-) -> None:
+    print_summary: bool = True,
+) -> bool:
     """Build + POST one node's config, then watch its first-boot LUKS wipe.
-    The shared per-node delivery path behind both
-    `seismic-tee-node configure` (join: genesis_node=False) and
-    `seismic-tee-network configure` (genesis: genesis_node=True).
+    The per-node delivery path behind `seismic-tee-node configure`
+    (join: genesis_node=False).
 
     Resolves the node's public_ip/fqdn from its descriptor (fqdn is the cert
     domain and must resolve to this node, so it's required — a wrong/absent
@@ -241,6 +255,13 @@ def deliver_config(
     (reth's `--nat extip`), the same anti-drift reason `[node.domain]` is taken
     from the descriptor. Raises SystemExit if the node doesn't reach a ready
     state within the watch window, so a failure never reads as success.
+
+    Returns whether the node was *confirmed* ready (attestation service
+    :7878 up): False when the operator stopped watching early, so a caller
+    with post-ready work (deploy verification) knows not to attempt it.
+    Such a caller passes `print_summary=False` and prints the summary once
+    its own check passes — the summary is the success banner, so nothing
+    should print it before the last gate.
     """
     descriptor = load_descriptor(descriptor_path)
     public_ip = require(descriptor, "public_ip", descriptor_path)
@@ -272,8 +293,9 @@ def deliver_config(
         rc = watch_luks_provisioning(public_ip)
     except KeyboardInterrupt:
         print("\nStopped watching — node still provisioning in the background.")
-        _print_summary(fqdn, public_ip)
-        return
+        if print_summary:
+            _print_summary(fqdn, public_ip)
+        return False
 
     if rc != 0:
         # The POST succeeded, but the node never reached a ready state within
@@ -290,23 +312,9 @@ def deliver_config(
             "then re-watch with:\n    seismic-tee-node status --node <descriptor>"
         )
 
-    _print_summary(fqdn, public_ip)
-
-
-def verify_attestation(public_ip: str, measurements_path: Path, home: str) -> None:
-    """RETIRED reference — not currently called (see `main`).
-
-    Verifies attestation via the legacy cvm-reverse-proxy client
-    (`proxy.py`), which has no endpoint on current nodes and uses a
-    different aTLS protocol than the enclave's attested-tls. Kept as a
-    skeleton; verification will be reimplemented against attested-tls /
-    seismic-attestation. `measurements_path` is the operator-supplied
-    measurements.json.
-    """
-    logger.info("Verifying TDX attestation via cvm-reverse-proxy...")
-    proxy = ProxyClient(public_ip, measurements_path, home)
-    if not proxy.start():
-        raise RuntimeError("attestation verification failed")
+    if print_summary:
+        _print_summary(fqdn, public_ip)
+    return True
 
 
 def parse_args() -> argparse.Namespace:
@@ -389,22 +397,29 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--measurements",
-        type=Path,
-        default=None,
-        metavar="FILE",
+        "--no-verify",
+        action="store_true",
         help=(
-            "(Currently unavailable.) Expected TDX measurements for "
-            "attestation verification. The verify path is retired pending "
-            "attested-tls integration, so passing this errors for now."
+            "Configure the node without deploy-verifying it. By default the "
+            "node is appraised once it is up — the same check as "
+            "`seismic-tee-node verify`, against the policy --manifest pins — "
+            "and this command exits nonzero unless it passes."
         ),
     )
+    verify_mod.add_policy_source_args(parser)
+    verify_mod.add_tooling_args(parser)
 
     args = parser.parse_args()
     if not args.node.is_file():
         raise SystemExit(f"--node descriptor not found: {args.node}")
     if not args.manifest.is_file():
         raise SystemExit(f"--manifest file not found: {args.manifest}")
+    if args.no_verify and (args.policy or args.measurements):
+        raise SystemExit(
+            "--no-verify skips verification, so it contradicts --policy / "
+            "--measurements (which choose what to verify against). Drop one."
+        )
+    verify_mod.check_policy_source_files(args)
     return args
 
 
@@ -412,19 +427,22 @@ def main() -> None:
     setup_logging()
     args = parse_args()
 
-    if args.measurements is not None:
-        # TODO(attestation): verification is retired pending attested-tls
-        # integration (see proxy.py). Refuse rather than silently skip a
-        # check the operator explicitly requested.
-        raise SystemExit(
-            "--measurements: attestation verification is currently "
-            "unavailable (cvm-reverse-proxy path retired, pending "
-            "attested-tls). Re-run without --measurements to POST config only."
+    # Resolve the verification tooling and policy before the node is touched:
+    # a missing verifier, a policy the manifest doesn't commit to, or a
+    # rejected measurements file must fail while the fix still costs nothing,
+    # not after the config POST landed.
+    if args.no_verify:
+        logger.warning(
+            "--no-verify: this node will be configured without being "
+            "appraised. Run `seismic-tee-node verify` against it before "
+            "relying on it."
         )
-
+        policy_bytes = None
+    else:
+        policy_bytes = verify_mod.prepare_policy(args, offer_no_verify=True)
     reth_genesis = resolve_reth_genesis(args.reth_genesis, args.manifest)
     summit_genesis = resolve_summit_genesis(args.summit_genesis, args.manifest)
-    deliver_config(
+    ready = deliver_config(
         args.node,
         args.manifest,
         args.email,
@@ -432,7 +450,38 @@ def main() -> None:
         reth_genesis_path=reth_genesis,
         summit_genesis_path=summit_genesis,
         bootnodes=args.bootnode,
+        # With verification requested, the summary belongs after it passes.
+        print_summary=policy_bytes is None,
     )
+
+    if policy_bytes is None:
+        return
+    if not ready:
+        # The operator stopped watching before the attestation service came
+        # up, so there is nothing to challenge yet. Exit nonzero — the
+        # requested verification did not happen — and point at the standalone
+        # command: the config this boot needs is already delivered.
+        raise SystemExit(
+            "deploy verification skipped: the node was not confirmed ready. "
+            f"Once it is up, run:\n    seismic-tee-node verify --node "
+            f"{args.node} --manifest {args.manifest}{_policy_source_flags(args)}"
+        )
+    descriptor = load_descriptor(args.node)
+    fqdn = require(descriptor, "fqdn", args.node)
+    public_ip = require(descriptor, "public_ip", args.node)
+    verify_mod.verify_deployment(args, policy_bytes, fqdn=fqdn, public_ip=public_ip)
+    _print_summary(fqdn, public_ip)
+
+
+def _policy_source_flags(args: argparse.Namespace) -> str:
+    """The policy-source flags to repeat in a suggested `verify` command, so
+    the retry appraises against the same policy this run chose. Empty when the
+    default artifact was used — `verify` finds it the same way."""
+    if args.measurements is not None:
+        return f" --measurements {args.measurements}"
+    if args.policy is not None:
+        return f" --policy {args.policy}"
+    return ""
 
 
 def _print_summary(fqdn: str, public_ip: str) -> None:
