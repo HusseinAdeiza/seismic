@@ -17,7 +17,7 @@ tee/networks/<name>/
 │   ├── reth-genesis.json           authored: policy-free EL genesis
 │   ├── summit-genesis.toml         authored: consensus parameter choices
 │   ├── measurements.json           authored: raw PCRs from `make measure`,
-│   │                               measurement_id stamped by `init`
+│   │                               carrying its measurement_id
 │   ├── founder-withdrawal-credentials.json
 │   │                               authored: one address per founding
 │   │                               node, in node-name order

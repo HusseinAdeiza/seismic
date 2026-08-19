@@ -213,7 +213,7 @@ class PromoteTests(unittest.TestCase):
     def test_missing_binary_is_a_gate_error(self):
         raw = json.dumps(RAW_MEASUREMENTS).encode()
         with self.assertRaisesRegex(GateError, "not found"):
-            promote_measurements(raw, "img.vhd", admission_bin="no-such-admission-cli")
+            promote_measurements(raw, admission_bin="no-such-admission-cli")
 
 
 class NetworkSectionTests(unittest.TestCase):
@@ -713,7 +713,14 @@ class GateTests(unittest.TestCase):
         net = Path(self.tmp.name) / "networks" / "testnet-1"
         inputs = net / "inputs"
         raw = Path(self.tmp.name) / "raw-measurements.json"
-        raw.write_text(json.dumps({"measurements": {"4": {"expected": "ab" * 24}}}))
+        raw.write_text(
+            json.dumps(
+                {
+                    "measurement_id": "img.vhd",
+                    "measurements": {"4": {"expected": "ab" * 24}},
+                }
+            )
+        )
         init_network_dir(net, "testnet-1", self.reth_genesis, raw)
         authored = (inputs / "summit-genesis.toml").read_bytes()
         assembled = self._assemble(
@@ -764,7 +771,9 @@ class InitTests(unittest.TestCase):
         self.reth_genesis = root / "dev.json"
         self.reth_genesis.write_text('{"config": {"chainId": 5124}}')
         self.measurements = root / "measurements.json"
-        self.measurements.write_text('{"measurements": {"4": {"expected": "ab"}}}')
+        self.measurements.write_text(
+            '{"measurement_id": "img.vhd", "measurements": {"4": {"expected": "ab"}}}'
+        )
         self.out = root / "networks" / "testnet-1"
 
     def test_scaffolds_inputs_with_starter_template(self):
@@ -830,35 +839,42 @@ class InitTests(unittest.TestCase):
         # Placeholders are a usable founder set, not a stub to be rewritten.
         self.assertEqual(len(manifest_mod.load_founder_credentials(path)), 3)
 
-    def test_stamps_measurement_id(self):
-        init_network_dir(
-            self.out,
-            "testnet-1",
-            self.reth_genesis,
-            self.measurements,
-            measurement_id="img.vhd",
+    def test_copies_measurements_verbatim(self):
+        # The file assemble promotes is byte-identical to what `make measure`
+        # emitted, stamped id included.
+        init_network_dir(self.out, "testnet-1", self.reth_genesis, self.measurements)
+        self.assertEqual(
+            (self.out / "inputs" / "measurements.json").read_bytes(),
+            self.measurements.read_bytes(),
         )
-        stamped = json.loads((self.out / "inputs" / "measurements.json").read_bytes())
-        # assemble's promotion picks the id up from the file — no flag needed.
-        self.assertEqual(stamped["measurement_id"], "img.vhd")
 
-    def test_rejects_measurement_id_for_promoted_policy(self):
+    def test_requires_a_stamped_measurement_id(self):
+        # Nothing binds a network to an image out of band, so unstamped
+        # measurements are refused here rather than at promotion time —
+        # after the cohort has been provisioned and harvested.
+        self.measurements.write_text('{"measurements": {"4": {"expected": "ab"}}}')
+        with self.assertRaisesRegex(GateError, "no measurement_id"):
+            init_network_dir(self.out, "t", self.reth_genesis, self.measurements)
+
+    def test_accepts_a_promoted_policy(self):
+        # A record list is the other valid input: each record names its image.
         promoted = Path(self.tmp.name) / "policy.json"
         promoted.write_text(
             json.dumps(
                 [
                     {
-                        "measurement_id": "x",
+                        "measurement_id": "img.vhd",
                         "attestation_type": "azure-tdx",
                         "measurements": {"4": {"expected": "ab"}},
                     }
                 ]
             )
         )
-        with self.assertRaisesRegex(GateError, "already-promoted"):
-            init_network_dir(
-                self.out, "t", self.reth_genesis, promoted, measurement_id="img.vhd"
-            )
+        init_network_dir(self.out, "t", self.reth_genesis, promoted)
+        self.assertEqual(
+            (self.out / "inputs" / "measurements.json").read_bytes(),
+            promoted.read_bytes(),
+        )
 
 
 class FoundingSetTests(unittest.TestCase):

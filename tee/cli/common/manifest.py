@@ -16,7 +16,9 @@ by the manifest; everything under `inputs/` is provenance:
 
     inputs/reth-genesis.json             policy-free genesis
     inputs/summit-genesis.toml           summit parameter choices
-    inputs/measurements.json             raw PCR map from `make measure`
+    inputs/measurements.json             raw PCR map from `make measure`,
+                                         carrying the measurement_id of the
+                                         image it measures
     inputs/founder-withdrawal-credentials.json
                                          authored, one address per founder
     inputs/harvest/<node>.json           harvested founding pubkeys + quotes
@@ -53,7 +55,7 @@ set):
     uv run seismic-tee-network init tee/networks/seismic-devnet-3 \
         --reth-genesis dev.json \
         --measurements ../seismic-images/build/measurements.json \
-        --measurement-id seismic_2026-06-11.abc123.vhd --founders 4
+        --founders 4
     # edit tee/networks/seismic-devnet-3/inputs/summit-genesis.toml and
     # inputs/founder-withdrawal-credentials.json, then:
     #   seismic-tee-network up --network tee/networks/seismic-devnet-3 --count N
@@ -328,7 +330,6 @@ def _admission_cli(admission_bin: str, *args: str, input_bytes: bytes) -> bytes:
 
 def promote_measurements(
     raw_bytes: bytes,
-    measurement_id: str | None,
     attestation_type: str = DEFAULT_ATTESTATION_TYPE,
     admission_bin: str = DEFAULT_ADMISSION_BIN,
 ) -> bytes:
@@ -339,16 +340,16 @@ def promote_measurements(
     admission-schema registers from the raw measured-boot output, normalizes
     them to named `pcrN` keys binding a single-value `expected_any`, wraps
     them into one Flashbots-compatible policy record, and compiles its own
-    output before returning it. If the input already *is* a record list it is
-    passed through byte-verbatim (the manifest commits to the policy file by
-    hash, so an already-published policy must not be re-rendered) — but still
-    compiled, which is the whole promoted-policy validation: a document the
-    compiler accepts is exactly a document that can seed registry genesis
-    storage.
+    output before returning it. The record's `measurement_id` — which image
+    these PCRs measure — comes from the measurements file itself, where
+    `make measure` stamped it; nothing binds the policy to an image out of
+    band. If the input already *is* a record list it is passed through
+    byte-verbatim (the manifest commits to the policy file by hash, so an
+    already-published policy must not be re-rendered) — but still compiled,
+    which is the whole promoted-policy validation: a document the compiler
+    accepts is exactly a document that can seed registry genesis storage.
     """
     args = ["promote"]
-    if measurement_id:
-        args += ["--measurement-id", measurement_id]
     if attestation_type:
         args += ["--attestation-type", attestation_type]
     return _admission_cli(admission_bin, *args, input_bytes=raw_bytes)
@@ -1306,27 +1307,27 @@ observers_per_validator = 5
 """
 
 
-def stamp_measurement_id(raw_bytes: bytes, measurement_id: str) -> bytes:
-    """Stamp the image artifact id into a make-measure measurements file.
+def require_measurement_id(raw_bytes: bytes, path: Path) -> None:
+    """Gate a measurements input on carrying the id of the image it measures.
 
-    The id is a fact about the measurements (which image these PCRs measure),
-    known when the file is copied in — so `init` records it in the file and
-    `assemble` needs no --measurement-id. The measurements input is not
-    hash-committed (the promoted policy derived from it is), so re-serializing
-    it is safe.
+    The measurements file is the only binding between a network's PCR
+    allowlist and an image: seismic-images' `make measure` stamps the
+    versioned VHD filename into it, and promotion reads the id from there.
+    `init` gates on the stamp so a missing one surfaces while the operator
+    still holds loose files, not after the cohort has been provisioned and
+    harvested. A promoted policy is a record list, each record carrying its
+    own id.
     """
-    raw = json.loads(raw_bytes)
-    if isinstance(raw, list):
+    try:
+        raw = json.loads(raw_bytes)
+    except json.JSONDecodeError as e:
+        raise GateError(f"{path} is not valid JSON: {e}") from None
+    if isinstance(raw, dict) and "measurement_id" not in raw:
         raise GateError(
-            "--measurement-id is meaningless for an already-promoted policy "
-            "(each record carries its own measurement_id)"
+            f"{path} carries no measurement_id — re-export the measurements "
+            "with seismic-images' `make measure`, which stamps the versioned "
+            "image filename these PCRs measure into the file"
         )
-    if not isinstance(raw, dict):
-        raise GateError(f"unrecognized measurements shape: {type(raw).__name__}")
-    wrapper: dict[str, Any] = raw if "measurements" in raw else {"measurements": raw}
-    # Accept a path to the artifact; the stamped id is the bare filename.
-    wrapper["measurement_id"] = Path(measurement_id).name
-    return (json.dumps(wrapper, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
 
 def init_network_dir(
@@ -1335,26 +1336,24 @@ def init_network_dir(
     reth_genesis: Path,
     measurements: Path,
     summit_genesis: Path | None = None,
-    measurement_id: str | None = None,
     founders: int = 0,
     force: bool = False,
 ) -> list[Path]:
     """Scaffold a network directory's four authored inputs under inputs/.
 
-    Copies the genesis and measurements in (stamping measurement_id into
-    the latter when given), and writes a starter summit genesis
-    (namespace = name) unless one is supplied to copy, plus `founders`
-    placeholder withdrawal credentials (`0x00…0<i>` — obviously fake, so a
-    set that survives into a network anyone cares about shows on sight).
-    The founder edits all four in place, then provisions and harvests the
-    cohort (assemble pins the harvested validator set) before
-    `assemble --dir` derives the artifact set into the directory's top
-    level — inputs and the committed artifacts live together, so the
+    Copies the genesis and measurements in verbatim (gating on the
+    measurements carrying the measurement_id of the image they measure), and
+    writes a starter summit genesis (namespace = name) unless one is supplied
+    to copy, plus `founders` placeholder withdrawal credentials (`0x00…0<i>`
+    — obviously fake, so a set that survives into a network anyone cares
+    about shows on sight). The founder edits all four in place, then
+    provisions and harvests the cohort (assemble pins the harvested validator
+    set) before `assemble --dir` derives the artifact set into the directory's
+    top level — inputs and the committed artifacts live together, so the
     directory is the whole network (commit it for networks that matter).
     """
     measurements_bytes = measurements.read_bytes()
-    if measurement_id is not None:
-        measurements_bytes = stamp_measurement_id(measurements_bytes, measurement_id)
+    require_measurement_id(measurements_bytes, measurements)
     credentials = [f"0x{i:040x}" for i in range(1, founders + 1)]
     contents = {
         RETH_GENESIS_FILENAME: reth_genesis.read_bytes(),
@@ -1528,14 +1527,6 @@ def _parse_init_args(argv: list[str] | None = None) -> argparse.Namespace:
         "so the default writes an editable starter with namespace = <name>",
     )
     parser.add_argument(
-        "--measurement-id",
-        default=None,
-        help="image artifact filename the measurements belong to; stamped "
-        f"into {INPUTS_DIRNAME}/{MEASUREMENTS_FILENAME}. Only needed when "
-        "the measurements file carries no measurement_id of its own "
-        "(seismic-images' make measure stamps one)",
-    )
-    parser.add_argument(
         "--founders",
         type=int,
         default=0,
@@ -1572,11 +1563,6 @@ def _parse_assemble_args(argv: list[str] | None = None) -> argparse.Namespace:
         f"{SUMMIT_GENESIS_FILENAME}, {MEASUREMENTS_FILENAME}), takes the "
         "network name from its basename, and writes the artifact set at "
         "the top level",
-    )
-    parser.add_argument(
-        "--measurement-id",
-        help="policy record id (image artifact filename); overrides the one "
-        f"init stamped into {INPUTS_DIRNAME}/{MEASUREMENTS_FILENAME}",
     )
     parser.add_argument("--attestation-type", default=DEFAULT_ATTESTATION_TYPE)
     parser.add_argument(
@@ -1662,20 +1648,11 @@ def init_main() -> None:
             args.reth_genesis,
             args.measurements,
             args.summit_genesis,
-            args.measurement_id,
             founders=args.founders,
             force=args.force,
         )
         for path in written:
             logger.info("wrote %s", path)
-        # Suggest --measurement-id only when the copied measurements
-        # actually lack one (make measure stamps it at the source; a
-        # promoted policy carries one per record).
-        stamped = json.loads(
-            (args.dir / INPUTS_DIRNAME / MEASUREMENTS_FILENAME).read_bytes()
-        )
-        needs_id = isinstance(stamped, dict) and "measurement_id" not in stamped
-        id_hint = " --measurement-id <image-artifact-filename>" if needs_id else ""
         inputs_dir = args.dir / INPUTS_DIRNAME
         founders_hint = (
             "update the placeholder addresses in"
@@ -1695,7 +1672,7 @@ def init_main() -> None:
             "      region, VM size, and operator_ip_cidr live there too)\n"
             f"  4. seismic-tee-network up --network {args.dir}\n"
             f"  5. seismic-tee-network harvest {args.dir}\n"
-            f"  6. seismic-tee-network assemble {args.dir}{id_hint}"
+            f"  6. seismic-tee-network assemble {args.dir}"
         )
     except (GateError, ManifestSchemaError) as e:
         logger.error("%s", e)
@@ -1726,7 +1703,6 @@ def assemble_main() -> None:
         )
         policy_bytes = promote_measurements(
             args.measurements.read_bytes(),
-            args.measurement_id,
             args.attestation_type,
             admission_bin=args.admission_bin,
         )

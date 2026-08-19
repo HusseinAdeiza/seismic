@@ -453,7 +453,6 @@ def main() -> None:
     try:
         policy_bytes = manifest_mod.promote_measurements(
             args.measurements.read_bytes(),
-            None,
             args.attestation_type,
             admission_bin=args.admission_bin,
         )

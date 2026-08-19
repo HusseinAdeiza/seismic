@@ -171,10 +171,10 @@ class PromoteBoundaryTests(unittest.TestCase):
         self.assertIsNotNone(ADMISSION_BIN, MISSING_ADMISSION_BIN)
 
     def test_promotes_make_measure_wrapper_to_schema_registers(self):
-        raw = json.dumps(RAW_MEASUREMENTS).encode()
-        policy = json.loads(promote_measurements(raw, "../build/img.vhd"))
+        raw = json.dumps({**RAW_MEASUREMENTS, "measurement_id": "img.vhd"}).encode()
+        policy = json.loads(promote_measurements(raw))
         record = policy[0]
-        # Path ids reduce to the bare filename; the promoted record binds
+        # The stamped id carries into the record; the promoted record binds
         # exactly the named schema registers, single-value expected_any.
         self.assertEqual(record["measurement_id"], "img.vhd")
         self.assertEqual(record["attestation_type"], "azure-tdx")
@@ -194,17 +194,25 @@ class PromoteBoundaryTests(unittest.TestCase):
             + b"ef" * 32
             + b'"}}}]'
         )
-        self.assertEqual(promote_measurements(raw, None), raw)
+        self.assertEqual(promote_measurements(raw), raw)
 
     def test_promote_failure_surfaces_compiler_diagnostics(self):
-        raw = json.dumps({"measurements": {"4": {"expected": "ab" * 32}}}).encode()
+        raw = json.dumps(
+            {
+                "measurement_id": "img.vhd",
+                "measurements": {"4": {"expected": "ab" * 32}},
+            }
+        ).encode()
         with self.assertRaisesRegex(GateError, "pcr9"):
-            promote_measurements(raw, "img.vhd")
+            promote_measurements(raw)
 
     def test_requires_measurement_id(self):
+        # An unstamped wrapper has nothing to bind the policy to an image;
+        # `init` gates on the stamp, and promotion refuses one that slipped
+        # past it.
         raw = json.dumps(RAW_MEASUREMENTS).encode()
         with self.assertRaisesRegex(GateError, "measurement_id"):
-            promote_measurements(raw, None)
+            promote_measurements(raw)
 
 
 class CompileBoundaryTests(unittest.TestCase):

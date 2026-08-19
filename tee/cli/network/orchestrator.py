@@ -110,8 +110,8 @@ def _check_vhd_matches_network(template: Mapping, network_dir: Path) -> str:
     Name-level tripwire only: the basename of the config's `vhd_blob_url` is
     the image artifact filename (`seismic[-dev]_<date>.<commit>.vhd`), which
     is also the `measurement_id` seismic-images' `make measure` stamps into
-    its measurements output (`init --measurement-id` overrides it;
-    an already-promoted policy carries it per record). Comparing the two
+    its measurements output (an already-promoted policy carries it per
+    record). Comparing the two
     catches a stale or typo'd image pin before any cloud resource exists.
     The *authored input* is checked, not the assembled artifact set,
     because provisioning precedes assembly — the founding order is
@@ -162,10 +162,9 @@ def _check_vhd_matches_network(template: Mapping, network_dir: Path) -> str:
     if not ids:
         raise SystemExit(
             f"{measurements_path} carries no measurement_id to check the "
-            "image pin against — regenerate it with seismic-images' `make "
-            "measure` (which stamps the field) or re-run `init "
-            "--measurement-id <image-artifact-filename>` so a stale VHD "
-            "pin can be caught before provisioning"
+            "image pin against — re-export the measurements with "
+            "seismic-images' `make measure`, which stamps the field, so a "
+            "stale VHD pin can be caught before provisioning"
         )
     vhd_name = vhd_url.rsplit("/", 1)[-1]
     if vhd_name not in ids:
@@ -390,7 +389,7 @@ def up_main() -> None:
         "1. Create the network directory (once per network):\n"
         f"     seismic-tee-network init {net} \\\n"
         "       --reth-genesis <reth-genesis.json> \\\n"
-        "       --measurements <measurements.json> --measurement-id <image.vhd> \\\n"
+        "       --measurements <measurements.json> \\\n"
         f"       --founders {count}\n"
         f"     # edit {net}/inputs/summit-genesis.toml and the scaffolded\n"
         f"     # {net}/inputs/founder-withdrawal-credentials.json\n"
