@@ -47,13 +47,14 @@ validator's IP — delivered in the genesis file but excluded from its
 config digest, so IPs never enter network_id.
 
 Usage (one directory per network: `init` gathers the authored inputs — the
-only command that takes loose files — then `assemble`/`validate` operate on
-the directory; between `init` and `assemble` the founding cohort is
-provisioned and harvested, since assemble pins the harvested validator
-set):
+only command that takes loose files, each a local path or an https:// URL —
+then `assemble`/`validate` operate on the directory; between `init` and
+`assemble` the founding cohort is provisioned and harvested, since assemble
+pins the harvested validator set):
 
     uv run seismic-tee-network init tee/networks/seismic-devnet-3 \
-        --reth-genesis dev.json \
+        --reth-genesis https://raw.githubusercontent.com/.../dev.json \
+        --summit-genesis tee/networks/summit-genesis-starter.toml \
         --measurements ../seismic-images/build/measurements.json \
         --founders 4
     # edit tee/networks/seismic-devnet-3/inputs/summit-genesis.toml and
@@ -80,6 +81,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import requests
 from eth_utils.crypto import keccak
 
 from tee.cli.common.descriptor import load_descriptor, require
@@ -1277,37 +1279,100 @@ def write_artifact_set(
     (out_dir / SUMMIT_GENESIS_FILENAME).write_bytes(assembled.summit_genesis_bytes)
 
 
-def starter_summit_genesis(name: str) -> str:
-    """Starter authored summit genesis written by `init` (values
-    from summit's example_genesis.toml). Every value is a per-network choice
-    for the founder to review; nothing in it is derived.
+def _raw_url_hint(source: str | Path) -> str:
+    """Suffix for parse-gate errors on fetched content: the classic mistake
+    is pasting a GitHub HTML page URL, which fetches fine but isn't the file.
     """
-    # json.dumps emits a valid TOML basic string for these simple values.
-    return f"""\
-# Summit network parameters. `assemble` completes this input with
-# the two derived fields — eth_genesis_hash (from reth-genesis.json) and
-# validators (the founding set: TEE-born keys harvested from the live
-# cohort) — and ships summit's own rendering of the completed file as
-# summit-genesis.toml, so comments here never reach the artifact.
-# Review every value before founding a real network.
-leader_timeout_ms = 2000
-notarization_timeout_ms = 4000
-nullify_timeout_ms = 4000
-activity_timeout_views = 256
-skip_timeout_views = 32
-max_message_size_bytes = 10485760
-namespace = {json.dumps(name)}
-validator_minimum_stake = 32000000000
-validator_maximum_stake = 32000000000
-blocks_per_epoch = 10000
-allowed_timestamp_future_ms = 10000
-max_deposits_per_epoch = 3
-max_withdrawals_per_epoch = 16
-observers_per_validator = 5
-"""
+    if str(source).startswith("https://"):
+        return (
+            " — for GitHub files pass the raw content URL "
+            "(raw.githubusercontent.com), not the HTML page"
+        )
+    return ""
 
 
-def require_measurement_id(raw_bytes: bytes, path: Path) -> None:
+def read_input_source(source: str | Path) -> bytes:
+    """Read one authored input from a local path or an https:// URL.
+
+    URL inputs let `init` run without sibling checkouts: all SeismicSystems
+    repos are public, so raw.githubusercontent.com URLs work anonymously,
+    and since `init` copies inputs into inputs/ the fetch is one-time — the
+    network directory stays self-contained. https is required on the request
+    *and on every redirect hop* (a chain that starts https can still be
+    downgraded mid-redirect); beyond that any host is accepted — founders
+    running their own forks fetch from their own mirrors, and the founder
+    reviews every input before assemble's gates run.
+    """
+    text = str(source)
+    if text.startswith("http://"):
+        raise GateError(f"insecure URL rejected (use https://): {text}")
+    if text.startswith("https://"):
+        try:
+            resp = requests.get(text, timeout=30)
+            resp.raise_for_status()
+        except requests.RequestException as e:
+            raise GateError(f"failed to fetch {text}: {e}") from None
+        insecure = [
+            hop.url
+            for hop in [*resp.history, resp]
+            if not str(hop.url).startswith("https://")
+        ]
+        if insecure:
+            raise GateError(
+                f"{text} redirected through non-https URL(s): {', '.join(insecure)}"
+            )
+        return resp.content
+    path = Path(source)
+    if not path.is_file():
+        raise GateError(f"input file not found: {path}")
+    return path.read_bytes()
+
+
+def fill_summit_namespace(raw: bytes, name: str, source: str | Path) -> bytes:
+    """Apply init's namespace rule to an authored summit genesis.
+
+    `namespace` is the signature domain separator and must be unique per
+    network, so a shared starter (like the committed
+    summit-genesis-starter.toml) cannot choose one: it carries the visible
+    fill-me slot `namespace = ""`. init fills `namespace = <network name>`
+    when the authored genesis leaves it empty or omits the key — an empty
+    string is never authorable intent (assemble would accept a namespace no
+    one chose) — and copies a non-empty namespace untouched. The authored
+    bytes are otherwise verbatim.
+    """
+    try:
+        text = raw.decode("utf-8")
+        parsed = tomllib.loads(text)
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
+        raise GateError(
+            f"{source} is not valid TOML: {e}{_raw_url_hint(source)}"
+        ) from None
+    if parsed.get("namespace"):
+        return raw
+    # json.dumps emits a valid TOML basic string for a simple name.
+    filled = f"namespace = {json.dumps(name)}"
+    if "namespace" in parsed:
+        text, count = re.subn(
+            r"^namespace\s*=.*$", lambda _: filled, text, count=1, flags=re.MULTILINE
+        )
+        if count != 1:
+            raise GateError(
+                f"{source} has an empty namespace that init cannot rewrite "
+                "(no top-level `namespace = ...` line) — set it to the "
+                "network's unique namespace"
+            )
+        return text.encode()
+    if text and not text.endswith("\n"):
+        text += "\n"
+    return (
+        text
+        + "\n# Unique per network: namespaces summit signatures to this chain.\n"
+        + filled
+        + "\n"
+    ).encode()
+
+
+def require_measurement_id(raw_bytes: bytes, source: str | Path) -> None:
     """Gate a measurements input on carrying the id of the image it measures.
 
     The measurements file is the only binding between a network's PCR
@@ -1321,10 +1386,12 @@ def require_measurement_id(raw_bytes: bytes, path: Path) -> None:
     try:
         raw = json.loads(raw_bytes)
     except json.JSONDecodeError as e:
-        raise GateError(f"{path} is not valid JSON: {e}") from None
+        raise GateError(
+            f"{source} is not valid JSON: {e}{_raw_url_hint(source)}"
+        ) from None
     if isinstance(raw, dict) and "measurement_id" not in raw:
         raise GateError(
-            f"{path} carries no measurement_id — re-export the measurements "
+            f"{source} carries no measurement_id — re-export the measurements "
             "with seismic-images' `make measure`, which stamps the versioned "
             "image filename these PCRs measure into the file"
         )
@@ -1333,18 +1400,21 @@ def require_measurement_id(raw_bytes: bytes, path: Path) -> None:
 def init_network_dir(
     out_dir: Path,
     name: str,
-    reth_genesis: Path,
-    measurements: Path,
-    summit_genesis: Path | None = None,
+    reth_genesis: str | Path,
+    measurements: str | Path,
+    summit_genesis: str | Path,
     founders: int = 0,
     force: bool = False,
 ) -> list[Path]:
     """Scaffold a network directory's four authored inputs under inputs/.
 
-    Copies the genesis and measurements in verbatim (gating on the
-    measurements carrying the measurement_id of the image they measure), and
-    writes a starter summit genesis (namespace = name) unless one is supplied
-    to copy, plus `founders` placeholder withdrawal credentials (`0x00…0<i>`
+    Each input is a local path or an https:// URL (read_input_source).
+    Copies the three inputs in verbatim, gating each on parsing as its
+    format (the measurements additionally on carrying the measurement_id of
+    the image they measure) — except that a summit genesis with an empty or
+    missing `namespace` gets `namespace = <name>` filled in
+    (fill_summit_namespace).
+    Also writes `founders` placeholder withdrawal credentials (`0x00…0<i>`
     — obviously fake, so a set that survives into a network anyone cares
     about shows on sight). The founder edits all four in place, then
     provisions and harvests the cohort (assemble pins the harvested validator
@@ -1352,17 +1422,23 @@ def init_network_dir(
     top level — inputs and the committed artifacts live together, so the
     directory is the whole network (commit it for networks that matter).
     """
-    measurements_bytes = measurements.read_bytes()
+    measurements_bytes = read_input_source(measurements)
     require_measurement_id(measurements_bytes, measurements)
+    reth_genesis_bytes = read_input_source(reth_genesis)
+    try:
+        json.loads(reth_genesis_bytes)
+    except json.JSONDecodeError as e:
+        raise GateError(
+            f"{reth_genesis} is not valid JSON: {e}{_raw_url_hint(reth_genesis)}"
+        ) from None
+    summit_genesis_bytes = fill_summit_namespace(
+        read_input_source(summit_genesis), name, summit_genesis
+    )
     credentials = [f"0x{i:040x}" for i in range(1, founders + 1)]
     contents = {
-        RETH_GENESIS_FILENAME: reth_genesis.read_bytes(),
+        RETH_GENESIS_FILENAME: reth_genesis_bytes,
         MEASUREMENTS_FILENAME: measurements_bytes,
-        SUMMIT_GENESIS_FILENAME: (
-            summit_genesis.read_bytes()
-            if summit_genesis is not None
-            else starter_summit_genesis(name).encode()
-        ),
+        SUMMIT_GENESIS_FILENAME: summit_genesis_bytes,
         FOUNDERS_FILENAME: (json.dumps(credentials, indent=2) + "\n").encode(),
     }
     inputs_dir = out_dir / INPUTS_DIRNAME
@@ -1498,33 +1574,38 @@ def _parse_init_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--name",
         default=None,
-        help="network name for the starter summit genesis's namespace; "
-        "default: the directory's basename (which is also what assemble "
-        "uses as the manifest name)",
+        help="network name, filled in as the summit genesis's namespace when "
+        "the authored genesis leaves it empty; default: the directory's "
+        "basename (which is also what assemble uses as the manifest name)",
     )
+    # The three inputs are strings, not Paths: each accepts a local path or
+    # an https:// URL, and Path() would collapse a URL's "//".
     parser.add_argument(
         "--reth-genesis",
-        type=Path,
         required=True,
-        help="reth genesis, copied in as "
+        metavar="PATH_OR_URL",
+        help="reth genesis (local path or https:// URL), copied in as "
         f"{INPUTS_DIRNAME}/{RETH_GENESIS_FILENAME}. Required: an external "
         "fact (chain state + contract alloc) init cannot invent",
     )
     parser.add_argument(
         "--measurements",
-        type=Path,
         required=True,
-        help="seismic-images make-measure output (or promoted policy), "
-        f"copied in as {INPUTS_DIRNAME}/{MEASUREMENTS_FILENAME}. Required: "
-        "the PCRs of a real published image, never generated",
+        metavar="PATH_OR_URL",
+        help="seismic-images make-measure output (or promoted policy; local "
+        f"path or https:// URL), copied in as "
+        f"{INPUTS_DIRNAME}/{MEASUREMENTS_FILENAME}. Required: the PCRs of a "
+        "real published image, never generated",
     )
     parser.add_argument(
         "--summit-genesis",
-        type=Path,
-        default=None,
-        help="authored summit genesis to copy in verbatim. Optional: unlike "
-        "the two inputs above it holds only per-network parameter choices, "
-        "so the default writes an editable starter with namespace = <name>",
+        required=True,
+        metavar="PATH_OR_URL",
+        help="authored summit genesis (local path or https:// URL), copied "
+        "in verbatim except that an empty namespace is filled with <name>. "
+        "Required: every value in it is a per-network choice; start from "
+        "tee/networks/summit-genesis-starter.toml (in this repo, also "
+        "fetchable from its GitHub raw URL) and review each parameter",
     )
     parser.add_argument(
         "--founders",

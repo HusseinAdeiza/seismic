@@ -48,6 +48,10 @@ holder keys). The committed file itself never changes after assemble.
 ![How assemble derives the artifact set, what pins what, and how each
 configure run delivers and asserts it](network-dir.svg)
 
+The same founding from each node's side — why keys are born before the
+manifest, and how the boot chain is sequenced to allow it — is
+[the network founding doc](https://github.com/SeismicSystems/seismic/blob/main/docs/tee/network-founding.md).
+
 Directories are committed because the directory is everything needed to
 (re)configure, join, or debug that network later, and its manifest is the
 network's immutable identity — a founded network's `network_id` must
@@ -86,6 +90,9 @@ fails CI instead of misleading a reader.
 
 To found any network, throwaway or real, don't reuse or copy this
 directory: run `init <new-dir>`, author fresh inputs, and follow
-the founding workflow in the tee README. `namespace` (the BLS signature
-domain separator) and `chainId` must be unique per network that matters
-(cohorts sharing them can cross-replay signatures).
+the founding workflow in the tee README. Start the summit genesis from
+[`summit-genesis-starter.toml`](summit-genesis-starter.toml) (in this
+directory; a drift test pins its parameter set against summit's).
+`namespace` (the BLS signature domain separator) and `chainId` must be
+unique per network that matters (cohorts sharing them can cross-replay
+signatures).

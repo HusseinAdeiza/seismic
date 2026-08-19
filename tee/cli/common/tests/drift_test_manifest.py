@@ -27,6 +27,7 @@ import http.client
 import json
 import shutil
 import subprocess
+import tomllib
 import unittest
 import urllib.error
 import urllib.request
@@ -235,6 +236,36 @@ class CompileBoundaryTests(unittest.TestCase):
     def test_compile_failure_is_a_gate_error(self):
         with self.assertRaisesRegex(GateError, "failed"):
             compile_measurement_policy(b"[]")
+
+
+class SummitStarterDriftTests(unittest.TestCase):
+    """The committed starter summit genesis tracks summit's parameter set.
+
+    tee/networks/summit-genesis-starter.toml carries every founder-reviewable
+    summit genesis parameter, explicitly — defaults included, so the founder
+    reviews each one. Summit owns the schema, and its example_genesis.toml is
+    a complete rendering of it, so a parameter summit adds or renames shows
+    up as a key-set mismatch here. Values are not compared: each is a
+    per-network choice.
+    """
+
+    SUMMIT_EXAMPLE_URL = (
+        "https://raw.githubusercontent.com/SeismicSystems/summit/main/"
+        "example_genesis.toml"
+    )
+    STARTER = NETWORKS_DIR / "summit-genesis-starter.toml"
+
+    # Not parameters: the two fields assemble derives per network.
+    DERIVED = {"eth_genesis_hash", "validators"}
+
+    def test_starter_carries_summits_parameter_set(self):
+        example = tomllib.loads(_fetch_live(self.SUMMIT_EXAMPLE_URL).decode())
+        starter = tomllib.loads(self.STARTER.read_text())
+        self.assertEqual(set(starter) & self.DERIVED, set())
+        self.assertEqual(set(starter) | self.DERIVED, set(example))
+        # The namespace slot ships empty: the visible fill-me init replaces
+        # with the network name (unique per network — replay domain).
+        self.assertEqual(starter["namespace"], "")
 
 
 class CommittedNetworkDirTests(unittest.TestCase):

@@ -11,6 +11,7 @@ import tomllib
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 from eth_utils.crypto import keccak
 
@@ -721,7 +722,9 @@ class GateTests(unittest.TestCase):
                 }
             )
         )
-        init_network_dir(net, "testnet-1", self.reth_genesis, raw)
+        starter = Path(self.tmp.name) / "summit-genesis-starter.toml"
+        starter.write_text("leader_timeout_ms = 2000\n")
+        init_network_dir(net, "testnet-1", self.reth_genesis, raw, starter)
         authored = (inputs / "summit-genesis.toml").read_bytes()
         assembled = self._assemble(
             reth_genesis=inputs / "reth-genesis.json",
@@ -774,11 +777,16 @@ class InitTests(unittest.TestCase):
         self.measurements.write_text(
             '{"measurement_id": "img.vhd", "measurements": {"4": {"expected": "ab"}}}'
         )
+        # A shared starter's shape: parameters plus the empty namespace slot.
+        self.starter = root / "summit-genesis-starter.toml"
+        self.starter.write_text(
+            '# starter params\nnamespace = ""\nleader_timeout_ms = 2000\n'
+        )
         self.out = root / "networks" / "testnet-1"
 
-    def test_scaffolds_inputs_with_starter_template(self):
+    def test_scaffolds_inputs_and_fills_namespace(self):
         written = init_network_dir(
-            self.out, "testnet-1", self.reth_genesis, self.measurements
+            self.out, "testnet-1", self.reth_genesis, self.measurements, self.starter
         )
         inputs = self.out / "inputs"
         self.assertEqual({p.parent for p in written}, {inputs})
@@ -799,12 +807,36 @@ class InitTests(unittest.TestCase):
             (inputs / "reth-genesis.json").read_bytes(),
             self.reth_genesis.read_bytes(),
         )
-        starter = tomllib.loads((inputs / "summit-genesis.toml").read_text())
-        self.assertEqual(starter["namespace"], "testnet-1")
-        self.assertNotIn("eth_genesis_hash", starter)
-        self.assertNotIn("validators", starter)
+        # The starter's namespace slot is empty, so init fills the network
+        # name into it; every other authored line (comments included) is
+        # untouched.
+        raw = (inputs / "summit-genesis.toml").read_text()
+        self.assertEqual(
+            raw,
+            '# starter params\nnamespace = "testnet-1"\nleader_timeout_ms = 2000\n',
+        )
+
+    def test_fills_namespace_when_key_is_omitted(self):
+        # A genesis with no namespace line at all gets one appended.
+        self.starter.write_text("leader_timeout_ms = 2000\n")
+        init_network_dir(
+            self.out, "testnet-1", self.reth_genesis, self.measurements, self.starter
+        )
+        raw = (self.out / "inputs" / "summit-genesis.toml").read_bytes()
+        self.assertTrue(raw.startswith(self.starter.read_bytes()))
+        self.assertEqual(tomllib.loads(raw.decode())["namespace"], "testnet-1")
+
+    def test_unrewritable_empty_namespace_is_a_gate_error(self):
+        # An empty namespace spelled in a form the line rewrite can't find
+        # (quoted key) fails loudly instead of shipping an empty namespace.
+        self.starter.write_text('"namespace" = ""\nleader_timeout_ms = 2000\n')
+        with self.assertRaisesRegex(GateError, "empty namespace"):
+            init_network_dir(
+                self.out, "t", self.reth_genesis, self.measurements, self.starter
+            )
 
     def test_copies_supplied_genesis_verbatim(self):
+        # A namespace already present is authored intent: no fill, no rewrite.
         src = Path(self.tmp.name) / "custom.toml"
         src.write_text('namespace = "custom"\n# comment\n')
         init_network_dir(
@@ -816,20 +848,34 @@ class InitTests(unittest.TestCase):
         )
 
     def test_refuses_overwrite_unless_forced(self):
-        init_network_dir(self.out, "t", self.reth_genesis, self.measurements)
+        init_network_dir(
+            self.out, "t", self.reth_genesis, self.measurements, self.starter
+        )
         with self.assertRaisesRegex(GateError, "refusing to overwrite"):
-            init_network_dir(self.out, "t", self.reth_genesis, self.measurements)
+            init_network_dir(
+                self.out, "t", self.reth_genesis, self.measurements, self.starter
+            )
         # The re-found/re-author path: --force overwrites the inputs.
         self.reth_genesis.write_text('{"config": {"chainId": 9999}}')
         init_network_dir(
-            self.out, "t", self.reth_genesis, self.measurements, force=True
+            self.out,
+            "t",
+            self.reth_genesis,
+            self.measurements,
+            self.starter,
+            force=True,
         )
         rewritten = (self.out / "inputs" / "reth-genesis.json").read_text()
         self.assertIn("9999", rewritten)
 
     def test_founders_scaffolds_placeholder_credentials(self):
         init_network_dir(
-            self.out, "testnet-1", self.reth_genesis, self.measurements, founders=3
+            self.out,
+            "testnet-1",
+            self.reth_genesis,
+            self.measurements,
+            self.starter,
+            founders=3,
         )
         path = self.out / "inputs" / "founder-withdrawal-credentials.json"
         self.assertEqual(
@@ -842,7 +888,9 @@ class InitTests(unittest.TestCase):
     def test_copies_measurements_verbatim(self):
         # The file assemble promotes is byte-identical to what `make measure`
         # emitted, stamped id included.
-        init_network_dir(self.out, "testnet-1", self.reth_genesis, self.measurements)
+        init_network_dir(
+            self.out, "testnet-1", self.reth_genesis, self.measurements, self.starter
+        )
         self.assertEqual(
             (self.out / "inputs" / "measurements.json").read_bytes(),
             self.measurements.read_bytes(),
@@ -854,7 +902,9 @@ class InitTests(unittest.TestCase):
         # after the cohort has been provisioned and harvested.
         self.measurements.write_text('{"measurements": {"4": {"expected": "ab"}}}')
         with self.assertRaisesRegex(GateError, "no measurement_id"):
-            init_network_dir(self.out, "t", self.reth_genesis, self.measurements)
+            init_network_dir(
+                self.out, "t", self.reth_genesis, self.measurements, self.starter
+            )
 
     def test_accepts_a_promoted_policy(self):
         # A record list is the other valid input: each record names its image.
@@ -870,11 +920,149 @@ class InitTests(unittest.TestCase):
                 ]
             )
         )
-        init_network_dir(self.out, "t", self.reth_genesis, promoted)
+        init_network_dir(self.out, "t", self.reth_genesis, promoted, self.starter)
         self.assertEqual(
             (self.out / "inputs" / "measurements.json").read_bytes(),
             promoted.read_bytes(),
         )
+
+    def test_committed_starter_is_a_valid_input(self):
+        # The starter shipped in this repo — what the docs point
+        # --summit-genesis at — scaffolds cleanly and gets its namespace
+        # filled. Its parity with summit's parameter set is pinned by
+        # drift_test_manifest.SummitStarterDriftTests.
+        committed = (
+            Path(__file__).resolve().parents[4]
+            / "tee/networks/summit-genesis-starter.toml"
+        )
+        init_network_dir(
+            self.out, "testnet-1", self.reth_genesis, self.measurements, committed
+        )
+        summit = tomllib.loads((self.out / "inputs/summit-genesis.toml").read_text())
+        self.assertEqual(summit["namespace"], "testnet-1")
+        self.assertNotIn("eth_genesis_hash", summit)
+        self.assertNotIn("validators", summit)
+
+    def test_missing_input_file_is_a_gate_error(self):
+        with self.assertRaisesRegex(GateError, "not found"):
+            init_network_dir(
+                self.out,
+                "t",
+                Path(self.tmp.name) / "no-such.json",
+                self.measurements,
+                self.starter,
+            )
+
+    def test_rejects_non_json_reth_genesis(self):
+        self.reth_genesis.write_text("<html>not a genesis</html>")
+        with self.assertRaisesRegex(GateError, "not valid JSON"):
+            init_network_dir(
+                self.out, "t", self.reth_genesis, self.measurements, self.starter
+            )
+
+    def test_rejects_non_toml_summit_genesis(self):
+        self.starter.write_text("<html>not a genesis</html>")
+        with self.assertRaisesRegex(GateError, "not valid TOML"):
+            init_network_dir(
+                self.out, "t", self.reth_genesis, self.measurements, self.starter
+            )
+
+
+class _FakeResponse:
+    """The slice of requests.Response that read_input_source touches."""
+
+    def __init__(self, url, content=b"", history=(), status=200):
+        self.url = url
+        self.content = content
+        self.history = list(history)
+        self.status = status
+
+    def raise_for_status(self):
+        if self.status >= 400:
+            raise manifest_mod.requests.HTTPError(f"{self.status} for {self.url}")
+
+
+class InitUrlInputTests(unittest.TestCase):
+    """init inputs given as https:// URLs (fetches mocked; no network)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.out = Path(self.tmp.name) / "networks" / "testnet-1"
+        self.bodies = {
+            "https://example.test/dev.json": b'{"config": {"chainId": 5124}}',
+            "https://example.test/measurements.json": (
+                b'{"measurement_id": "img.vhd", "measurements": {}}'
+            ),
+            "https://example.test/starter.toml": b"leader_timeout_ms = 2000\n",
+        }
+
+    def _get(self, url, timeout=None):
+        self.assertIsNotNone(timeout)  # never an unbounded fetch
+        return _FakeResponse(url, content=self.bodies[url])
+
+    def test_fetches_all_three_inputs(self):
+        with mock.patch.object(manifest_mod.requests, "get", side_effect=self._get):
+            init_network_dir(
+                self.out,
+                "testnet-1",
+                "https://example.test/dev.json",
+                "https://example.test/measurements.json",
+                "https://example.test/starter.toml",
+            )
+        inputs = self.out / "inputs"
+        self.assertEqual(
+            (inputs / "reth-genesis.json").read_bytes(),
+            self.bodies["https://example.test/dev.json"],
+        )
+        self.assertEqual(
+            (inputs / "measurements.json").read_bytes(),
+            self.bodies["https://example.test/measurements.json"],
+        )
+        summit = tomllib.loads((inputs / "summit-genesis.toml").read_text())
+        self.assertEqual(summit["namespace"], "testnet-1")
+
+    def test_rejects_http_url(self):
+        with self.assertRaisesRegex(GateError, "https"):
+            manifest_mod.read_input_source("http://example.test/dev.json")
+
+    def test_http_error_is_a_gate_error(self):
+        resp = _FakeResponse("https://example.test/gone.json", status=404)
+        with mock.patch.object(manifest_mod.requests, "get", return_value=resp):
+            with self.assertRaisesRegex(GateError, "failed to fetch"):
+                manifest_mod.read_input_source("https://example.test/gone.json")
+
+    def test_connection_error_is_a_gate_error(self):
+        err = manifest_mod.requests.ConnectionError("refused")
+        with mock.patch.object(manifest_mod.requests, "get", side_effect=err):
+            with self.assertRaisesRegex(GateError, "failed to fetch"):
+                manifest_mod.read_input_source("https://example.test/dev.json")
+
+    def test_rejects_redirect_off_https(self):
+        # requests follows an https -> http redirect; every hop must be https.
+        final = _FakeResponse(
+            "http://example.test/dev.json",
+            content=b"{}",
+            history=[_FakeResponse("https://example.test/dev.json", status=302)],
+        )
+        with mock.patch.object(manifest_mod.requests, "get", return_value=final):
+            with self.assertRaisesRegex(GateError, "non-https"):
+                manifest_mod.read_input_source("https://example.test/dev.json")
+
+    def test_html_page_error_hints_at_raw_url(self):
+        # The classic mistake: a GitHub blob page URL fetches HTML, not the
+        # file. The parse gate catches it and points at the raw URL.
+        url = "https://github.com/SeismicSystems/deploy/blob/main/dev.json"
+        self.bodies[url] = b"<html>blob page</html>"
+        with mock.patch.object(manifest_mod.requests, "get", side_effect=self._get):
+            with self.assertRaisesRegex(GateError, "raw.githubusercontent.com"):
+                init_network_dir(
+                    self.out,
+                    "t",
+                    url,
+                    "https://example.test/measurements.json",
+                    "https://example.test/starter.toml",
+                )
 
 
 class FoundingSetTests(unittest.TestCase):
@@ -1090,10 +1278,40 @@ class DirCliTests(unittest.TestCase):
                 "g.json",
                 "--measurements",
                 "m.json",
+                "--summit-genesis",
+                "s.toml",
             ]
         )
         self.assertEqual(args.dir, self.NET)
         self.assertEqual(args.name, "testnet-1")
+
+    def test_init_requires_summit_genesis(self):
+        with self.assertRaises(SystemExit):
+            manifest_mod._parse_init_args(
+                [
+                    "networks/testnet-1",
+                    "--reth-genesis",
+                    "g.json",
+                    "--measurements",
+                    "m.json",
+                ]
+            )
+
+    def test_init_keeps_url_inputs_verbatim(self):
+        # Inputs stay strings: Path() would collapse a URL's "//".
+        url = "https://raw.githubusercontent.com/SeismicSystems/x/main/dev.json"
+        args = manifest_mod._parse_init_args(
+            [
+                "networks/testnet-1",
+                "--reth-genesis",
+                url,
+                "--measurements",
+                "m.json",
+                "--summit-genesis",
+                "s.toml",
+            ]
+        )
+        self.assertEqual(args.reth_genesis, url)
 
     def test_validate_dir_resolution(self):
         net = Path("networks/t").resolve()
