@@ -19,10 +19,11 @@ root-key handshake and its admission policy), never by this check.
 Appraisal, not delivery: the node serves the evidence RPC for as long as it
 runs and every run mints a fresh nonce, so this is re-runnable at any time —
 after a reboot, after an image upgrade, on suspicion, or as a retry when DCAP
-collateral was briefly unreachable. `configure` runs the same step inline once
-the node it just configured reaches a ready state; delivery itself is once per
-boot (tdx-init accepts one config POST), which is why the check has its own
-command.
+collateral was briefly unreachable. Both configure commands run the same step
+inline once a node they configured reaches a ready state — the operator's
+`seismic-tee-node configure`, and `seismic-tee-network configure` per cohort
+node; delivery itself is once per boot (tdx-init accepts one config POST),
+which is why the check has its own command.
 
 The policy the quote is appraised against is a network artifact: the
 `measurement-policy-bootstrap.json` `assemble` wrote beside the manifest, the
@@ -103,9 +104,15 @@ def add_policy_source_args(parser: argparse.ArgumentParser) -> None:
 
 
 def check_policy_source_files(args: argparse.Namespace) -> None:
-    """Reject an unreadable `--measurements` at parse time, like every other
-    file flag. `--policy` is checked by `resolve_policy_path`, which also owns
-    the default-location hint."""
+    """Reject a contradictory or unreadable policy source at parse time, like
+    every other file flag. `--policy` is checked by `resolve_policy_path`,
+    which also owns the default-location hint. The `--no-verify` clause only
+    applies to the commands that offer that flag."""
+    if getattr(args, "no_verify", False) and (args.policy or args.measurements):
+        raise SystemExit(
+            "--no-verify skips verification, so it contradicts --policy / "
+            "--measurements (which choose what to verify against). Drop one."
+        )
     if args.measurements is not None and not args.measurements.is_file():
         raise SystemExit(f"--measurements file not found: {args.measurements}")
 
@@ -153,7 +160,7 @@ def resolve_policy_path(
         "  --measurements FILE  promote your own measurements into a policy",
     ]
     if offer_no_verify:
-        escapes.append("  --no-verify          configure without appraising the node")
+        escapes.append("  --no-verify          configure without appraising")
     raise SystemExit(
         f"measurement policy not found: {path}\n"
         f"The default is {manifest_mod.POLICY_FILENAME} beside --manifest "
@@ -233,6 +240,63 @@ def prepare_policy(args: argparse.Namespace, *, offer_no_verify: bool = False) -
     return resolve_policy(args, offer_no_verify=offer_no_verify)
 
 
+def prepare_policy_optional(args: argparse.Namespace, *, subject: str) -> bytes | None:
+    """`prepare_policy` for a command that verifies unless told not to: under
+    `--no-verify`, warn loudly and return None instead. `subject` names what
+    goes unappraised ("this node", "this cohort's nodes")."""
+    if args.no_verify:
+        logger.warning(
+            "--no-verify: %s will not be appraised. Run `seismic-tee-node "
+            "verify` before relying on an unappraised node.",
+            subject,
+        )
+        return None
+    return prepare_policy(args, offer_no_verify=True)
+
+
+def challenge_node(
+    args: argparse.Namespace, policy_bytes: bytes, *, public_ip: str
+) -> dict:
+    """Challenge one node's attestation service and return the verifier's
+    report. Raises `GateError` when the node does not pass.
+
+    The one place a `--policy`/`--measurements`/`--verify-quote-bin` argument
+    set becomes a challenge, so every caller — the standalone command, the
+    per-node `configure`, the founding cohort — appraises a node the same way.
+    """
+    return shell_outs.verify_node_deployment(
+        f"http://{public_ip}:{ENCLAVE_PORT}",
+        manifest_path=args.manifest,
+        policy_bytes=policy_bytes,
+        verify_quote_bin=args.verify_quote_bin,
+        pccs_url=args.pccs_url,
+        override_azure_outdated_tcb=args.override_azure_outdated_tcb,
+    )
+
+
+def retry_flags(args: argparse.Namespace) -> str:
+    """The flags to repeat in a suggested `verify` command, so the retry runs
+    the same appraisal this run chose: the policy source, plus any non-default
+    verifier tooling (a retry pointed at the default PCCS or verifier fails
+    for reasons unrelated to the node). Empty when everything was default."""
+    flags = ""
+    if args.measurements is not None:
+        flags += f" --measurements {args.measurements}"
+        if args.admission_bin != shell_outs.DEFAULT_ADMISSION_BIN:
+            flags += f" --admission-bin {args.admission_bin}"
+        if args.attestation_type != shell_outs.DEFAULT_ATTESTATION_TYPE:
+            flags += f" --attestation-type {args.attestation_type}"
+    elif args.policy is not None:
+        flags += f" --policy {args.policy}"
+    if args.verify_quote_bin != shell_outs.DEFAULT_VERIFY_QUOTE_BIN:
+        flags += f" --verify-quote-bin {args.verify_quote_bin}"
+    if args.pccs_url is not None:
+        flags += f" --pccs-url {args.pccs_url}"
+    if args.override_azure_outdated_tcb:
+        flags += " --override-azure-outdated-tcb"
+    return flags
+
+
 def verify_deployment(
     args: argparse.Namespace, policy_bytes: bytes, *, fqdn: str, public_ip: str
 ) -> None:
@@ -243,14 +307,7 @@ def verify_deployment(
     """
     logger.info(f"Deploy-verifying {fqdn} ({public_ip})...")
     try:
-        report = shell_outs.verify_node_deployment(
-            f"http://{public_ip}:{ENCLAVE_PORT}",
-            manifest_path=args.manifest,
-            policy_bytes=policy_bytes,
-            verify_quote_bin=args.verify_quote_bin,
-            pccs_url=args.pccs_url,
-            override_azure_outdated_tcb=args.override_azure_outdated_tcb,
-        )
+        report = challenge_node(args, policy_bytes, public_ip=public_ip)
     except manifest_mod.GateError as e:
         raise SystemExit(
             f"{fqdn} ({public_ip}): deploy verification FAILED:\n{e}\n"

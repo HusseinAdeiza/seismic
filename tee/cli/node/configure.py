@@ -414,11 +414,6 @@ def parse_args() -> argparse.Namespace:
         raise SystemExit(f"--node descriptor not found: {args.node}")
     if not args.manifest.is_file():
         raise SystemExit(f"--manifest file not found: {args.manifest}")
-    if args.no_verify and (args.policy or args.measurements):
-        raise SystemExit(
-            "--no-verify skips verification, so it contradicts --policy / "
-            "--measurements (which choose what to verify against). Drop one."
-        )
     verify_mod.check_policy_source_files(args)
     return args
 
@@ -431,15 +426,7 @@ def main() -> None:
     # a missing verifier, a policy the manifest doesn't commit to, or a
     # rejected measurements file must fail while the fix still costs nothing,
     # not after the config POST landed.
-    if args.no_verify:
-        logger.warning(
-            "--no-verify: this node will be configured without being "
-            "appraised. Run `seismic-tee-node verify` against it before "
-            "relying on it."
-        )
-        policy_bytes = None
-    else:
-        policy_bytes = verify_mod.prepare_policy(args, offer_no_verify=True)
+    policy_bytes = verify_mod.prepare_policy_optional(args, subject="this node")
     reth_genesis = resolve_reth_genesis(args.reth_genesis, args.manifest)
     summit_genesis = resolve_summit_genesis(args.summit_genesis, args.manifest)
     ready = deliver_config(
@@ -464,24 +451,13 @@ def main() -> None:
         raise SystemExit(
             "deploy verification skipped: the node was not confirmed ready. "
             f"Once it is up, run:\n    seismic-tee-node verify --node "
-            f"{args.node} --manifest {args.manifest}{_policy_source_flags(args)}"
+            f"{args.node} --manifest {args.manifest}{verify_mod.retry_flags(args)}"
         )
     descriptor = load_descriptor(args.node)
     fqdn = require(descriptor, "fqdn", args.node)
     public_ip = require(descriptor, "public_ip", args.node)
     verify_mod.verify_deployment(args, policy_bytes, fqdn=fqdn, public_ip=public_ip)
     _print_summary(fqdn, public_ip)
-
-
-def _policy_source_flags(args: argparse.Namespace) -> str:
-    """The policy-source flags to repeat in a suggested `verify` command, so
-    the retry appraises against the same policy this run chose. Empty when the
-    default artifact was used — `verify` finds it the same way."""
-    if args.measurements is not None:
-        return f" --measurements {args.measurements}"
-    if args.policy is not None:
-        return f" --policy {args.policy}"
-    return ""
 
 
 def _print_summary(fqdn: str, public_ip: str) -> None:

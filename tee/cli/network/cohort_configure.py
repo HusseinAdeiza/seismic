@@ -25,6 +25,21 @@ fetch peers from its POSTed bootnodes (`http://<host>:7878`, the node's own
 entry dropped), so stage-2 joiners fetch `root_key` from genesis, and there is
 no second peer list that could skew from the bootnode set.
 
+Every node is deploy-verified as soon as it reaches a ready state — the
+`seismic-tee-node verify` check, run inside the same parallel executor so a
+fast box is appraised while a slow one still wipes its disk (see verify.py for
+what the check proves and which policy it appraises against). The founder is a
+relying party the moment stage 2 hands genesis's enode to the joiners, so the
+genesis gate lands before that: a genesis node that does not pass stops the
+founding rather than pointing the cohort at an unappraised box. The verdict is
+the node's result: a node that fails its appraisal counts as failed, its enode
+never enters `nodes/bootnodes.json`, and the launch assertions never run.
+
+The founding harvest DCAP-verifies each box too, but that quote is
+pre-manifest: it proves the box was measured-correct when it minted its summit
+keys. This gate is the post-manifest half — the box booted the manifest that
+was delivered to it.
+
 The summit genesis is delivered with current IPs spliced in: the committed
 summit-genesis.toml is a founding-era snapshot whose `[[validators]].ip_address`
 entries are network topology, not identity — excluded from the manifest's
@@ -62,6 +77,7 @@ from tee.cli.common.descriptor import load_descriptor, require
 from tee.cli.common.logging_setup import setup_logging
 from tee.cli.network import bootnodes as bootnodes_mod
 from tee.cli.network import launch_assertions
+from tee.cli.node import verify as verify_mod
 from tee.cli.node.configure import (
     TDX_INIT_PORT,
     build_config,
@@ -89,6 +105,19 @@ class Node:
     fqdn: str
     genesis: bool
     bootnodes: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class Appraisal:
+    """The deploy-verification inputs shared by the whole cohort: the parsed
+    flags `verify` reads (manifest, verifier binary, PCCS) and the measurement
+    policy resolved once up front. Resolving the tooling and promoting the
+    policy is per-run work, not per-node, and it must fail before any node is
+    touched — config delivery is once per boot.
+    """
+
+    args: argparse.Namespace
+    policy_bytes: bytes
 
 
 def _load_node(descriptor_path: Path, *, genesis: bool) -> Node:
@@ -252,21 +281,66 @@ def splice_validator_ips(
     return spliced.encode("utf-8")
 
 
+# A whole cohort's wipes tend to finish together, so every challenge hits the
+# PCCS at once — and a DCAP collateral fetch is the one transient way a
+# challenge fails (verify.py names it as the expected retry case). Retry a few
+# times before the verdict is terminal: a founding that a blip fails is
+# expensive to recover (config delivery is once per boot), while a real
+# measurement mismatch just fails every attempt.
+APPRAISAL_ATTEMPTS = 3
+APPRAISAL_RETRY_SECONDS = 15
+
+
+def _appraise(
+    node: Node, appraisal: Appraisal, states: dict[str, str], stop: threading.Event
+) -> bool:
+    """Deploy-verify one ready node, recording the verdict as its status line.
+
+    The verdict is the node's result, not a warning beside it: an unappraised
+    box must not be handed to the joiners as a bootnode, written into the
+    founding `bootnodes.json`, or counted as a founded node.
+    """
+    attempt = 1
+    while True:
+        states[node.name] = "deploy-verifying…"
+        try:
+            verify_mod.challenge_node(
+                appraisal.args, appraisal.policy_bytes, public_ip=node.public_ip
+            )
+        except manifest_mod.GateError as e:
+            if attempt == APPRAISAL_ATTEMPTS or stop.is_set():
+                states[node.name] = f"ERROR: deploy verification FAILED: {e}"
+                return False
+            states[node.name] = (
+                f"appraisal attempt {attempt}/{APPRAISAL_ATTEMPTS} failed, "
+                f"retrying in {APPRAISAL_RETRY_SECONDS}s…"
+            )
+            if stop.wait(APPRAISAL_RETRY_SECONDS):
+                states[node.name] = "stopped before the appraisal retry"
+                return False
+            attempt += 1
+            continue
+        states[node.name] = "ready, deploy-verified ✓"
+        return True
+
+
 def _configure_node(
     node: Node,
     manifest_path: Path,
     reth_genesis_path: Path,
     summit_genesis_path: Path,
     email: str,
+    appraisal: Appraisal | None,
     states: dict[str, str],
     stop: threading.Event,
 ) -> bool:
-    """Build + POST one node's config, then poll its LUKS wipe, writing the
-    latest status line into `states[node.name]` for the dashboard. Returns
-    whether the node reached a ready state. Never raises — a failure is
-    recorded in `states` and reflected in the return, so one bad node doesn't
-    abort the rest of the cohort. `stop` (set on ctrl-C) ends the wipe watch
-    early so the worker joins promptly.
+    """Build + POST one node's config, poll its LUKS wipe, then deploy-verify
+    it, writing the latest status line into `states[node.name]` for the
+    dashboard. Returns whether the node reached a ready state and passed its
+    appraisal (`appraisal=None` under --no-verify: ready is the whole bar).
+    Never raises — a failure is recorded in `states` and reflected in the
+    return, so one bad node doesn't abort the rest of the cohort. `stop` (set
+    on ctrl-C) ends the wipe watch early so the worker joins promptly.
     """
     try:
         states[node.name] = "building config…"
@@ -284,8 +358,18 @@ def _configure_node(
         post_config_to_tdx_init(node.public_ip, config)
         for update in poll_provisioning(node.public_ip, stop=stop):
             states[node.name] = update.line
-            if update.done:
-                return update.ok
+            if not update.done:
+                continue
+            if not update.ok:
+                return False
+            if appraisal is None:  # --no-verify: ready is the whole bar
+                return True
+            if stop.is_set():
+                # Ctrl-C: don't start a challenge the run is about to abandon.
+                # The node is configured, and `verify` appraises it later.
+                states[node.name] = "stopped before the appraisal"
+                return False
+            return _appraise(node, appraisal, states, stop)
         return False  # stopped early, or defensive against a silent generator end
     except Exception as e:  # noqa: BLE001 — surface per node, keep the cohort going
         states[node.name] = f"ERROR: {e}"
@@ -298,10 +382,12 @@ def _run_cohort(
     reth_genesis_path: Path,
     summit_genesis_path: Path,
     email: str,
+    appraisal: Appraisal | None,
 ) -> dict[str, bool]:
-    """Configure every node concurrently, refreshing the dashboard until all
-    workers finish. Returns {node name: ok}. Threads suit this — the work is
-    blocking HTTP (POST + status polling), and N is small.
+    """Configure and appraise every node concurrently, refreshing the dashboard
+    until all workers finish. Returns {node name: ok}. Threads suit this — the
+    work is blocking HTTP (POST + status polling) and a blocking verifier
+    subprocess, and N is small.
     """
     # The shared primitives log at INFO; that would corrupt the in-place
     # dashboard, and the per-node status lines convey the same progress. Quiet
@@ -323,6 +409,7 @@ def _run_cohort(
                 reth_genesis_path,
                 summit_genesis_path,
                 email,
+                appraisal,
                 states,
                 stop,
             )
@@ -334,17 +421,28 @@ def _run_cohort(
         except KeyboardInterrupt:
             # Must set `stop` before the pool's context exit joins the workers
             # — otherwise a wipe watch blocks that join for up to 1h+. With it,
-            # workers exit within a poll interval (a worker still inside the
-            # POST's listener wait is bounded at ~3min). The POSTs that landed
-            # keep provisioning server-side either way.
+            # workers exit within a poll interval; the bounded waits a worker
+            # can already be inside (the POST's listener wait, a verifier
+            # fetching DCAP collateral) hold the join for a few minutes at
+            # most. The POSTs that landed keep provisioning server-side either
+            # way.
             stop.set()
             print("\nStopped watching — configured nodes keep provisioning.")
             raise SystemExit(130) from None
         dashboard.render(states)  # final paint of terminal states
-    return {name: f.result() for name, f in futures.items()}
+    results = {name: f.result() for name, f in futures.items()}
+    # The dashboard folds and truncates a status to one terminal row, but a
+    # failure's reason (often a verifier's multi-line stderr) is the one thing
+    # the run must not swallow — print each failed node's full text.
+    for node in nodes:
+        if not results[node.name]:
+            print(f"\n{node.name}: {states[node.name]}")
+    return results
 
 
-def _report(nodes: list[Node], results: dict[str, bool]) -> None:
+def _report(
+    nodes: list[Node], results: dict[str, bool], args: argparse.Namespace
+) -> None:
     print("\n" + "=" * 80)
     print("COHORT CONFIGURED")
     print("=" * 80)
@@ -356,12 +454,25 @@ def _report(nodes: list[Node], results: dict[str, bool]) -> None:
 
     genesis_failed = any(n.genesis and not results.get(n.name, False) for n in nodes)
     if genesis_failed:
+        # The bool result covers both halves of the bar (came up, passed its
+        # appraisal); the failed node's full status was printed above.
         print(
-            "Genesis node did not come up — joiners cannot fetch root_key until "
-            "it does; they will keep retrying. Fix genesis first."
+            "The genesis node failed — joiners depend on it for root_key and "
+            "as their bootnode. Fix genesis first."
         )
     failed = [n.name for n in nodes if not results.get(n.name, False)]
     if failed:
+        if not args.no_verify:
+            # tdx-init takes one config POST per boot, so a node that took its
+            # config and then failed its appraisal is re-appraised, not
+            # re-configured. Its full verifier reason was printed above.
+            print(
+                "A node that took its config but did not pass the appraisal is "
+                "retried with `verify`, not with a second `configure` "
+                "(tdx-init takes one config POST per boot):\n"
+                "    seismic-tee-node verify --node <descriptor> --manifest "
+                f"{args.manifest}{verify_mod.retry_flags(args)}\n"
+            )
         raise SystemExit(
             f"{len(failed)}/{len(nodes)} node(s) failed: {', '.join(failed)}"
         )
@@ -373,25 +484,36 @@ def _bootstrap_greenfield(
     reth_genesis_path: Path,
     summit_genesis_path: Path,
     email: str,
+    appraisal: Appraisal | None,
 ) -> dict[str, bool]:
     """Two-stage greenfield bootstrap: genesis first (so its enode exists),
     then the joiners pointed at it. Returns {node name: ok} across both stages.
 
     A node's reth enode isn't knowable until reth is up, so the joiners can't
-    be handed `bootnodes` until the genesis node reports one. If the genesis
-    node fails stage 1, the joiners aren't configured (they'd have neither a
-    root_key source nor a bootnode); the missing results read as failures in
-    `_report`.
+    be handed `bootnodes` until the genesis node reports one. Stage 1 therefore
+    ends with the genesis node ready *and* appraised, which is the gate the
+    stage boundary exists for: its enode is what every joiner dials and what
+    `nodes/bootnodes.json` records. If genesis fails either half, the joiners
+    aren't configured (they'd have neither a root_key source nor a bootnode);
+    the missing results read as failures in `_report`.
     """
     genesis, joiners = nodes[0], nodes[1:]
 
     print("Stage 1/2: configuring the genesis node (no bootnodes yet)...")
     genesis.bootnodes = []
     results = _run_cohort(
-        [genesis], manifest_path, reth_genesis_path, summit_genesis_path, email
+        [genesis],
+        manifest_path,
+        reth_genesis_path,
+        summit_genesis_path,
+        email,
+        appraisal,
     )
     if not results.get(genesis.name):
-        print("Genesis node failed in stage 1 — skipping joiner bootstrap.")
+        print(
+            "Genesis node failed in stage 1 — skipping joiner bootstrap: its "
+            "enode is what every joiner would dial."
+        )
         return results
 
     if not joiners:
@@ -408,7 +530,12 @@ def _bootstrap_greenfield(
         joiner.bootnodes = [genesis_enode]
     results.update(
         _run_cohort(
-            joiners, manifest_path, reth_genesis_path, summit_genesis_path, email
+            joiners,
+            manifest_path,
+            reth_genesis_path,
+            summit_genesis_path,
+            email,
+            appraisal,
         )
     )
     return results
@@ -419,10 +546,10 @@ def _persist_founding_bootnodes(
 ) -> None:
     """Collect every node's enode and write the founding set to `bootnodes.json`.
 
-    Only writes when the whole cohort is ready — a partial founding set would
-    silently drop a node from every later re-configure. If any node failed
-    (its enode can't be fetched anyway), skip the write and warn; `_report`
-    surfaces the failure.
+    Only writes when every node came up ready and appraised — a partial
+    founding set would silently drop a node from every later re-configure, and
+    an unappraised box must not be recorded as one the cohort dials. If any
+    node failed, skip the write and warn; `_report` surfaces the failure.
 
     Best-effort: config delivery has already succeeded by the time this runs,
     and `bootnodes.json` is only a refresh for later runs, so a failure to
@@ -431,14 +558,14 @@ def _persist_founding_bootnodes(
     rather than aborting before the caller's cohort report prints. The next
     configure run re-establishes the set.
     """
-    not_ready = [n.name for n in nodes if not results.get(n.name)]
-    if not_ready:
+    failed = [n.name for n in nodes if not results.get(n.name)]
+    if failed:
         logger.warning(
-            "not writing %s — %d/%d node(s) not ready: %s",
+            "not writing %s — %d/%d node(s) failed: %s",
             bootnodes_mod.BOOTNODES_FILENAME,
-            len(not_ready),
+            len(failed),
             len(nodes),
-            ", ".join(not_ready),
+            ", ".join(failed),
         )
         return
 
@@ -526,10 +653,24 @@ def parse_args() -> argparse.Namespace:
             "(default: ops@seismic.systems)."
         ),
     )
+    parser.add_argument(
+        "--no-verify",
+        action="store_true",
+        help=(
+            "Found the cohort without deploy-verifying it. By default each "
+            "node is appraised once it is up — the same check as "
+            "`seismic-tee-node verify`, against the policy --manifest pins — "
+            "and a node that fails counts as failed."
+        ),
+    )
+    verify_mod.add_policy_source_args(parser)
+    verify_mod.add_tooling_args(parser)
+
     args = parser.parse_args()
     for path in [args.genesis, *args.join, args.manifest]:
         if not path.is_file():
             raise SystemExit(f"file not found: {path}")
+    verify_mod.check_policy_source_files(args)
     return args
 
 
@@ -554,6 +695,15 @@ def main() -> None:
         manifest_mod.validate_summit_genesis_matches(manifest, committed_genesis_bytes)
     except manifest_mod.GateError as e:
         raise SystemExit(f"--summit-genesis {summit_genesis}: {e}") from None
+
+    # Resolve the verifier and promote the policy once for the whole cohort,
+    # before any node is touched: a missing verify-quote, a policy the manifest
+    # doesn't commit to, or a rejected measurements file must fail while the
+    # fix still costs nothing — config delivery is once per boot.
+    policy_bytes = verify_mod.prepare_policy_optional(
+        args, subject="this cohort's nodes"
+    )
+    appraisal = None if policy_bytes is None else Appraisal(args, policy_bytes)
 
     # The founding inputs live beside the manifest (the network-directory
     # layout): the harvest supplies each box's pinned keys, the descriptors
@@ -597,6 +747,7 @@ def main() -> None:
         # Re-configure: hand the full founding set to every node (a node
         # listing its own enode is harmless) and configure in one parallel
         # pass — no genesis-first staging, since the enodes are already known.
+        # Each node is still appraised the moment it is ready.
         founding = bootnodes_mod.load_bootnodes(bootnodes_path)
         enodes = [b.enode for b in founding]
         print(
@@ -606,16 +757,16 @@ def main() -> None:
         for node in nodes:
             node.bootnodes = enodes
         results = _run_cohort(
-            nodes, args.manifest, reth_genesis, summit_genesis, args.email
+            nodes, args.manifest, reth_genesis, summit_genesis, args.email, appraisal
         )
     else:
         results = _bootstrap_greenfield(
-            nodes, args.manifest, reth_genesis, summit_genesis, args.email
+            nodes, args.manifest, reth_genesis, summit_genesis, args.email, appraisal
         )
 
     # Refresh the founding set from every node's live enode (fresh each run).
     _persist_founding_bootnodes(nodes, results, bootnodes_path)
-    _report(nodes, results)
+    _report(nodes, results, args)
 
     # Every node accepted its config — now assert the launch against what the
     # manifest pins (see launch_assertions.py for why both are load-bearing).

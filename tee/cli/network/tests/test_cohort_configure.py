@@ -1,26 +1,30 @@
 """Tests for tee.cohort_configure role/bootnode assignment (stdlib unittest).
 
 Covers only the pure logic worth pinning — how the cohort is assembled from
-descriptors (exactly one genesis) and how the two-stage greenfield flow
-assigns bootnodes. The parallel driver + dashboard are verified by hand
-against live nodes.
+descriptors (exactly one genesis), how the two-stage greenfield flow assigns
+bootnodes, and the per-node deploy-verification gate. The parallel driver +
+dashboard are verified by hand against live nodes.
 
 Run with:
     uv run python -m unittest discover -s tee/tests -v
 """
 
+import argparse
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
 
+from tee.cli.common.errors import GateError
 from tee.cli.network import cohort_configure
 from tee.cli.network.cohort_configure import (
     build_cohort,
     load_founding_facts,
     splice_validator_ips,
 )
+from tee.cli.node.status import ProvisioningUpdate
 
 # enode hosts chosen to match the descriptor public_ips below, so the
 # public_ip sanity check stays quiet in these tests.
@@ -104,7 +108,7 @@ class GreenfieldBootstrapTests(unittest.TestCase):
             ),
         ):
             results = cohort_configure._bootstrap_greenfield(
-                nodes, Path("m.json"), Path("g.json"), Path("s.toml"), "e@x"
+                nodes, Path("m.json"), Path("g.json"), Path("s.toml"), "e@x", None
             )
 
         self.assertEqual(results, {"node-1": True, "node-2": True})
@@ -126,11 +130,89 @@ class GreenfieldBootstrapTests(unittest.TestCase):
             ) as collect,
         ):
             results = cohort_configure._bootstrap_greenfield(
-                nodes, Path("m.json"), Path("g.json"), Path("s.toml"), "e@x"
+                nodes, Path("m.json"), Path("g.json"), Path("s.toml"), "e@x", None
             )
 
         collect.assert_not_called()  # never reached the enode fetch
         self.assertEqual(results, {"node-1": False})
+
+
+class AppraisalGateTests(unittest.TestCase):
+    """Every node is deploy-verified once it is ready, and the verdict is the
+    node's result — an unappraised box is not a founded one."""
+
+    def setUp(self):
+        self.node = cohort_configure.Node(
+            name="node-1", public_ip="1.1.1.1", fqdn="n1.example.com", genesis=True
+        )
+        self.states: dict[str, str] = {}
+        self.appraisal = cohort_configure.Appraisal(
+            argparse.Namespace(manifest=Path("m.json")), b"policy bytes"
+        )
+
+    def _configure(self, appraisal):
+        """Run one worker with the delivery mocked out, so only the gate runs.
+        The node reaches a ready state (`poll_provisioning`'s terminal ok)."""
+        ready = ProvisioningUpdate(
+            "done", "disk provisioning complete.", done=True, ok=True
+        )
+        with (
+            mock.patch.object(cohort_configure, "build_config", return_value=Path("c")),
+            mock.patch.object(cohort_configure, "post_config_to_tdx_init"),
+            mock.patch.object(
+                cohort_configure, "poll_provisioning", return_value=iter([ready])
+            ),
+        ):
+            return cohort_configure._configure_node(
+                self.node,
+                Path("m.json"),
+                Path("g.json"),
+                Path("s.toml"),
+                "e@x",
+                appraisal,
+                self.states,
+                threading.Event(),
+            )
+
+    def test_ready_node_is_challenged_and_passes(self):
+        with mock.patch.object(
+            cohort_configure.verify_mod, "challenge_node"
+        ) as challenge:
+            self.assertTrue(self._configure(self.appraisal))
+        challenge.assert_called_once()
+        self.assertIn("deploy-verified", self.states["node-1"])
+
+    def test_failed_appraisal_fails_the_node_after_retries(self):
+        with (
+            mock.patch.object(cohort_configure, "APPRAISAL_RETRY_SECONDS", 0),
+            mock.patch.object(
+                cohort_configure.verify_mod,
+                "challenge_node",
+                side_effect=GateError("measurement mismatch"),
+            ) as challenge,
+        ):
+            self.assertFalse(self._configure(self.appraisal))
+        self.assertEqual(challenge.call_count, cohort_configure.APPRAISAL_ATTEMPTS)
+        self.assertIn("measurement mismatch", self.states["node-1"])
+
+    def test_transient_failure_is_retried(self):
+        with (
+            mock.patch.object(cohort_configure, "APPRAISAL_RETRY_SECONDS", 0),
+            mock.patch.object(
+                cohort_configure.verify_mod,
+                "challenge_node",
+                side_effect=[GateError("collateral fetch timed out"), None],
+            ),
+        ):
+            self.assertTrue(self._configure(self.appraisal))
+        self.assertIn("deploy-verified", self.states["node-1"])
+
+    def test_no_verify_leaves_the_node_unchallenged(self):
+        with mock.patch.object(
+            cohort_configure.verify_mod, "challenge_node"
+        ) as challenge:
+            self.assertTrue(self._configure(None))
+        challenge.assert_not_called()
 
 
 class PersistFoundingBootnodesTests(unittest.TestCase):
