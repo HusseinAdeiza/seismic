@@ -158,6 +158,14 @@ NODES_DIRNAME = "nodes"
 FOUNDERS_FILENAME = "founder-withdrawal-credentials.json"
 HARVEST_DIRNAME = "harvest"
 
+# Beside each harvest record, the DCAP collateral that record's verification
+# consumed (harvest/dcap-collateral/<node>.json). Intel's TCB Info, QE
+# Identity and both CRLs carry nextUpdate on a roughly 30-day cadence, so an
+# archived quote stays re-verifiable only against the bundle that was current
+# when it was collected. A subdirectory, so load_harvest_records' glob over
+# harvest/*.json never sees it.
+COLLATERAL_DIRNAME = "dcap-collateral"
+
 
 def render_manifest(manifest: dict[str, Any]) -> bytes:
     """Deterministically render manifest bytes (the sole emitter).
@@ -503,17 +511,25 @@ def load_founding_set(network_dir: Path) -> FoundingSet:
 def verify_harvest_records(
     records: dict[str, dict[str, Any]],
     policy_bytes: bytes,
+    collateral_dir: Path,
     verify_quote_bin: str = DEFAULT_VERIFY_QUOTE_BIN,
-    pccs_url: str | None = None,
-    verify_fn: Callable[[str, dict[str, Any], Path], dict[str, Any]] | None = None,
+    verify_fn: Callable[[str, dict[str, Any], Path, Path], dict[str, Any]]
+    | None = None,
 ) -> None:
-    """Re-verify every archived founding record against the compiled policy.
+    """Re-verify every archived founding record against the compiled policy,
+    offline, at the instant its own collateral snapshot was held to.
 
     The harvest verified these records when it collected them, but assemble
     is the step that pins the validator set into network_id — so it hands
     each archived record back to the verifier rather than trusting an
     earlier run's verdict (the records are plain files that may have been
     copied, committed, and edited between harvest and assemble).
+
+    Each record is checked against the snapshot archived beside it, so this
+    gate behaves the same on the founding day and four hundred days later. A
+    record with no snapshot fails: Intel's live collateral would answer for
+    it today and stop answering in about a month, which would make assemble's
+    verdict depend on when it ran.
     """
     if verify_fn is None and shutil.which(verify_quote_bin) is None:
         # Tooling, not evidence: a missing verifier fails here, before the
@@ -526,16 +542,25 @@ def verify_harvest_records(
         policy_file.flush()
         policy_path = Path(policy_file.name)
         run_verify = verify_fn or (
-            lambda _name, record, path: verify_harvest_record(
+            lambda _name, record, path, collateral: verify_harvest_record(
                 record,
                 policy_path=path,
                 verify_quote_bin=verify_quote_bin,
-                pccs_url=pccs_url,
+                collateral=collateral,
             )
         )
         for name in sorted(records):
+            collateral_path = collateral_dir / f"{name}.json"
+            if not collateral_path.is_file():
+                raise GateError(
+                    f"{name}: no DCAP collateral archived at "
+                    f"{collateral_path} — the founding quote can only be "
+                    "re-verified against the collateral its own harvest "
+                    "used, so this cohort has to be re-harvested (or "
+                    "re-founded) rather than assembled around"
+                )
             try:
-                run_verify(name, records[name], policy_path)
+                run_verify(name, records[name], policy_path, collateral_path)
             except GateError as e:
                 raise GateError(
                     f"{name}: {e}\nA founding key whose archived quote does "
@@ -1414,12 +1439,6 @@ def _parse_assemble_args(argv: list[str] | None = None) -> argparse.Namespace:
         "used to re-verify the archived harvest quotes before the founding "
         "set is pinned",
     )
-    parser.add_argument(
-        "--pccs-url",
-        default=None,
-        metavar="URL",
-        help="forwarded to verify-quote: PCCS URL for DCAP collateral",
-    )
     _add_reth_bin(parser)
     _add_admission_bin(parser)
     _add_summit_bin(parser)
@@ -1531,8 +1550,8 @@ def assemble_main() -> None:
         verify_harvest_records(
             founding.records,
             policy_bytes,
+            args.dir / INPUTS_DIRNAME / HARVEST_DIRNAME / COLLATERAL_DIRNAME,
             verify_quote_bin=args.verify_quote_bin,
-            pccs_url=args.pccs_url,
         )
         assembled = assemble(
             name=args.name,

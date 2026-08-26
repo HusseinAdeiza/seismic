@@ -42,6 +42,7 @@ from tee.cli.common.shell_outs import (
     DEFAULT_ADMISSION_BIN,
     promote_measurements,
     summit_set_validators,
+    verify_harvest_record,
     verify_node_deployment,
 )
 
@@ -1203,41 +1204,126 @@ class VerifyHarvestRecordsTests(unittest.TestCase):
         "evidence": {"attestation_type": "azure-tdx"},
     }
 
-    def test_verifies_every_record_against_the_policy_file(self):
-        calls: list[tuple[str, bytes]] = []
+    def setUp(self):
+        archive = tempfile.TemporaryDirectory(prefix="dcap-collateral-")
+        self.addCleanup(archive.cleanup)
+        self.collateral_dir = Path(archive.name)
 
-        def verify_fn(name, record, policy_path):
-            calls.append((name, policy_path.read_bytes()))
+    def archive_collateral(self, *names: str) -> None:
+        for name in names:
+            (self.collateral_dir / f"{name}.json").write_text('{"version": 1}')
+
+    def test_verifies_every_record_against_its_own_collateral(self):
+        calls: list[tuple[str, bytes, Path]] = []
+
+        def verify_fn(name, record, policy_path, collateral_path):
+            calls.append((name, policy_path.read_bytes(), collateral_path))
             return {"verified": True}
 
         records = {"node-2": dict(self.RECORD), "node-1": dict(self.RECORD)}
-        verify_harvest_records(records, b"policy bytes", verify_fn=verify_fn)
+        self.archive_collateral("node-1", "node-2")
+        verify_harvest_records(
+            records, b"policy bytes", self.collateral_dir, verify_fn=verify_fn
+        )
         # Every record, deterministic order, against exactly the promoted
-        # policy bytes.
+        # policy bytes and the snapshot archived beside it.
         self.assertEqual(
-            calls, [("node-1", b"policy bytes"), ("node-2", b"policy bytes")]
+            calls,
+            [
+                ("node-1", b"policy bytes", self.collateral_dir / "node-1.json"),
+                ("node-2", b"policy bytes", self.collateral_dir / "node-2.json"),
+            ],
         )
 
+    def test_missing_collateral_fails_closed_before_verifying(self):
+        """Without the snapshot, the only check available is against Intel's
+        live collateral — which would pass today and stop passing in about a
+        month, making the verdict depend on when assemble ran. So the gate
+        refuses rather than falling back."""
+        calls: list[str] = []
+
+        def verify_fn(name, record, policy_path, collateral_path):
+            calls.append(name)
+            return {"verified": True}
+
+        records = {"node-1": dict(self.RECORD), "node-2": dict(self.RECORD)}
+        self.archive_collateral("node-1")
+        with self.assertRaises(GateError) as ctx:
+            verify_harvest_records(
+                records, b"policy", self.collateral_dir, verify_fn=verify_fn
+            )
+        message = str(ctx.exception)
+        self.assertIn("node-2", message)
+        self.assertIn("no DCAP collateral", message)
+        self.assertIn("re-harvested", message)
+        # node-1 verified; the missing snapshot stopped the run at node-2.
+        self.assertEqual(calls, ["node-1"])
+
     def test_failure_names_the_box_and_burns(self):
-        def verify_fn(name, record, policy_path):
+        def verify_fn(name, record, policy_path, collateral_path):
             if name == "node-2":
                 raise GateError("quote verification failed")
             return {"verified": True}
 
         records = {"node-1": dict(self.RECORD), "node-2": dict(self.RECORD)}
+        self.archive_collateral("node-1", "node-2")
         with self.assertRaisesRegex(GateError, "node-2.*\n.*not be pinned"):
-            verify_harvest_records(records, b"policy", verify_fn=verify_fn)
+            verify_harvest_records(
+                records, b"policy", self.collateral_dir, verify_fn=verify_fn
+            )
 
     def test_missing_verifier_binary_is_a_gate_error(self):
         with self.assertRaisesRegex(GateError, "not found") as ctx:
             verify_harvest_records(
                 {"node-1": dict(self.RECORD)},
                 b"policy",
+                self.collateral_dir,
                 verify_quote_bin="no-such-verify-quote",
             )
         # Tooling, not evidence: the preflight fails before the loop, so a
         # missing verifier never carries the burned-founding advice.
         self.assertNotIn("re-found", str(ctx.exception))
+
+
+class OfflineHarvestVerificationTests(unittest.TestCase):
+    """The offline half of the `verify-quote harvest` shell-out: the archived
+    snapshot is what the record is verified against, so no collateral service
+    is reached and the verdict is the same on day 1 and day 400."""
+
+    RECORD = {"harvest_nonce": "11" * 32, "evidence": {}}
+    REPORT = {"verified": True, "attestation_type": "azure-tdx", "pcrs": {}}
+
+    def test_collateral_reaches_argv(self):
+        snapshot = Path("/nets/devnet/inputs/harvest/dcap-collateral/node-1.json")
+        with mock.patch.object(
+            shell_outs.subprocess,
+            "run",
+            return_value=mock.Mock(
+                returncode=0, stdout=json.dumps(self.REPORT).encode(), stderr=b""
+            ),
+        ) as run:
+            verify_harvest_record(
+                self.RECORD,
+                policy_path=Path("/tmp/policy.json"),
+                verify_quote_bin="verify-quote",
+                collateral=snapshot,
+            )
+        cmd = run.call_args.args[0]
+        self.assertEqual(cmd[:4], ["verify-quote", "harvest", "--record", "-"])
+        self.assertEqual(cmd[-2:], ["--collateral", str(snapshot)])
+        # Offline mode reaches no collateral service, so nothing points at one.
+        self.assertNotIn("--pccs-url", cmd)
+
+    def test_capture_and_replay_are_mutually_exclusive(self):
+        """One call verifies live and captures, or replays an archive. Asking
+        for both names no mode the verifier has."""
+        with self.assertRaisesRegex(ValueError, "not both"):
+            verify_harvest_record(
+                self.RECORD,
+                policy_path=Path("/tmp/policy.json"),
+                dump_collateral=Path("/tmp/out.json"),
+                collateral=Path("/tmp/in.json"),
+            )
 
 
 class VerifyNodeDeploymentTests(unittest.TestCase):
@@ -1340,6 +1426,15 @@ class DirCliTests(unittest.TestCase):
     def test_assemble_requires_dir(self):
         with self.assertRaises(SystemExit):
             manifest_mod._parse_assemble_args([])
+
+    def test_assemble_takes_no_pccs_url(self):
+        """assemble re-verifies against the collateral archived with each
+        record, so it reaches no collateral service and has nowhere to point
+        one."""
+        with self.assertRaises(SystemExit):
+            manifest_mod._parse_assemble_args(
+                ["networks/testnet-1", "--pccs-url", "http://127.0.0.1:8081"]
+            )
 
     def test_init_dir_positional_defaults_name(self):
         args = manifest_mod._parse_init_args(

@@ -22,7 +22,11 @@ tee/networks/<name>/
 │   │                               authored: one address per founding
 │   │                               node, in node-name order
 │   └── harvest/                    written by `network harvest`
-│       └── <node>.json             founding pubkeys + quote + verification
+│       ├── <node>.json             founding pubkeys + quote + verification
+│       └── dcap-collateral/
+│           └── <node>.json         the DCAP collateral that verification
+│                                   used, so the quote stays verifiable
+│                                   once Intel's live collateral ages past it
 ├── nodes/                        runtime infra state (gitignored)
 │   ├── <node>.json                 descriptor from `up --network` (live IP)
 │   └── bootnodes.json              founding enode set from `configure`

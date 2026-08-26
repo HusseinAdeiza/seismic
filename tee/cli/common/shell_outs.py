@@ -228,6 +228,8 @@ def verify_harvest_record(
     policy_path: Path,
     verify_quote_bin: str = DEFAULT_VERIFY_QUOTE_BIN,
     pccs_url: str | None = None,
+    dump_collateral: Path | None = None,
+    collateral: Path | None = None,
 ) -> dict[str, Any]:
     """DCAP-verify one founding harvest record via `verify-quote harvest`.
 
@@ -236,7 +238,26 @@ def verify_harvest_record(
     pubkeys, and its measurements must satisfy the policy. The record goes
     over stdin as one document — the same one the archive keeps, so what is
     archived is what was verified.
+
+    `dump_collateral` asks the verifier to write the DCAP collateral this
+    verification consumed to that path, which it does only once the quote has
+    verified. The verifier is the only component that knows which bundle it
+    used, so a caller archiving founding provenance takes the file it writes
+    rather than fetching a second copy that a cache refresh could make
+    differ. Exit 0 without that file is a broken contract, not a pass.
+
+    `collateral` is the other direction: the record is verified against that
+    archived snapshot, at the instant the snapshot was held to, reaching no
+    collateral service. Intel's TCB Info, QE Identity and both CRLs carry
+    nextUpdate on a roughly 30-day cadence, so this is the only form of the
+    check that still passes a month after the founding. It excludes
+    `dump_collateral` — one call verifies live or replays an archive, never
+    both — and leaves `pccs_url` with nothing to reach.
     """
+    if collateral is not None and dump_collateral is not None:
+        raise ValueError(
+            "verify_harvest_record verifies live or replays an archive, not both"
+        )
     cmd = [
         verify_quote_bin,
         "harvest",
@@ -247,7 +268,18 @@ def verify_harvest_record(
     ]
     if pccs_url:
         cmd += ["--pccs-url", pccs_url]
-    return _run_verify_quote(cmd, input_bytes=json.dumps(record).encode("utf-8"))
+    if dump_collateral is not None:
+        cmd += ["--dump-collateral", str(dump_collateral)]
+    if collateral is not None:
+        cmd += ["--collateral", str(collateral)]
+    report = _run_verify_quote(cmd, input_bytes=json.dumps(record).encode("utf-8"))
+    if dump_collateral is not None and not dump_collateral.is_file():
+        raise GateError(
+            f"`{verify_quote_bin}` reported the quote verified but wrote no "
+            f"collateral to {dump_collateral}; without it the archived quote "
+            "is not re-verifiable once Intel's live collateral ages past it"
+        )
+    return report
 
 
 def verify_node_deployment(

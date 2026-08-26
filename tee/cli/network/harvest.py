@@ -21,16 +21,18 @@ shells out to the enclave repo's `verify-quote` (exit 0 plus one JSON
 report on stdout ⇔ verified), against the policy promoted from
 `inputs/measurements.json` by the same admission CLI `assemble` uses.
 This check is purely preventive: future users and joiners should re-run
-the same verification against the archive and the published collateral,
-rather than trust this run's verdict. Each archived record is a complete
-input to that check — `verify-quote harvest --record
-inputs/harvest/<node>.json --policy measurement-policy-bootstrap.json`,
-and nothing from this repo.
+the same verification against the archive rather than trust this run's
+verdict. Each archived record is a complete input to that check —
+`verify-quote harvest --record inputs/harvest/<node>.json --policy
+measurement-policy-bootstrap.json`, and nothing from this repo.
 
-TODO: snapshot the DCAP collateral into inputs/harvest/dcap-collateral/
-once the capture mechanism is resolved (open question from the
-verify-quote PR) — until then re-verification depends on Intel's live
-collateral, which ages out from under the archived quotes.
+The verifier also hands back the DCAP collateral it consumed, which the
+archive keeps at `inputs/harvest/dcap-collateral/<node>.json`. Intel's
+TCB Info, QE Identity and both CRLs carry `nextUpdate` on a roughly
+30-day cadence, so without that snapshot a founding quote stops being
+re-verifiable about a month after the founding. The verifier writes it
+because it is the only component that knows which bundle it actually
+used.
 
 Any anomaly burns the whole harvest: a quote window already closed
 (HTTP 410 — the box accepted a config POST), a failed verification, or a
@@ -377,27 +379,34 @@ def verify_record(
     record: dict[str, Any],
     policy_path: Path,
     verify_bin: str,
+    dump_collateral: Path,
     *,
     pccs_url: str | None,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], bytes]:
     """DCAP-verify one harvest record via the enclave repo's `verify-quote`
     (the shared shell-out in shell_outs.py — `assemble` re-runs the same check
     over each archived record before pinning the set). A failure burns the
     harvest: a founding key whose quote doesn't verify must never reach
     `assemble`.
+
+    Returns the verification report and the bytes the verifier wrote to
+    `dump_collateral` — the DCAP collateral this verdict depended on, which
+    the archive keeps verbatim beside the record.
     """
     try:
-        return shell_outs.verify_harvest_record(
+        report = shell_outs.verify_harvest_record(
             record,
             policy_path=policy_path,
             verify_quote_bin=verify_bin,
             pccs_url=pccs_url,
+            dump_collateral=dump_collateral,
         )
     except manifest_mod.GateError as e:
         raise SystemExit(
             f"{target.name}: {e}\nThe harvest is burned: re-found rather "
             "than retrying around it."
         ) from None
+    return report, dump_collateral.read_bytes()
 
 
 def check_overwrite(harvest_dir: Path, names: list[str], force: bool) -> None:
@@ -405,9 +414,17 @@ def check_overwrite(harvest_dir: Path, names: list[str], force: bool) -> None:
 
     The archive is founding provenance — the nonces it holds are what make
     the archived quotes re-verifiable — so replacing it is a deliberate
-    re-harvest, not a default.
+    re-harvest, not a default. Both trees count: a leftover collateral file
+    would otherwise outlive the record it belongs to and read as provenance
+    for a quote it never verified.
     """
-    existing = sorted(name for name in names if (harvest_dir / f"{name}.json").exists())
+    collateral_dir = harvest_dir / manifest_mod.COLLATERAL_DIRNAME
+    existing = sorted(
+        name
+        for name in names
+        if (harvest_dir / f"{name}.json").exists()
+        or (collateral_dir / f"{name}.json").exists()
+    )
     if existing and not force:
         raise SystemExit(
             f"refusing to overwrite existing harvest file(s) in {harvest_dir}: "
@@ -416,18 +433,34 @@ def check_overwrite(harvest_dir: Path, names: list[str], force: bool) -> None:
         )
 
 
-def save_harvest(harvest_dir: Path, records: dict[str, dict[str, Any]]) -> list[Path]:
-    """Write one inputs/harvest/<node>.json per box (pretty JSON, trailing
-    newline — the descriptor writer's format). Each record carries the
-    evidence exactly as the holder served it plus the nonce it binds, so
-    the archived quote stays re-verifiable, and the verification report
-    (every quoted PCR) as measurement provenance."""
+def save_harvest(
+    harvest_dir: Path,
+    records: dict[str, dict[str, Any]],
+    collateral: dict[str, bytes],
+) -> list[Path]:
+    """Write the archive's two trees, one file per box.
+
+    `inputs/harvest/<node>.json` (pretty JSON, trailing newline — the
+    descriptor writer's format) carries the evidence exactly as the holder
+    served it plus the nonce it binds, so the archived quote stays
+    re-verifiable, and the verification report (every quoted PCR) as
+    measurement provenance. `inputs/harvest/dcap-collateral/<node>.json`
+    carries the verifier's own bytes verbatim: what is archived is what was
+    verified.
+
+    Written only after every box passed, so a burned harvest leaves neither
+    tree behind.
+    """
+    collateral_dir = harvest_dir / manifest_mod.COLLATERAL_DIRNAME
     harvest_dir.mkdir(parents=True, exist_ok=True)
+    collateral_dir.mkdir(parents=True, exist_ok=True)
     written = []
     for name in sorted(records):
-        path = harvest_dir / f"{name}.json"
-        path.write_text(json.dumps(records[name], indent=2) + "\n")
-        written.append(path)
+        record_path = harvest_dir / f"{name}.json"
+        record_path.write_text(json.dumps(records[name], indent=2) + "\n")
+        collateral_path = collateral_dir / f"{name}.json"
+        collateral_path.write_bytes(collateral[name])
+        written += [record_path, collateral_path]
     return written
 
 
@@ -473,18 +506,26 @@ def main() -> None:
 
     harvested_at = datetime.now(UTC).isoformat(timespec="seconds")
     records: dict[str, dict[str, Any]] = {}
-    with tempfile.NamedTemporaryFile(
-        prefix="measurement-policy-", suffix=".json"
-    ) as policy_file:
+    collateral: dict[str, bytes] = {}
+    # The collateral lands in a scratch dir first and joins the archive at
+    # save time, on the same all-or-nothing terms as the records: a harvest
+    # burned halfway through must leave nothing behind.
+    with (
+        tempfile.NamedTemporaryFile(
+            prefix="measurement-policy-", suffix=".json"
+        ) as policy_file,
+        tempfile.TemporaryDirectory(prefix="dcap-collateral-") as collateral_tmp,
+    ):
         policy_file.write(policy_bytes)
         policy_file.flush()
         for target in targets:
             record = build_record(target, quotes[target.name])
-            report = verify_record(
+            report, collateral[target.name] = verify_record(
                 target,
                 record,
                 Path(policy_file.name),
                 verify_bin,
+                Path(collateral_tmp) / f"{target.name}.json",
                 pccs_url=args.pccs_url,
             )
             print(f"  ✓ {target.name}: quote DCAP-verified against the policy")
@@ -494,7 +535,7 @@ def main() -> None:
                 "verification": report,
             }
 
-    for path in save_harvest(harvest_dir, records):
+    for path in save_harvest(harvest_dir, records, collateral):
         print(f"wrote {path}")
     print(
         f"Harvest complete: {len(records)} founding box(es) verified and "

@@ -277,29 +277,48 @@ class AssertUniqueKeysTests(unittest.TestCase):
 
 class VerifyRecordTests(unittest.TestCase):
     REPORT = {"verified": True, "attestation_type": "azure-tdx", "pcrs": {}}
+    COLLATERAL = b'{\n  "version": 1,\n  "tcb_info": "{}"\n}\n'
 
-    def _run(self, returncode=0, stdout=b"", stderr=b""):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dump = Path(self._tmp.name) / "node-1.json"
+
+    def _run(self, returncode=0, stdout=b"", stderr=b"", dump=COLLATERAL, **kwargs):
         completed = mock.Mock(returncode=returncode, stdout=stdout, stderr=stderr)
+
+        def run_verify_quote(*_args, **_kwargs):
+            # The verifier writes the collateral it consumed to the path on
+            # argv, and only once the quote has verified.
+            if returncode == 0 and dump is not None:
+                self.dump.write_bytes(dump)
+            return completed
+
         # The shell-out lives in shell_outs.verify_harvest_record (shared with
         # `assemble`'s re-verification); harvest wraps it with the
         # burn messaging.
         with mock.patch.object(
-            shell_outs.subprocess, "run", return_value=completed
+            shell_outs.subprocess, "run", side_effect=run_verify_quote
         ) as run:
-            report = harvest.verify_record(
+            verified = harvest.verify_record(
                 target(),
                 harvest.build_record(target(), quote_body()),
                 Path("/tmp/policy.json"),
                 "verify-quote",
-                pccs_url=None,
+                self.dump,
+                pccs_url=kwargs.get("pccs_url"),
             )
-        return report, run
+        return verified, run
 
     def test_success_returns_report_and_verifies_the_whole_record(self):
-        report, run = self._run(stdout=json.dumps(self.REPORT).encode())
+        (report, collateral), run = self._run(stdout=json.dumps(self.REPORT).encode())
         self.assertTrue(report["verified"])
+        # The verifier's own bytes, verbatim — what is archived is what was
+        # verified.
+        self.assertEqual(collateral, self.COLLATERAL)
         cmd = run.call_args.args[0]
         self.assertEqual(cmd[:4], ["verify-quote", "harvest", "--record", "-"])
+        self.assertEqual(cmd[-2:], ["--dump-collateral", str(self.dump)])
         # The record travels over stdin as one document: the claims and the
         # evidence the archive keeps, verified together.
         self.assertEqual(
@@ -328,41 +347,55 @@ class VerifyRecordTests(unittest.TestCase):
             self._run(stdout=b"not json")
         self.assertIn("without a verified report", str(ctx.exception))
 
+    def test_verified_without_a_collateral_dump_burns(self):
+        # A pass whose collateral never landed would archive a quote nobody
+        # can re-verify a month later: burn instead.
+        with self.assertRaises(SystemExit) as ctx:
+            self._run(stdout=json.dumps(self.REPORT).encode(), dump=None)
+        message = str(ctx.exception)
+        self.assertIn("wrote no collateral", message)
+        self.assertIn("burned", message)
+
     def test_pccs_url_forwarded(self):
-        completed = mock.Mock(
-            returncode=0, stdout=json.dumps(self.REPORT).encode(), stderr=b""
+        _verified, run = self._run(
+            stdout=json.dumps(self.REPORT).encode(),
+            pccs_url="https://pccs.example",
         )
-        with mock.patch.object(
-            shell_outs.subprocess, "run", return_value=completed
-        ) as run:
-            harvest.verify_record(
-                target(),
-                harvest.build_record(target(), quote_body()),
-                Path("/tmp/policy.json"),
-                "verify-quote",
-                pccs_url="https://pccs.example",
-            )
         cmd = run.call_args.args[0]
         self.assertIn("https://pccs.example", cmd)
 
 
 class ArchiveTests(unittest.TestCase):
+    COLLATERAL = b'{\n  "version": 1,\n  "tcb_info": "{}"\n}\n'
+
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.harvest_dir = Path(self._tmp.name) / manifest_mod.HARVEST_DIRNAME
+        self.collateral_dir = self.harvest_dir / manifest_mod.COLLATERAL_DIRNAME
 
-    def test_save_writes_one_pretty_json_per_box(self):
+    def test_save_writes_the_record_and_its_collateral_per_box(self):
         record = {
             **harvest.build_record(target(), quote_body()),
             "harvested_at": "2026-08-04T00:00:00+00:00",
             "verification": {"verified": True},
         }
-        written = harvest.save_harvest(self.harvest_dir, {"node-1": record})
-        self.assertEqual(written, [self.harvest_dir / "node-1.json"])
+        written = harvest.save_harvest(
+            self.harvest_dir, {"node-1": record}, {"node-1": self.COLLATERAL}
+        )
+        self.assertEqual(
+            written,
+            [
+                self.harvest_dir / "node-1.json",
+                self.collateral_dir / "node-1.json",
+            ],
+        )
         text = written[0].read_text()
         self.assertTrue(text.endswith("\n"))
         self.assertEqual(json.loads(text), record)
+        # The verifier's bytes, unrewritten: what is archived is what was
+        # verified.
+        self.assertEqual(written[1].read_bytes(), self.COLLATERAL)
 
     def test_check_overwrite_refuses_existing_without_force(self):
         self.harvest_dir.mkdir(parents=True)
@@ -373,10 +406,20 @@ class ArchiveTests(unittest.TestCase):
         self.assertIn("node-1", message)
         self.assertIn("--force", message)
 
+    def test_check_overwrite_refuses_a_stray_collateral_file(self):
+        # A collateral file outliving its record would read as provenance for
+        # a quote it never verified.
+        self.collateral_dir.mkdir(parents=True)
+        (self.collateral_dir / "node-1.json").write_text("{}")
+        with self.assertRaises(SystemExit) as ctx:
+            harvest.check_overwrite(self.harvest_dir, ["node-1"], False)
+        self.assertIn("node-1", str(ctx.exception))
+
     def test_check_overwrite_allows_force_and_fresh_dirs(self):
         harvest.check_overwrite(self.harvest_dir, ["node-1"], False)
-        self.harvest_dir.mkdir(parents=True)
+        self.collateral_dir.mkdir(parents=True)
         (self.harvest_dir / "node-1.json").write_text("{}")
+        (self.collateral_dir / "node-1.json").write_text("{}")
         harvest.check_overwrite(self.harvest_dir, ["node-1"], True)
 
 
