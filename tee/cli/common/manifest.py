@@ -505,7 +505,6 @@ def verify_harvest_records(
     policy_bytes: bytes,
     verify_quote_bin: str = DEFAULT_VERIFY_QUOTE_BIN,
     pccs_url: str | None = None,
-    override_azure_outdated_tcb: bool = False,
     verify_fn: Callable[[str, dict[str, Any], Path], dict[str, Any]] | None = None,
 ) -> None:
     """Re-verify every archived founding record against the compiled policy.
@@ -532,7 +531,6 @@ def verify_harvest_records(
                 policy_path=path,
                 verify_quote_bin=verify_quote_bin,
                 pccs_url=pccs_url,
-                override_azure_outdated_tcb=override_azure_outdated_tcb,
             )
         )
         for name in sorted(records):
@@ -1422,11 +1420,6 @@ def _parse_assemble_args(argv: list[str] | None = None) -> argparse.Namespace:
         metavar="URL",
         help="forwarded to verify-quote: PCCS URL for DCAP collateral",
     )
-    parser.add_argument(
-        "--override-azure-outdated-tcb",
-        action="store_true",
-        help="forwarded to verify-quote: allow the Azure outdated-TCB override path",
-    )
     _add_reth_bin(parser)
     _add_admission_bin(parser)
     _add_summit_bin(parser)
@@ -1540,7 +1533,6 @@ def assemble_main() -> None:
             policy_bytes,
             verify_quote_bin=args.verify_quote_bin,
             pccs_url=args.pccs_url,
-            override_azure_outdated_tcb=args.override_azure_outdated_tcb,
         )
         assembled = assemble(
             name=args.name,

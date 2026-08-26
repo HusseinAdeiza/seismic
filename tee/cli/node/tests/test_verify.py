@@ -62,7 +62,6 @@ def _args(**overrides) -> argparse.Namespace:
         "admission_bin": "seismic-measurement-admission",
         "attestation_type": "azure-tdx",
         "pccs_url": None,
-        "override_azure_outdated_tcb": False,
     }
     defaults.update(overrides)
     return argparse.Namespace(**defaults)
@@ -207,7 +206,6 @@ class VerifyDeploymentTests(unittest.TestCase):
         self.args = _args(
             manifest=Path("/nets/devnet/network-manifest.json"),
             pccs_url="https://pccs.example",
-            override_azure_outdated_tcb=True,
         )
 
     def _verify(self, policy_bytes: bytes) -> None:
@@ -226,7 +224,6 @@ class VerifyDeploymentTests(unittest.TestCase):
             policy_bytes=b"policy bytes",
             verify_quote_bin="verify-quote",
             pccs_url="https://pccs.example",
-            override_azure_outdated_tcb=True,
         )
 
     def test_failure_is_a_nonzero_exit_naming_the_node(self):

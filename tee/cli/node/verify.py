@@ -132,11 +132,6 @@ def add_tooling_args(parser: argparse.ArgumentParser) -> None:
         metavar="URL",
         help="forwarded to verify-quote: PCCS URL for DCAP collateral",
     )
-    parser.add_argument(
-        "--override-azure-outdated-tcb",
-        action="store_true",
-        help="forwarded to verify-quote: allow the Azure outdated-TCB override path",
-    )
 
 
 def resolve_policy_path(
@@ -270,7 +265,6 @@ def challenge_node(
         policy_bytes=policy_bytes,
         verify_quote_bin=args.verify_quote_bin,
         pccs_url=args.pccs_url,
-        override_azure_outdated_tcb=args.override_azure_outdated_tcb,
     )
 
 
@@ -292,8 +286,6 @@ def retry_flags(args: argparse.Namespace) -> str:
         flags += f" --verify-quote-bin {args.verify_quote_bin}"
     if args.pccs_url is not None:
         flags += f" --pccs-url {args.pccs_url}"
-    if args.override_azure_outdated_tcb:
-        flags += " --override-azure-outdated-tcb"
     return flags
 
 

@@ -292,7 +292,6 @@ class VerifyRecordTests(unittest.TestCase):
                 Path("/tmp/policy.json"),
                 "verify-quote",
                 pccs_url=None,
-                override_azure_outdated_tcb=False,
             )
         return report, run
 
@@ -329,7 +328,7 @@ class VerifyRecordTests(unittest.TestCase):
             self._run(stdout=b"not json")
         self.assertIn("without a verified report", str(ctx.exception))
 
-    def test_optional_flags_forwarded(self):
+    def test_pccs_url_forwarded(self):
         completed = mock.Mock(
             returncode=0, stdout=json.dumps(self.REPORT).encode(), stderr=b""
         )
@@ -342,11 +341,9 @@ class VerifyRecordTests(unittest.TestCase):
                 Path("/tmp/policy.json"),
                 "verify-quote",
                 pccs_url="https://pccs.example",
-                override_azure_outdated_tcb=True,
             )
         cmd = run.call_args.args[0]
         self.assertIn("https://pccs.example", cmd)
-        self.assertIn("--override-azure-outdated-tcb", cmd)
 
 
 class ArchiveTests(unittest.TestCase):

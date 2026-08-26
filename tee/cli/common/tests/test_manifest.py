@@ -1289,15 +1289,13 @@ class VerifyNodeDeploymentTests(unittest.TestCase):
         with self.assertRaisesRegex(GateError, "without a verified report"):
             self._verify(stdout=b'{"verified": false}')
 
-    def test_optional_flags_forwarded(self):
+    def test_pccs_url_forwarded(self):
         _, run, _ = self._verify(
             stdout=json.dumps(self.REPORT).encode(),
             pccs_url="https://pccs.example",
-            override_azure_outdated_tcb=True,
         )
         cmd = run.call_args.args[0]
         self.assertIn("https://pccs.example", cmd)
-        self.assertIn("--override-azure-outdated-tcb", cmd)
 
     def test_missing_verifier_binary_is_a_gate_error(self):
         with self.assertRaisesRegex(GateError, "not found"):

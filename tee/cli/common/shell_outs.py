@@ -228,7 +228,6 @@ def verify_harvest_record(
     policy_path: Path,
     verify_quote_bin: str = DEFAULT_VERIFY_QUOTE_BIN,
     pccs_url: str | None = None,
-    override_azure_outdated_tcb: bool = False,
 ) -> dict[str, Any]:
     """DCAP-verify one founding harvest record via `verify-quote harvest`.
 
@@ -248,8 +247,6 @@ def verify_harvest_record(
     ]
     if pccs_url:
         cmd += ["--pccs-url", pccs_url]
-    if override_azure_outdated_tcb:
-        cmd.append("--override-azure-outdated-tcb")
     return _run_verify_quote(cmd, input_bytes=json.dumps(record).encode("utf-8"))
 
 
@@ -260,7 +257,6 @@ def verify_node_deployment(
     policy_bytes: bytes,
     verify_quote_bin: str = DEFAULT_VERIFY_QUOTE_BIN,
     pccs_url: str | None = None,
-    override_azure_outdated_tcb: bool = False,
 ) -> dict[str, Any]:
     """Deploy-verify one freshly provisioned node via `verify-quote deploy`.
 
@@ -288,8 +284,6 @@ def verify_node_deployment(
         ]
         if pccs_url:
             cmd += ["--pccs-url", pccs_url]
-        if override_azure_outdated_tcb:
-            cmd.append("--override-azure-outdated-tcb")
         return _run_verify_quote(cmd)
 
 

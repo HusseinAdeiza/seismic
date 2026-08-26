@@ -150,11 +150,6 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="forwarded to verify-quote: PCCS URL for DCAP collateral",
     )
     parser.add_argument(
-        "--override-azure-outdated-tcb",
-        action="store_true",
-        help="forwarded to verify-quote: allow the Azure outdated-TCB override path",
-    )
-    parser.add_argument(
         "--force",
         action="store_true",
         help="overwrite existing harvest file(s) — a fresh harvest with new "
@@ -384,7 +379,6 @@ def verify_record(
     verify_bin: str,
     *,
     pccs_url: str | None,
-    override_azure_outdated_tcb: bool,
 ) -> dict[str, Any]:
     """DCAP-verify one harvest record via the enclave repo's `verify-quote`
     (the shared shell-out in shell_outs.py — `assemble` re-runs the same check
@@ -398,7 +392,6 @@ def verify_record(
             policy_path=policy_path,
             verify_quote_bin=verify_bin,
             pccs_url=pccs_url,
-            override_azure_outdated_tcb=override_azure_outdated_tcb,
         )
     except manifest_mod.GateError as e:
         raise SystemExit(
@@ -493,7 +486,6 @@ def main() -> None:
                 Path(policy_file.name),
                 verify_bin,
                 pccs_url=args.pccs_url,
-                override_azure_outdated_tcb=args.override_azure_outdated_tcb,
             )
             print(f"  ✓ {target.name}: quote DCAP-verified against the policy")
             records[target.name] = {
