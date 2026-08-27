@@ -22,14 +22,12 @@ from tee.cli.common.manifest import (
     AssembledManifest,
     GateContext,
     GateError,
-    ManifestSchemaError,
     assemble,
     compute_network_id,
     init_network_dir,
     inject_registry_genesis_storage,
     load_founding_set,
     load_harvest_records,
-    render_manifest,
     render_network_section,
     run_validation_gates,
     validate_manifest_schema,
@@ -40,7 +38,9 @@ from tee.cli.common.manifest import (
 )
 from tee.cli.common.shell_outs import (
     DEFAULT_ADMISSION_BIN,
+    parse_manifest,
     promote_measurements,
+    render_manifest,
     summit_set_validators,
     verify_harvest_record,
     verify_node_deployment,
@@ -107,12 +107,38 @@ def promoted_policy_bytes(measurement_id: str = "img.vhd") -> bytes:
     return (json.dumps(records, indent=2) + "\n").encode()
 
 
-# Mirrors https://github.com/SeismicSystems/enclave/blob/seismic/crates/network-manifest/fixtures/network-manifest-v1.json
-# The network_id vector below is asserted by that crate's
-# parses_v1_fixture_and_derives_network_id test; together they pin the deploy
-# emitter and the node-side parser to byte-identical rendering. That crate
-# pins the fixture's exact bytes, and drift_test_manifest.py
-# (`make test-drift`) checks this emitter against them.
+def fake_render_manifest(document: bytes) -> bytes:
+    """Test stand-in for `seismic-manifest render`: the canonical rendering
+    (2-space indent, sorted keys, raw UTF-8, one trailing newline) without
+    the strict parse, so assembled bytes look like the tool's and the
+    byte-level assertions around them stay meaningful. The strict verdict
+    is the tool's own, pinned by the enclave crate's tests and exercised
+    against the real binary in drift_test_manifest.py."""
+    return (
+        json.dumps(json.loads(document), indent=2, sort_keys=True, ensure_ascii=False)
+        + "\n"
+    ).encode("utf-8")
+
+
+def fake_parse_manifest(manifest_bytes: bytes, manifest_bin: str = "") -> None:
+    """Test stand-in for `seismic-manifest parse`: any JSON document passes.
+    Patch it over `tee.cli.common.manifest.parse_manifest` wherever a
+    hermetic test reaches `validate_manifest_schema`."""
+    json.loads(manifest_bytes)
+
+
+def patch_manifest_tool(test: unittest.TestCase) -> None:
+    """Route a test case's manifest validation through the stand-in for the
+    rest of the test (the real tool is a drift-suite prerequisite only)."""
+    patcher = mock.patch.object(manifest_mod, "parse_manifest", fake_parse_manifest)
+    patcher.start()
+    test.addCleanup(patcher.stop)
+
+
+# A valid v1 manifest document — the same values as the enclave crate's
+# fixtures/network-manifest-v1.json, which pins the canonical bytes and
+# network_id on the Rust side. Here it is only a well-formed manifest for
+# the gates and consumers to read.
 FIXTURE_MANIFEST = {
     "manifest_version": 1,
     "name": "seismic-devnet-3",
@@ -134,81 +160,36 @@ FIXTURE_MANIFEST = {
         },
     },
 }
-# network_id of FIXTURE_MANIFEST: SHA-256 of its deterministically-rendered
-# bytes, i.e. compute_network_id(render_manifest(FIXTURE_MANIFEST)). Pinned as
-# a literal (not computed) so the assertion catches the emitter drifting from
-# this value — it's the same vector the enclave crate's
-# parses_v1_fixture_and_derives_network_id test asserts.
-FIXTURE_NETWORK_ID = (
-    "0x8ef142e3f2bf15f8b201c4d8cda7848a9e846222c62b5615d4d36c7fccd98a24"
-)
+FIXTURE_MANIFEST_BYTES = fake_render_manifest(json.dumps(FIXTURE_MANIFEST).encode())
 
 
-class RenderTests(unittest.TestCase):
-    def test_render_matches_enclave_network_id_vector(self):
-        rendered = render_manifest(FIXTURE_MANIFEST)
-        self.assertEqual(compute_network_id(rendered), FIXTURE_NETWORK_ID)
+class ManifestToolTests(unittest.TestCase):
+    """The manifest-tool shell-outs' failure surfacing and what
+    `validate_manifest_schema` hands back. Running the real CLI — rendering
+    and strict rejection — needs the binary, so it lives in
+    drift_test_manifest.py (`make test-drift`)."""
 
-    def test_render_is_deterministic_under_key_order(self):
-        shuffled = dict(reversed(list(FIXTURE_MANIFEST.items())))
-        self.assertEqual(render_manifest(shuffled), render_manifest(FIXTURE_MANIFEST))
+    def test_missing_binary_is_a_gate_error(self):
+        document = json.dumps(FIXTURE_MANIFEST).encode()
+        with self.assertRaisesRegex(GateError, "not found"):
+            render_manifest(document, manifest_bin="no-such-manifest-tool")
+        with self.assertRaisesRegex(GateError, "not found"):
+            parse_manifest(FIXTURE_MANIFEST_BYTES, manifest_bin="no-such-manifest-tool")
 
-    def test_network_id_is_over_raw_bytes(self):
-        rendered = render_manifest(FIXTURE_MANIFEST)
-        self.assertNotEqual(
-            compute_network_id(rendered + b"\n"), compute_network_id(rendered)
-        )
+    def test_schema_returns_the_document_the_tool_accepted(self):
+        patch_manifest_tool(self)
+        parsed = validate_manifest_schema(FIXTURE_MANIFEST_BYTES)
+        self.assertEqual(parsed, FIXTURE_MANIFEST)
 
+    def test_schema_passes_the_binary_through(self):
+        seen = {}
 
-class SchemaTests(unittest.TestCase):
-    def _mutated(self, mutate=None):
-        """Render the fixture after applying `mutate` to a deep copy."""
-        manifest = json.loads(json.dumps(FIXTURE_MANIFEST))
-        if mutate is not None:
-            mutate(manifest)
-        return render_manifest(manifest)
+        def record(manifest_bytes, manifest_bin=""):
+            seen["bin"] = manifest_bin
 
-    def test_valid_manifest_parses(self):
-        parsed = validate_manifest_schema(self._mutated())
-        self.assertEqual(parsed["eth"]["chain_id"], 5124)
-
-    def test_rejects_unknown_key(self):
-        bad = self._mutated(lambda m: m.update(tx_io_pk="0x02ab"))
-        with self.assertRaisesRegex(ManifestSchemaError, "unknown keys.*tx_io_pk"):
-            validate_manifest_schema(bad)
-
-    def test_rejects_missing_key(self):
-        bad = self._mutated(lambda m: m.pop("summit"))
-        with self.assertRaisesRegex(ManifestSchemaError, "missing keys.*summit"):
-            validate_manifest_schema(bad)
-
-    def test_reports_unsupported_version_before_unknown_keys(self):
-        bad = self._mutated(lambda m: m.update(manifest_version=2, some_v2_field="new"))
-        with self.assertRaisesRegex(
-            ManifestSchemaError, "unsupported manifest_version 2"
-        ):
-            validate_manifest_schema(bad)
-
-    def test_rejects_malformed_hex(self):
-        def wrong_length(m):
-            m["summit"]["genesis_config_digest"] = "0x" + "aa" * 31
-
-        def missing_prefix(m):
-            m["eth"]["genesis_hash"] = "ab" * 32
-
-        def non_hex(m):
-            m["measurements"]["bootstrap_policy_hash"] = "0x" + "zz" * 32
-
-        for mutate in (wrong_length, missing_prefix, non_hex):
-            with self.assertRaises(ManifestSchemaError):
-                validate_manifest_schema(self._mutated(mutate))
-
-    def test_rejects_bool_chain_id(self):
-        def bool_chain_id(m):
-            m["eth"]["chain_id"] = True
-
-        with self.assertRaisesRegex(ManifestSchemaError, "chain_id"):
-            validate_manifest_schema(self._mutated(bool_chain_id))
+        with mock.patch.object(manifest_mod, "parse_manifest", record):
+            validate_manifest_schema(FIXTURE_MANIFEST_BYTES, "custom-manifest-tool")
+        self.assertEqual(seen["bin"], "custom-manifest-tool")
 
 
 class PromoteTests(unittest.TestCase):
@@ -229,7 +210,7 @@ class NetworkSectionTests(unittest.TestCase):
         import base64
         import tomllib
 
-        manifest_bytes = render_manifest(FIXTURE_MANIFEST)
+        manifest_bytes = FIXTURE_MANIFEST_BYTES
         genesis_bytes = json.dumps({"config": {"chainId": 5124}}).encode()
         section = tomllib.loads(
             render_network_section(
@@ -250,7 +231,7 @@ class NetworkSectionTests(unittest.TestCase):
     def test_bootnodes_populated_survive_verbatim(self):
         import tomllib
 
-        manifest_bytes = render_manifest(FIXTURE_MANIFEST)
+        manifest_bytes = FIXTURE_MANIFEST_BYTES
         genesis_bytes = json.dumps({"config": {"chainId": 5124}}).encode()
         bootnodes = [
             "enode://" + "ab" * 64 + "@1.2.3.4:30303",
@@ -269,7 +250,7 @@ class NetworkSectionTests(unittest.TestCase):
         # that the node has no static bootnodes yet.
         import tomllib
 
-        manifest_bytes = render_manifest(FIXTURE_MANIFEST)
+        manifest_bytes = FIXTURE_MANIFEST_BYTES
         genesis_bytes = json.dumps({"config": {"chainId": 5124}}).encode()
         rendered = render_network_section(
             manifest_bytes, genesis_bytes, self.SUMMIT_GENESIS, []
@@ -458,6 +439,7 @@ class GateTests(unittest.TestCase):
             "compile_fn": self._report,
             "digest_fn": _content_digest,
             "set_validators_fn": _fake_set_validators,
+            "render_fn": fake_render_manifest,
         }
         kwargs.update(overrides)
         # ty can't verify a **kwargs dict-splat against typed params.
@@ -1417,6 +1399,7 @@ class DirCliTests(unittest.TestCase):
         self.assertEqual(args.name, "testnet-1")
         self.assertEqual(args.admission_bin, DEFAULT_ADMISSION_BIN)
         self.assertEqual(args.verify_quote_bin, shell_outs.DEFAULT_VERIFY_QUOTE_BIN)
+        self.assertEqual(args.manifest_bin, shell_outs.DEFAULT_MANIFEST_BIN)
         # assemble reads the authored inputs under inputs/.
         self.assertEqual(args.reth_genesis, self.NET / "inputs/reth-genesis.json")
         self.assertEqual(args.summit_genesis, self.NET / "inputs/summit-genesis.toml")
@@ -1484,6 +1467,7 @@ class DirCliTests(unittest.TestCase):
         args = manifest_mod._parse_validate_args(["networks/t"])
         self.assertEqual(args.manifest, net / "network-manifest.json")
         self.assertEqual(args.admission_bin, DEFAULT_ADMISSION_BIN)
+        self.assertEqual(args.manifest_bin, shell_outs.DEFAULT_MANIFEST_BIN)
         # validate reads the *shipped* summit genesis, not the authored input.
         self.assertEqual(args.summit_genesis, net / "summit-genesis.toml")
         self.assertEqual(

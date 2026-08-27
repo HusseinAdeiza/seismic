@@ -14,11 +14,15 @@ at boot is the hash the node's own code computes.
     verify-quote harvest / deploy            DCAP verdicts on a founding
                                              harvest record and on a
                                              provisioned node
+    seismic-manifest render / validate       the canonical manifest bytes
+                                             and the strict schema verdict
+                                             on existing ones
 
 Each function here owns one subcommand's contract — argv, what travels on
 stdin/stdout, and what a failure means — and reports every failure as a
-`GateError` naming the command that produced it. The `--*-bin` flags on the
-CLIs override the `DEFAULT_*_BIN` names below.
+`GateError` naming the command that produced it (the manifest tool's schema
+verdict is the one `ManifestSchemaError`). The `--*-bin` flags on the CLIs
+override the `DEFAULT_*_BIN` names below.
 """
 
 import json
@@ -28,7 +32,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from tee.cli.common.errors import GateError
+from tee.cli.common.errors import GateError, ManifestSchemaError
 
 DEFAULT_ATTESTATION_TYPE = "azure-tdx"
 
@@ -64,6 +68,16 @@ DEFAULT_SUMMIT_BIN = "summit"
 # (verification is pure computation over the evidence bytes — no TEE
 # hardware involved).
 DEFAULT_VERIFY_QUOTE_BIN = "verify-quote"
+
+# The manifest tool from the enclave repo (bin/seismic-manifest), built on
+# the seismic-network-manifest crate every node parses the manifest with, so
+# its emitter and parser cannot disagree. Its `render` subcommand is the
+# manifest's sole emitter:
+# a document with the manifest's values, in any JSON formatting, becomes the
+# canonical network-manifest.json bytes (network_id = SHA-256 of them). Its
+# `validate` subcommand is the strict v1 schema check every reader runs
+# before trusting a manifest's fields.
+DEFAULT_MANIFEST_BIN = "seismic-manifest"
 
 
 def _admission_cli(admission_bin: str, *args: str, input_bytes: bytes) -> bytes:
@@ -126,6 +140,61 @@ def compile_measurement_policy(
     the complete registry genesis storage map."""
     report = _admission_cli(admission_bin, "compile", input_bytes=policy_bytes)
     return json.loads(report)
+
+
+def _manifest_tool(
+    manifest_bin: str, subcommand: str, input_bytes: bytes, *, invalid: str
+) -> bytes:
+    """Run one manifest-tool subcommand with the document on stdin.
+
+    A nonzero exit is the tool's schema verdict on `input_bytes`
+    (`ManifestSchemaError`, prefixed with `invalid`); everything else that can
+    go wrong is tooling (`GateError`).
+    """
+    cmd = [manifest_bin, subcommand, "-"]
+    try:
+        result = subprocess.run(
+            cmd, input=input_bytes, capture_output=True, timeout=120
+        )
+    except FileNotFoundError:
+        raise GateError(
+            f"{manifest_bin!r} not found; build the enclave repo's "
+            "bin/seismic-manifest and put it on PATH, or pass --manifest-bin"
+        ) from None
+    except subprocess.TimeoutExpired:
+        raise GateError(f"`{' '.join(cmd)}` timed out") from None
+    if result.returncode != 0:
+        detail = result.stderr.decode("utf-8", "replace").strip()
+        raise ManifestSchemaError(f"{invalid}: {detail}")
+    return result.stdout
+
+
+def render_manifest(document: bytes, manifest_bin: str = DEFAULT_MANIFEST_BIN) -> bytes:
+    """Render the canonical manifest bytes via `seismic-manifest render`.
+
+    `document` carries the manifest's values as JSON in any formatting; the
+    tool strictly parses it and emits the one canonical rendering. The
+    returned bytes are the artifact: write them verbatim, never re-render.
+    """
+    rendered = _manifest_tool(
+        manifest_bin, "render", document, invalid="manifest values rejected"
+    )
+    if not rendered:
+        raise GateError(f"`{manifest_bin} render` emitted nothing on stdout")
+    return rendered
+
+
+def parse_manifest(
+    manifest_bytes: bytes, manifest_bin: str = DEFAULT_MANIFEST_BIN
+) -> None:
+    """Put manifest bytes through `seismic-manifest parse`, the strict v1
+    parser every node reads the file with. Raises on rejection."""
+    _manifest_tool(
+        manifest_bin,
+        "parse",
+        manifest_bytes,
+        invalid="manifest does not satisfy the v1 schema",
+    )
 
 
 def _check_digest(value: str, where: str) -> str:

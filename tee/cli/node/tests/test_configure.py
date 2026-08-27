@@ -11,11 +11,14 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tee.cli.common.manifest import render_manifest
-
-# Reuse the canonical valid manifest from the manifest tests rather than
-# duplicate the schema here; build_config validates it before merging.
-from tee.cli.common.tests.test_manifest import FIXTURE_MANIFEST
+# Reuse the valid manifest bytes and the manifest-tool stand-in from the
+# manifest tests rather than duplicate them here; build_config validates the
+# manifest before merging.
+from tee.cli.common.errors import ManifestSchemaError
+from tee.cli.common.tests.test_manifest import (
+    FIXTURE_MANIFEST_BYTES,
+    patch_manifest_tool,
+)
 from tee.cli.node import configure
 from tee.cli.node.configure import (
     build_config,
@@ -38,8 +41,9 @@ def _write(suffix: str, data) -> Path:
 
 class BuildConfigTests(unittest.TestCase):
     def setUp(self):
+        patch_manifest_tool(self)
         self._tmp = []
-        self.manifest = _write(".json", render_manifest(FIXTURE_MANIFEST))
+        self.manifest = _write(".json", FIXTURE_MANIFEST_BYTES)
         self._tmp.append(self.manifest)
         # chainId matches FIXTURE_MANIFEST's eth.chain_id.
         self.reth_genesis = _write(
@@ -135,11 +139,18 @@ class BuildConfigTests(unittest.TestCase):
             self._build(genesis_node=False, bootnodes=[])
 
     def test_rejects_invalid_manifest(self):
-        bad = _write(".json", "{not json")
-        self._tmp.append(bad)
-        with self.assertRaises(SystemExit):
+        # The verdict is the manifest tool's; build_config turns it into the
+        # operator-facing exit.
+        with (
+            mock.patch.object(
+                configure.manifest_mod,
+                "parse_manifest",
+                side_effect=ManifestSchemaError("unknown field `tx_io_pk`"),
+            ),
+            self.assertRaisesRegex(SystemExit, "invalid manifest.*tx_io_pk"),
+        ):
             build_config(
-                bad,
+                self.manifest,
                 FQDN,
                 EMAIL,
                 genesis_node=True,
@@ -214,11 +225,12 @@ class MainVerificationFlowTests(unittest.TestCase):
     success summary only after the challenge passes."""
 
     def setUp(self):
+        patch_manifest_tool(self)
         self.descriptor = _write(
             ".json", json.dumps({"public_ip": "203.0.113.7", "fqdn": FQDN})
         )
         self.addCleanup(self.descriptor.unlink)
-        self.manifest = _write(".json", render_manifest(FIXTURE_MANIFEST))
+        self.manifest = _write(".json", FIXTURE_MANIFEST_BYTES)
         self.addCleanup(self.manifest.unlink)
         self.argv = [
             "seismic-tee-node configure",

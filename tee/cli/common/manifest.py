@@ -1,14 +1,15 @@
 """NetworkManifest assembly and deploy-side validation gates.
 
-The deploy tool is the manifest's *sole emitter*:
-`network_id = SHA-256(file bytes)`, so the file must be rendered
-deterministically once and then travel as opaque bytes through every hop
-(deploy artifact -> `configure` merges it into the POST -> tdx-init ->
-/run/seismic/conf/).
-The node-side parser lives in the enclave repo's `seismic-network-manifest` crate:
-https://github.com/SeismicSystems/enclave/tree/seismic/crates/network-manifest;
-the schema here must stay in lockstep with it since the fixture-vector test in
-tests/test_manifest.py pins both to the same bytes).
+`network_id = SHA-256(file bytes)`, so the manifest is rendered once and then
+travels as opaque bytes through every hop (deploy artifact -> `configure`
+merges it into the POST -> tdx-init -> /run/seismic/conf/). The strict
+schema is the enclave repo's `seismic-network-manifest` crate — the same code
+every node parses the manifest with — and rendering is its sibling tool
+`seismic-manifest`:
+https://github.com/SeismicSystems/enclave/tree/seismic/bin/seismic-manifest.
+`assemble` and every reader here reach both through that CLI (shell_outs).
+This module composes the manifest's values and gates them against the
+artifacts they commit to.
 
 A network directory holds the authored inputs under `inputs/` and the
 derived artifact set at the top level. Everything top-level is hash-pinned
@@ -90,11 +91,14 @@ from tee.cli.common.repo import DEFAULT_STACK_CONFIG
 from tee.cli.common.shell_outs import (
     DEFAULT_ADMISSION_BIN,
     DEFAULT_ATTESTATION_TYPE,
+    DEFAULT_MANIFEST_BIN,
     DEFAULT_RETH_BIN,
     DEFAULT_SUMMIT_BIN,
     DEFAULT_VERIFY_QUOTE_BIN,
     compile_measurement_policy,
+    parse_manifest,
     promote_measurements,
+    render_manifest,
     reth_genesis_hash,
     summit_config_digest,
     summit_set_validators,
@@ -167,21 +171,13 @@ HARVEST_DIRNAME = "harvest"
 COLLATERAL_DIRNAME = "dcap-collateral"
 
 
-def render_manifest(manifest: dict[str, Any]) -> bytes:
-    """Deterministically render manifest bytes (the sole emitter).
-
-    2-space indent, key-sorted, single trailing newline, UTF-8 — matching the
-    enclave repo's network-manifest-v1.json fixture byte-for-byte so both
-    stacks share test vectors. Never re-render an existing manifest: any byte
-    change is a different network_id.
-    """
-    return (
-        json.dumps(manifest, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
-    ).encode("utf-8")
-
-
 def compute_network_id(manifest_bytes: bytes) -> str:
-    """network_id = SHA-256 of the exact file bytes (`sha256sum` equivalent)."""
+    """network_id = SHA-256 of the exact file bytes (`sha256sum` equivalent).
+
+    A hash of bytes, with no canonicalization step that could drift between
+    implementations — so it is computed locally; the identity rule itself
+    lives in the enclave repo's `seismic-network-manifest` crate.
+    """
     return "0x" + hashlib.sha256(manifest_bytes).hexdigest()
 
 
@@ -207,89 +203,19 @@ def _check_hex(value: Any, nbytes: int, fieldname: str) -> None:
         ) from None
 
 
-def _check_keys(obj: dict[str, Any], expected: set[str], where: str) -> None:
-    unknown = set(obj) - expected
-    missing = expected - set(obj)
-    if unknown:
-        raise ManifestSchemaError(f"{where}: unknown keys {sorted(unknown)}")
-    if missing:
-        raise ManifestSchemaError(f"{where}: missing keys {sorted(missing)}")
+def validate_manifest_schema(
+    manifest_bytes: bytes, manifest_bin: str = DEFAULT_MANIFEST_BIN
+) -> dict[str, Any]:
+    """Strictly parse manifest bytes against the v1 schema and return the
+    document.
 
-
-def validate_manifest_schema(manifest_bytes: bytes) -> dict[str, Any]:
-    """Strictly parse manifest bytes against the v1 schema.
-
-    Mirrors NetworkManifestV1::from_json_bytes in
-    enclave/crates/network-manifest: version probe first (so a future
-    version reports "unsupported manifest_version", not "unknown key"), then
-    reject unknown/missing keys and malformed hex.
+    The verdict is the manifest tool's (`seismic-manifest parse`, the
+    node-side parser): unknown or missing keys, malformed hex, and an
+    unsupported manifest_version all fail. Only then are the bytes loaded
+    here, so callers read fields the strict parser has already accepted.
     """
-    try:
-        obj = json.loads(manifest_bytes)
-    except json.JSONDecodeError as e:
-        raise ManifestSchemaError(f"not valid JSON: {e}") from None
-    if not isinstance(obj, dict):
-        raise ManifestSchemaError("manifest must be a JSON object")
-
-    version = obj.get("manifest_version")
-    if version != MANIFEST_VERSION:
-        raise ManifestSchemaError(
-            f"unsupported manifest_version {version!r}; "
-            f"this validator implements v{MANIFEST_VERSION}"
-        )
-
-    _check_keys(
-        obj,
-        {
-            "manifest_version",
-            "name",
-            "eth",
-            "summit",
-            "measurements",
-        },
-        "manifest",
-    )
-    if not isinstance(obj["name"], str):
-        raise ManifestSchemaError(f"name: expected string, got {obj['name']!r}")
-
-    eth = obj["eth"]
-    if not isinstance(eth, dict):
-        raise ManifestSchemaError("eth: expected object")
-    _check_keys(eth, {"chain_id", "genesis_hash"}, "eth")
-    # bool is an int subclass in Python; a JSON `true` must not pass as an id.
-    if not isinstance(eth["chain_id"], int) or isinstance(eth["chain_id"], bool):
-        raise ManifestSchemaError(
-            f"eth.chain_id: expected integer, got {eth['chain_id']!r}"
-        )
-    _check_hex(eth["genesis_hash"], 32, "eth.genesis_hash")
-
-    summit = obj["summit"]
-    if not isinstance(summit, dict):
-        raise ManifestSchemaError("summit: expected object")
-    _check_keys(summit, {"genesis_config_digest", "namespace"}, "summit")
-    _check_hex(summit["genesis_config_digest"], 32, "summit.genesis_config_digest")
-    if not isinstance(summit["namespace"], str):
-        raise ManifestSchemaError(
-            f"summit.namespace: expected string, got {summit['namespace']!r}"
-        )
-
-    measurements = obj["measurements"]
-    if not isinstance(measurements, dict):
-        raise ManifestSchemaError("measurements: expected object")
-    _check_keys(measurements, {"bootstrap_policy_hash", "contracts"}, "measurements")
-    _check_hex(
-        measurements["bootstrap_policy_hash"],
-        32,
-        "measurements.bootstrap_policy_hash",
-    )
-    contracts = measurements["contracts"]
-    if not isinstance(contracts, dict):
-        raise ManifestSchemaError("measurements.contracts: expected object")
-    _check_keys(contracts, {"registry", "authority"}, "measurements.contracts")
-    _check_hex(contracts["registry"], 20, "measurements.contracts.registry")
-    _check_hex(contracts["authority"], 20, "measurements.contracts.authority")
-
-    return obj
+    parse_manifest(manifest_bytes, manifest_bin=manifest_bin)
+    return json.loads(manifest_bytes)
 
 
 def inject_registry_genesis_storage(
@@ -875,10 +801,12 @@ def assemble(
     reth_bin: str = DEFAULT_RETH_BIN,
     admission_bin: str = DEFAULT_ADMISSION_BIN,
     summit_bin: str = DEFAULT_SUMMIT_BIN,
+    manifest_bin: str = DEFAULT_MANIFEST_BIN,
     genesis_hash_fn: Callable[[Path], str] | None = None,
     compile_fn: Callable[[bytes], dict[str, Any]] | None = None,
     digest_fn: Callable[[Path], str] | None = None,
     set_validators_fn: Callable[[bytes, list[dict[str, str]]], bytes] | None = None,
+    render_fn: Callable[[bytes], bytes] | None = None,
 ) -> AssembledManifest:
     """Assemble, render, and gate-check a v1 network manifest.
 
@@ -897,6 +825,11 @@ def assemble(
     into the shipped genesis copy, so eth.genesis_hash commits to the
     reviewed policy. The gates then re-validate the injected copy against an
     independent compile of the same document.
+
+    Rendering belongs to the manifest tool (`seismic-manifest render`): the
+    values assembled here go to it as a JSON document and the canonical
+    bytes come back, strictly parsed on the way — so a bad manifest never
+    leaves the deploy tool, and the gates run over the same bytes that ship.
     """
     input_genesis_bytes = reth_genesis.read_bytes()
     genesis = json.loads(input_genesis_bytes)
@@ -972,10 +905,9 @@ def assemble(
         },
     }
 
-    manifest_bytes = render_manifest(manifest)
-    # Self-check the emitted bytes through the same strict parse and gates a
-    # consumer will apply, so a bad manifest never leaves the deploy tool.
-    parsed = validate_manifest_schema(manifest_bytes)
+    render = render_fn or (lambda doc: render_manifest(doc, manifest_bin=manifest_bin))
+    manifest_bytes = render(json.dumps(manifest).encode("utf-8"))
+    parsed = json.loads(manifest_bytes)
     ctx = GateContext(
         reth_genesis=reth_genesis,
         summit_genesis=summit_genesis,
@@ -1337,6 +1269,15 @@ def _add_summit_bin(p: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_manifest_bin(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--manifest-bin",
+        default=DEFAULT_MANIFEST_BIN,
+        help="manifest tool from the enclave repo (bin/seismic-manifest): "
+        "renders the manifest and checks its schema",
+    )
+
+
 def _parse_init_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="scaffold a network directory's authored inputs"
@@ -1442,6 +1383,7 @@ def _parse_assemble_args(argv: list[str] | None = None) -> argparse.Namespace:
     _add_reth_bin(parser)
     _add_admission_bin(parser)
     _add_summit_bin(parser)
+    _add_manifest_bin(parser)
     args = parser.parse_args(argv)
     # Absolute, so every path this CLI prints is clickable in a terminal and
     # names one directory unambiguously.
@@ -1468,6 +1410,7 @@ def _parse_validate_args(argv: list[str] | None = None) -> argparse.Namespace:
     _add_reth_bin(parser)
     _add_admission_bin(parser)
     _add_summit_bin(parser)
+    _add_manifest_bin(parser)
     args = parser.parse_args(argv)
     # Absolute, so every path this CLI prints is clickable in a terminal and
     # names one directory unambiguously.
@@ -1564,6 +1507,7 @@ def assemble_main() -> None:
             reth_bin=args.reth_bin,
             admission_bin=args.admission_bin,
             summit_bin=args.summit_bin,
+            manifest_bin=args.manifest_bin,
         )
         write_artifact_set(args.out, assembled, force=args.force)
         logger.info("wrote %s", args.out / MANIFEST_FILENAME)
@@ -1581,7 +1525,7 @@ def validate_main() -> None:
     args = _parse_validate_args()
     try:
         manifest_bytes = args.manifest.read_bytes()
-        manifest = validate_manifest_schema(manifest_bytes)
+        manifest = validate_manifest_schema(manifest_bytes, args.manifest_bin)
         ctx = GateContext(
             reth_genesis=args.reth_genesis,
             summit_genesis=args.summit_genesis,

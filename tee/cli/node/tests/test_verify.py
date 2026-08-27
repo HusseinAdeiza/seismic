@@ -12,16 +12,21 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from tee.cli.common.errors import ManifestSchemaError
 from tee.cli.common.manifest import (
     MANIFEST_FILENAME,
     POLICY_FILENAME,
     GateError,
-    render_manifest,
 )
 
-# Reuse the canonical valid manifest from the manifest tests rather than
-# duplicate the schema here; the policy check parses it before use.
-from tee.cli.common.tests.test_manifest import FIXTURE_MANIFEST
+# Reuse the valid manifest document and the manifest-tool stand-ins from the
+# manifest tests rather than duplicate them here; the policy check validates
+# the manifest before use.
+from tee.cli.common.tests.test_manifest import (
+    FIXTURE_MANIFEST,
+    fake_render_manifest,
+    patch_manifest_tool,
+)
 from tee.cli.node import verify
 from tee.cli.node.verify import (
     prepare_policy,
@@ -51,7 +56,7 @@ def _manifest_pinning(policy_bytes: bytes) -> bytes:
     manifest["measurements"]["bootstrap_policy_hash"] = (
         "0x" + hashlib.sha256(policy_bytes).hexdigest()
     )
-    return render_manifest(manifest)
+    return fake_render_manifest(json.dumps(manifest).encode())
 
 
 def _args(**overrides) -> argparse.Namespace:
@@ -59,6 +64,7 @@ def _args(**overrides) -> argparse.Namespace:
         "policy": None,
         "measurements": None,
         "verify_quote_bin": "verify-quote",
+        "manifest_bin": "seismic-manifest",
         "admission_bin": "seismic-measurement-admission",
         "attestation_type": "azure-tdx",
         "pccs_url": None,
@@ -72,6 +78,7 @@ class ResolvePolicyTests(unittest.TestCase):
     own artifact, and it only counts if the manifest commits to it."""
 
     def setUp(self):
+        patch_manifest_tool(self)
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.network = Path(tmp.name)
@@ -154,9 +161,17 @@ class ResolvePolicyTests(unittest.TestCase):
                 self._resolve(measurements=measurements)
         self.assertIn("no measurement_id", str(ctx.exception))
 
-    def test_unparseable_manifest_is_rejected(self):
-        self.manifest.write_bytes(b"{}")
-        with self.assertRaisesRegex(SystemExit, "invalid manifest"):
+    def test_rejected_manifest_is_rejected(self):
+        # The verdict is the manifest tool's; resolve_policy turns it into
+        # the operator-facing exit.
+        with (
+            mock.patch.object(
+                verify.manifest_mod,
+                "parse_manifest",
+                side_effect=ManifestSchemaError("missing field `summit`"),
+            ),
+            self.assertRaisesRegex(SystemExit, "invalid manifest.*summit"),
+        ):
             self._resolve()
 
 
@@ -244,6 +259,7 @@ class MainTests(unittest.TestCase):
     """The standalone command: appraisal only — it never touches tdx-init."""
 
     def setUp(self):
+        patch_manifest_tool(self)
         self.descriptor = _write(
             ".json", json.dumps({"public_ip": PUBLIC_IP, "fqdn": FQDN})
         )

@@ -16,6 +16,9 @@ artifact goes stale unnoticed. It needs:
 - `seismic-measurement-admission` on PATH — the enclave repo's admission
   CLI (`cargo install --features cli` from crates/measurement-admission;
   CI builds it from enclave's seismic branch);
+- `seismic-manifest` on PATH — the enclave repo's manifest tool
+  (`cargo install` from bin/seismic-manifest; CI builds it from the same
+  enclave revision);
 - `seismic-reth` on PATH, for the `genesis-hash` subcommand (CI installs a
   prebuilt release with the setup-sreth action).
 
@@ -36,6 +39,7 @@ from pathlib import Path
 from eth_utils.crypto import keccak
 
 from tee.cli.common import manifest as manifest_mod
+from tee.cli.common.errors import ManifestSchemaError
 from tee.cli.common.manifest import (
     MANIFEST_FILENAME,
     POLICY_FILENAME,
@@ -43,14 +47,17 @@ from tee.cli.common.manifest import (
     SUMMIT_GENESIS_FILENAME,
     GateContext,
     GateError,
-    render_manifest,
+    compute_network_id,
     run_validation_gates,
     validate_manifest_schema,
 )
 from tee.cli.common.shell_outs import (
     DEFAULT_ADMISSION_BIN,
+    DEFAULT_MANIFEST_BIN,
     compile_measurement_policy,
+    parse_manifest,
     promote_measurements,
+    render_manifest,
 )
 from tee.cli.common.tests.test_manifest import (
     FIXTURE_MANIFEST,
@@ -65,6 +72,12 @@ MISSING_ADMISSION_BIN = (
     f"{DEFAULT_ADMISSION_BIN} not on PATH — this suite fails rather than "
     "skips; build the enclave repo's admission CLI (`cargo install "
     "--features cli` from crates/measurement-admission)"
+)
+MANIFEST_BIN = shutil.which(DEFAULT_MANIFEST_BIN)
+MISSING_MANIFEST_BIN = (
+    f"{DEFAULT_MANIFEST_BIN} not on PATH — this suite fails rather than "
+    "skips; build the enclave repo's manifest tool (`cargo install` from "
+    "bin/seismic-manifest)"
 )
 
 
@@ -113,26 +126,60 @@ def _committed_network_dirs() -> list[Path]:
     )
 
 
-class ManifestFixtureParityTests(unittest.TestCase):
-    """Byte-parity with the node-side manifest parser.
+class ManifestBoundaryTests(unittest.TestCase):
+    """The `render` / `parse` subprocess boundary, against the real
+    manifest tool.
 
-    The enclave repo pins the manifest fixture's exact bytes; deploy's
-    emitter must render the same dict to the same bytes. Fetched from
-    GitHub (the `seismic` branch) rather than assuming a sibling checkout
-    on disk, so the check runs in CI too. The fixture's network_id is also
-    pinned offline by test_manifest's
-    test_render_matches_enclave_network_id_vector; this adds the live
-    byte-level drift guard on top.
+    Rendering and the strict schema are the enclave crate's — its fixture
+    pins the canonical bytes and the network_id vector below. These cover
+    the shell-out: what comes back, how a rejection surfaces, and that the
+    committed example network still renders to its own bytes.
     """
 
-    ENCLAVE_FIXTURE_URL = (
-        "https://raw.githubusercontent.com/SeismicSystems/enclave/seismic/"
-        "crates/network-manifest/fixtures/network-manifest-v1.json"
+    # The enclave crate's fixtures/network-manifest-v1.json vector: the
+    # values of FIXTURE_MANIFEST, canonically rendered and hashed.
+    FIXTURE_NETWORK_ID = (
+        "0x8ef142e3f2bf15f8b201c4d8cda7848a9e846222c62b5615d4d36c7fccd98a24"
     )
 
-    def test_render_matches_enclave_fixture_bytes(self):
-        fixture = _fetch_live(self.ENCLAVE_FIXTURE_URL)
-        self.assertEqual(render_manifest(FIXTURE_MANIFEST), fixture)
+    def setUp(self):
+        self.assertIsNotNone(MANIFEST_BIN, MISSING_MANIFEST_BIN)
+
+    def test_render_is_canonical_and_parse_accepts_it(self):
+        # Hostile input formatting: reversed key order, no whitespace. The
+        # tool owns the bytes; the id is the crate's pinned vector.
+        shuffled = dict(reversed(list(FIXTURE_MANIFEST.items())))
+        rendered = render_manifest(json.dumps(shuffled, separators=(",", ":")).encode())
+        self.assertEqual(compute_network_id(rendered), self.FIXTURE_NETWORK_ID)
+        self.assertEqual(render_manifest(rendered), rendered)
+        self.assertEqual(validate_manifest_schema(rendered), FIXTURE_MANIFEST)
+
+    def test_rejections_are_schema_errors_naming_the_field(self):
+        bad = {**FIXTURE_MANIFEST, "tx_io_pk": "0x02ab"}
+        with self.assertRaisesRegex(ManifestSchemaError, "tx_io_pk"):
+            render_manifest(json.dumps(bad).encode())
+        with self.assertRaisesRegex(ManifestSchemaError, "tx_io_pk"):
+            parse_manifest(json.dumps(bad).encode())
+        v2 = {**bad, "manifest_version": 2}
+        with self.assertRaisesRegex(
+            ManifestSchemaError, "unsupported manifest_version 2"
+        ):
+            parse_manifest(json.dumps(v2).encode())
+        with self.assertRaises(ManifestSchemaError):
+            parse_manifest(b"{not json")
+
+    def test_committed_manifests_are_the_tools_rendering(self):
+        # A committed network directory's manifest is exactly what the tool
+        # renders from its own values: a rendering change would re-found
+        # every existing network on its next assemble.
+        networks = _committed_network_dirs()
+        self.assertTrue(
+            networks, f"no committed network directory under {NETWORKS_DIR}"
+        )
+        for network in networks:
+            with self.subTest(network=network.name):
+                committed = (network / MANIFEST_FILENAME).read_bytes()
+                self.assertEqual(render_manifest(committed), committed)
 
 
 class RuntimeCodeDriftTests(unittest.TestCase):
@@ -290,6 +337,7 @@ class CommittedNetworkDirTests(unittest.TestCase):
 
     def test_committed_network_dirs_pass_their_gates(self):
         self.assertIsNotNone(ADMISSION_BIN, MISSING_ADMISSION_BIN)
+        self.assertIsNotNone(MANIFEST_BIN, MISSING_MANIFEST_BIN)
         networks = _committed_network_dirs()
         self.assertTrue(
             networks, f"no committed network directory found under {NETWORKS_DIR}"

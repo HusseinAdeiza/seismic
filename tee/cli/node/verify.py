@@ -127,6 +127,12 @@ def add_tooling_args(parser: argparse.ArgumentParser) -> None:
         help="quote-verifier CLI from the enclave repo (bin/verify-quote)",
     )
     parser.add_argument(
+        "--manifest-bin",
+        default=shell_outs.DEFAULT_MANIFEST_BIN,
+        help="manifest tool from the enclave repo (bin/seismic-manifest), "
+        "which checks --manifest against the schema",
+    )
+    parser.add_argument(
         "--pccs-url",
         default=None,
         metavar="URL",
@@ -190,8 +196,10 @@ def resolve_policy(args: argparse.Namespace, *, offer_no_verify: bool = False) -
     )
     policy_bytes = policy_path.read_bytes()
     try:
-        manifest = manifest_mod.validate_manifest_schema(args.manifest.read_bytes())
-    except manifest_mod.ManifestSchemaError as e:
+        manifest = manifest_mod.validate_manifest_schema(
+            args.manifest.read_bytes(), args.manifest_bin
+        )
+    except (manifest_mod.ManifestSchemaError, manifest_mod.GateError) as e:
         raise SystemExit(f"--manifest {args.manifest}: invalid manifest: {e}") from None
     try:
         manifest_mod.validate_policy_matches(manifest, policy_bytes)
@@ -284,6 +292,8 @@ def retry_flags(args: argparse.Namespace) -> str:
         flags += f" --policy {args.policy}"
     if args.verify_quote_bin != shell_outs.DEFAULT_VERIFY_QUOTE_BIN:
         flags += f" --verify-quote-bin {args.verify_quote_bin}"
+    if args.manifest_bin != shell_outs.DEFAULT_MANIFEST_BIN:
+        flags += f" --manifest-bin {args.manifest_bin}"
     if args.pccs_url is not None:
         flags += f" --pccs-url {args.pccs_url}"
     return flags

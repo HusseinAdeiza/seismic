@@ -72,6 +72,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from tee.cli.common import manifest as manifest_mod
+from tee.cli.common import shell_outs
 from tee.cli.common.dashboard import CohortDashboard
 from tee.cli.common.descriptor import load_descriptor, require
 from tee.cli.common.logging_setup import setup_logging
@@ -333,6 +334,7 @@ def _configure_node(
     appraisal: Appraisal | None,
     states: dict[str, str],
     stop: threading.Event,
+    manifest_bin: str = shell_outs.DEFAULT_MANIFEST_BIN,
 ) -> bool:
     """Build + POST one node's config, poll its LUKS wipe, then deploy-verify
     it, writing the latest status line into `states[node.name]` for the
@@ -353,6 +355,7 @@ def _configure_node(
             summit_genesis_path=summit_genesis_path,
             external_ip=node.public_ip,
             bootnodes=node.bootnodes,
+            manifest_bin=manifest_bin,
         )
         states[node.name] = f"POSTing config to tdx-init :{TDX_INIT_PORT}…"
         post_config_to_tdx_init(node.public_ip, config)
@@ -383,6 +386,7 @@ def _run_cohort(
     summit_genesis_path: Path,
     email: str,
     appraisal: Appraisal | None,
+    manifest_bin: str = shell_outs.DEFAULT_MANIFEST_BIN,
 ) -> dict[str, bool]:
     """Configure and appraise every node concurrently, refreshing the dashboard
     until all workers finish. Returns {node name: ok}. Threads suit this — the
@@ -412,6 +416,7 @@ def _run_cohort(
                 appraisal,
                 states,
                 stop,
+                manifest_bin,
             )
         try:
             # Refresh while workers block on POST/poll.
@@ -485,6 +490,7 @@ def _bootstrap_greenfield(
     summit_genesis_path: Path,
     email: str,
     appraisal: Appraisal | None,
+    manifest_bin: str = shell_outs.DEFAULT_MANIFEST_BIN,
 ) -> dict[str, bool]:
     """Two-stage greenfield bootstrap: genesis first (so its enode exists),
     then the joiners pointed at it. Returns {node name: ok} across both stages.
@@ -508,6 +514,7 @@ def _bootstrap_greenfield(
         summit_genesis_path,
         email,
         appraisal,
+        manifest_bin,
     )
     if not results.get(genesis.name):
         print(
@@ -536,6 +543,7 @@ def _bootstrap_greenfield(
             summit_genesis_path,
             email,
             appraisal,
+            manifest_bin,
         )
     )
     return results
@@ -681,8 +689,10 @@ def main() -> None:
     # Validate the shared network artifacts once, so a bad one fails fast here
     # rather than as N identical per-worker errors mid-dashboard.
     try:
-        manifest = manifest_mod.validate_manifest_schema(args.manifest.read_bytes())
-    except manifest_mod.ManifestSchemaError as e:
+        manifest = manifest_mod.validate_manifest_schema(
+            args.manifest.read_bytes(), args.manifest_bin
+        )
+    except (manifest_mod.ManifestSchemaError, manifest_mod.GateError) as e:
         raise SystemExit(f"--manifest {args.manifest}: invalid manifest: {e}") from None
     reth_genesis = resolve_reth_genesis(args.reth_genesis, args.manifest)
     try:
@@ -757,11 +767,23 @@ def main() -> None:
         for node in nodes:
             node.bootnodes = enodes
         results = _run_cohort(
-            nodes, args.manifest, reth_genesis, summit_genesis, args.email, appraisal
+            nodes,
+            args.manifest,
+            reth_genesis,
+            summit_genesis,
+            args.email,
+            appraisal,
+            args.manifest_bin,
         )
     else:
         results = _bootstrap_greenfield(
-            nodes, args.manifest, reth_genesis, summit_genesis, args.email, appraisal
+            nodes,
+            args.manifest,
+            reth_genesis,
+            summit_genesis,
+            args.email,
+            appraisal,
+            args.manifest_bin,
         )
 
     # Refresh the founding set from every node's live enode (fresh each run).

@@ -55,6 +55,7 @@ from pathlib import Path
 import requests
 
 from tee.cli.common import manifest as manifest_mod
+from tee.cli.common import shell_outs
 from tee.cli.common.descriptor import load_descriptor, require
 from tee.cli.common.logging_setup import setup_logging
 from tee.cli.node import verify as verify_mod
@@ -116,6 +117,7 @@ def build_config(
     summit_genesis_path: Path,
     external_ip: str,
     bootnodes: list[str],
+    manifest_bin: str = shell_outs.DEFAULT_MANIFEST_BIN,
 ) -> Path:
     """Assemble the config POSTed to tdx-init, mutating no source. The fields
     come from: the node's public IP (→ `[node].external_ip`, reth's
@@ -160,8 +162,8 @@ def build_config(
     manifest_bytes = manifest_path.read_bytes()
     try:
         # Never POST bytes tdx-init would 400 at the far end.
-        manifest = manifest_mod.validate_manifest_schema(manifest_bytes)
-    except manifest_mod.ManifestSchemaError as e:
+        manifest = manifest_mod.validate_manifest_schema(manifest_bytes, manifest_bin)
+    except (manifest_mod.ManifestSchemaError, manifest_mod.GateError) as e:
         raise SystemExit(f"--manifest {manifest_path}: invalid manifest: {e}") from None
 
     reth_genesis_bytes = reth_genesis_path.read_bytes()
@@ -244,6 +246,7 @@ def deliver_config(
     summit_genesis_path: Path,
     bootnodes: list[str],
     print_summary: bool = True,
+    manifest_bin: str = shell_outs.DEFAULT_MANIFEST_BIN,
 ) -> bool:
     """Build + POST one node's config, then watch its first-boot LUKS wipe.
     The per-node delivery path behind `seismic-tee-node configure`
@@ -439,6 +442,7 @@ def main() -> None:
         bootnodes=args.bootnode,
         # With verification requested, the summary belongs after it passes.
         print_summary=policy_bytes is None,
+        manifest_bin=args.manifest_bin,
     )
 
     if policy_bytes is None:
