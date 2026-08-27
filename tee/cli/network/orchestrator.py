@@ -223,6 +223,16 @@ def _env_from_config(config_path: str) -> str:
     return match.group(1) if match else Path(config_path).stem
 
 
+def _default_stack_prefix(config_path: str) -> str:
+    """The cohort prefix `up` and `down` agree on when neither is given one.
+
+    Shared on purpose: the prefix names each node's stack, resource group,
+    VM, and DNS record, so a `down` that defaulted differently from the `up`
+    that provisioned the cohort would aim at another environment's stacks.
+    """
+    return f"{_env_from_config(config_path)}-bootstrap-node"
+
+
 def _ensure_passphrase(*, confirm: bool) -> None:
     """Make sure Pulumi's passphrase is available before touching stacks.
 
@@ -332,7 +342,7 @@ def up_main() -> None:
     if args.network is not None:
         vhd_name = _check_vhd_matches_network(template, args.network)
         print(f"Image pin {vhd_name} matches the {args.network} measurements input.")
-    prefix = args.stack_prefix or f"{_env_from_config(args.config)}-bootstrap-node"
+    prefix = args.stack_prefix or _default_stack_prefix(args.config)
     out_dir = _resolve_out_dir(args.out_dir, args.network)
     out_dir.mkdir(parents=True, exist_ok=True)
     names = [f"{prefix}-{i}" for i in range(1, count + 1)]
@@ -431,11 +441,22 @@ def _parse_down_args() -> argparse.Namespace:
         help="Destroy the whole cohort '<prefix>-1' … '<prefix>-<count>'.",
     )
     parser.add_argument(
-        "--stack-prefix",
-        default="dev-bootstrap-node",
+        "--config",
+        default=str(DEFAULT_CONFIG),
+        metavar="STACK_YAML",
         help=(
-            "Stack name prefix used with --count (default: dev-bootstrap-node). "
-            "Pass the cohort's <env>-bootstrap-node for non-dev environments."
+            "Pulumi stack config the cohort was provisioned from; supplies "
+            "the default --stack-prefix, exactly as it does for `up` "
+            f"(default: the seismic_node {DEFAULT_CONFIG.name})."
+        ),
+    )
+    parser.add_argument(
+        "--stack-prefix",
+        default=None,
+        help=(
+            "Stack name prefix used with --count. Default: the same "
+            "'<env>-bootstrap-node' `up` derives from --config, so a cohort "
+            "provisioned with default flags tears down with default flags."
         ),
     )
     parser.add_argument(
@@ -483,10 +504,11 @@ def _destroy_one(stack_name: str, out_dir: Path) -> None:
 def down_main() -> None:
     args = _parse_down_args()
     _ensure_passphrase(confirm=False)
+    prefix = args.stack_prefix or _default_stack_prefix(args.config)
     targets = (
         list(args.stack)
         if args.stack
-        else [f"{args.stack_prefix}-{i}" for i in range(1, args.count + 1)]
+        else [f"{prefix}-{i}" for i in range(1, args.count + 1)]
     )
     out_dir = _resolve_out_dir(args.out_dir, args.network)
 

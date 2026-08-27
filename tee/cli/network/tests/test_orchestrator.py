@@ -5,15 +5,20 @@ Run with:
 """
 
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tee.cli.common import manifest as manifest_mod
 from tee.cli.network.orchestrator import (
     DEFAULT_OUT_DIR,
     _check_vhd_matches_network,
     _cohort_size,
+    _default_stack_prefix,
+    _parse_down_args,
+    _parse_up_args,
     _resolve_out_dir,
 )
 
@@ -154,3 +159,40 @@ class CohortSizeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DefaultStackPrefixTests(unittest.TestCase):
+    """`up` and `down` derive their default cohort prefix from one place.
+
+    The prefix names each node's stack, resource group, VM, and DNS record,
+    so a `down` whose default disagreed with the `up` that provisioned the
+    cohort would aim at another environment's stacks — and destroy is not a
+    step that gets a second guess.
+    """
+
+    def test_env_label_names_the_cohort(self):
+        self.assertEqual(_default_stack_prefix("Pulumi.dev.yaml"), "dev-bootstrap-node")
+        self.assertEqual(
+            _default_stack_prefix("Pulumi.testnet.yaml"), "testnet-bootstrap-node"
+        )
+        # A path, as both CLIs pass it.
+        self.assertEqual(
+            _default_stack_prefix("tee/pulumi/seismic_node/Pulumi.testnet.yaml"),
+            "testnet-bootstrap-node",
+        )
+
+    def test_neither_cli_carries_its_own_default(self):
+        """Both parsers leave --stack-prefix unset and both take --config, so
+        the prefix can only come from `_default_stack_prefix`. A literal
+        default reintroduced on either side fails here."""
+        with mock.patch.object(sys, "argv", ["down", "--count", "2"]):
+            down = _parse_down_args()
+        with mock.patch.object(sys, "argv", ["up", "--count", "2"]):
+            up = _parse_up_args()
+
+        self.assertIsNone(down.stack_prefix)
+        self.assertIsNone(up.stack_prefix)
+        self.assertEqual(down.config, up.config)
+        self.assertEqual(
+            _default_stack_prefix(down.config), _default_stack_prefix(up.config)
+        )
