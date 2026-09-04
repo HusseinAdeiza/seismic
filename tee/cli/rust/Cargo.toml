@@ -1,0 +1,61 @@
+# The Rust deploy CLI: founding a Seismic network, and joining one.
+#
+# Provisioning is out of scope in both directions — neither CLI creates a
+# machine or destroys one. The work spans both sides of a machine's existence:
+# deriving the artifact set that is a network's identity needs no machine at
+# all, while configuring a node and verifying its attestation needs one
+# already running. The node descriptor is where those two halves meet, and it
+# comes from the Pulumi program and the cohort helper beside it, for one node
+# or N.
+#
+# The workspace is scoped to this directory rather than the repo root: deploy
+# is a multi-purpose repo and this is one subsystem in it.
+#
+# Three crates, split by audience. The split is a rule about who may depend on
+# whom, and here the compiler enforces it:
+#
+#   common   node descriptor, network-directory layout, HTTP and error types.
+#            Depends on neither side.
+#   node     -> seismic-tee-node, the operator CLI. Cloud-agnostic. Depends
+#            only on common.
+#   network  -> seismic-tee-network, the founder CLI. The only crate allowed
+#            to depend on both.
+#
+# The public operator repo is extracted along that line.
+[workspace]
+resolver = "3"
+members = [
+    "common",  # -> seismic-tee-common  (library)
+    "node",    # -> seismic-tee-node    (library + binary)
+    "network", # -> seismic-tee-network (library + binary)
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/SeismicSystems/deploy"
+authors = ["Seismic Systems"]
+
+[workspace.dependencies]
+seismic-tee-common = { path = "common" }
+seismic-tee-node = { path = "node" }
+
+# Enclave libraries, pinned by rev — the same mechanism seismic-reth uses for
+# seismic-crypto. Every rule the network's identity depends on has exactly one
+# implementation, and linking it rather than reimplementing it is what keeps
+# deploy's answer and a node's answer the same answer.
+seismic-network-manifest = { git = "https://github.com/SeismicSystems/enclave.git", rev = "5d59e0d214328cb877fe66f6abcc96ce8d98fb41" }
+
+clap = { version = "4.5", features = ["derive"] }
+# default-features off drops native-tls: an operator downloads one binary, so
+# it must not link the host's OpenSSL.
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+
+tempfile = "3"

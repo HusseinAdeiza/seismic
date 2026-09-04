@@ -1,0 +1,19 @@
+[package]
+name = "seismic-tee-common"
+description = "Shared foundation for the Seismic TEE deploy CLIs: node descriptor, network-directory layout, HTTP and error types"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+seismic-network-manifest.workspace = true
+
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

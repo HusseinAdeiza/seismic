@@ -1,0 +1,21 @@
+[package]
+name = "seismic-tee-node"
+description = "Operator CLI for a Seismic TEE node: configure it on first boot, and verify its attestation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+# The dependency direction the two CLIs are split on, as a Cargo edge: the
+# operator half may reach the shared foundation and nothing else. Declared
+# ahead of its first caller because the edge is the deliverable: where the seam
+# runs is this file's decision, not that of whichever command first needs it.
+seismic-tee-common.workspace = true
+
+clap.workspace = true
+
+[[bin]]
+name = "seismic-tee-node"
+path = "src/main.rs"
