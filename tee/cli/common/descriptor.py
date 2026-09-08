@@ -3,15 +3,16 @@
 A *descriptor* is a small JSON file describing one provisioned node — the
 public IP to reach it at (`public_ip`) and the FQDN clients use (`fqdn`).
 It is the boundary between the infrastructure layer (provisioning, owned
-by Pulumi and run standalone) and this CLI: the CLI consumes a descriptor
+by Pulumi and run standalone) and both CLIs: a CLI consumes a descriptor
 and never shells out to or wraps Pulumi.
 
-`seismic-tee-network up` emits exactly `{public_ip, fqdn}`. A
-bring-your-own-infra operator (Terraform, manual console, …) can
-hand-write the same shape — `pulumi stack output --json` works too, since
-only `public_ip`/`fqdn` are read and any extra keys are ignored:
+The seismic_node Pulumi program's `nodes` output is one `{public_ip, fqdn}`
+per node, keyed by name; one file per node is split out of it (the runbook
+has the loop). A bring-your-own-infra operator (Terraform, manual console,
+…) can hand-write the same shape, since only `public_ip`/`fqdn` are read
+and any extra keys are ignored:
 
-    seismic-tee-node configure --node dev-bootstrap-node-2.json \
+    seismic-tee-node configure --node my-node.json \
         --bootnode enode://… --manifest m.json
 """
 

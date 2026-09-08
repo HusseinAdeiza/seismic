@@ -3,7 +3,7 @@
 A founding cohort boots identity-free: each box's `summit-key-holder`
 generates its summit keypairs in RAM at boot and serves
 `GET /v1/quote?nonce=…` → `{pubkeys, evidence}` on :7879 until the box
-accepts its config POST. Harvest is the step between `up --network` and
+accepts its config POST. Harvest is the step between provisioning and
 `assemble`: it polls every box's holder, fetches its pubkeys plus
 a TDX quote over a fresh per-box nonce (`report_data` binds the nonce and
 both pubkeys, so a quote replayed from an earlier harvest can't satisfy
@@ -40,7 +40,7 @@ cohort whose size doesn't match the authored
 `inputs/founder-withdrawal-credentials.json` all abort
 the run. A harvested key is trustworthy only if the same box later accepts
 the real configure cleanly — never retry around a burned harvest; re-found
-instead (`down` + fresh `up`).
+instead (`pulumi destroy` + fresh `up`).
 """
 
 import argparse
@@ -189,8 +189,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         )
         if not args.node:
             raise SystemExit(
-                f"no --node given and no descriptors in {nodes_dir} (written "
-                "by `up --network`); pass --node explicitly"
+                f"no --node given and no descriptors in {nodes_dir} (split out "
+                "of the Pulumi stack's `nodes` output); pass --node explicitly"
             )
     else:
         # append+nargs yields one list per --node occurrence; flatten to the
@@ -299,8 +299,8 @@ def collect_quotes(
                 raise SystemExit(
                     f"{target.name}: quote window closed (HTTP 410) — the box "
                     "already accepted a config POST, so its founding keys are "
-                    "not harvestable. The harvest is burned: re-found (`down` "
-                    "+ fresh `up`) rather than retrying around it."
+                    "not harvestable. The harvest is burned: re-found (`pulumi "
+                    "destroy` + fresh `up`) rather than retrying around it."
                 ) from None
             except ValueError as e:
                 raise SystemExit(f"{target.name}: {e}") from None

@@ -180,8 +180,9 @@ def load_founding_facts(
         descriptor_path = nodes_dir / f"{name}.json"
         if not descriptor_path.is_file():
             raise SystemExit(
-                f"{descriptor_path} not found — the cohort descriptors from "
-                "`up --network` supply each founding validator's current IP. "
+                f"{descriptor_path} not found — the cohort descriptors (split "
+                "out of the Pulumi stack's `nodes` output) supply each founding "
+                "validator's current IP. "
                 "A harvested box whose descriptor is gone means the cohort "
                 "changed under the founding: re-found rather than configuring"
             )

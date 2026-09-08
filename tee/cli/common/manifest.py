@@ -43,7 +43,8 @@ by the manifest; everything under `inputs/` is provenance:
 Each artifact is its input with derived fields filled in at assemble time;
 the raw measurements become the bootstrap policy because promotion is a
 format transformation. `assemble` also reads the cohort descriptors under
-nodes/ (runtime infra state, written by `up --network`) for each founding
+nodes/ (runtime infra state, split out of the Pulumi stack's `nodes`
+output) for each founding
 validator's IP — delivered in the genesis file but excluded from its
 config digest, so IPs never enter network_id.
 
@@ -59,8 +60,9 @@ pins the harvested validator set):
         --measurements ../seismic-images/build/measurements.json \
         --founders 4
     # edit tee/networks/seismic-devnet-3/inputs/summit-genesis.toml and
-    # inputs/founder-withdrawal-credentials.json, then:
-    #   seismic-tee-network up --network tee/networks/seismic-devnet-3 --count N
+    # inputs/founder-withdrawal-credentials.json, then provision the cohort
+    # (the `nodes` map of a seismic_node Pulumi stack; its output is split
+    # into tee/networks/seismic-devnet-3/nodes/<name>.json), then:
     #   seismic-tee-network harvest tee/networks/seismic-devnet-3
     uv run seismic-tee-network assemble tee/networks/seismic-devnet-3
     uv run seismic-tee-network validate tee/networks/seismic-devnet-3
@@ -87,7 +89,7 @@ from eth_utils.crypto import keccak
 from tee.cli.common.descriptor import load_descriptor, require
 from tee.cli.common.errors import GateError, ManifestSchemaError
 from tee.cli.common.logging_setup import setup_logging
-from tee.cli.common.repo import DEFAULT_STACK_CONFIG
+from tee.cli.common.repo import SEISMIC_NODE_DIR
 from tee.cli.common.shell_outs import (
     DEFAULT_ADMISSION_BIN,
     DEFAULT_ATTESTATION_TYPE,
@@ -148,9 +150,10 @@ MEASUREMENTS_FILENAME = "measurements.json"
 # and the inputs they were derived from never collide.
 INPUTS_DIRNAME = "inputs"
 
-# Cohort descriptors (`up --network` output) live under this subdir of a
-# network directory. Mutable infra state — regenerated per deploy, deleted by
-# `down` — so it stays gitignored while the artifact set around it commits.
+# Cohort descriptors (split out of the Pulumi stack's `nodes` output) live
+# under this subdir of a network directory. Mutable infra state — regenerated
+# per deploy, gone with the stack — so it stays gitignored while the artifact
+# set around it commits.
 NODES_DIRNAME = "nodes"
 
 # The founding cohort's inputs: founder-withdrawal-credentials.json is
@@ -334,8 +337,9 @@ def load_harvest_records(harvest_dir: Path) -> dict[str, dict[str, Any]]:
     if not paths:
         raise GateError(
             f"no harvest records in {harvest_dir} — assemble pins the "
-            "founding validator set from them; provision the cohort "
-            "(`up --network`) and run `seismic-tee-network harvest` first"
+            "founding validator set from them; provision the cohort (the "
+            "Pulumi program's `nodes` map) and run `seismic-tee-network "
+            "harvest` first"
         )
     records: dict[str, dict[str, Any]] = {}
     for path in paths:
@@ -413,8 +417,9 @@ def load_founding_set(network_dir: Path) -> FoundingSet:
         descriptor_path = nodes_dir / f"{name}.json"
         if not descriptor_path.is_file():
             raise GateError(
-                f"{descriptor_path} not found — the cohort descriptors from "
-                "`up --network` supply each founding validator's IP. A "
+                f"{descriptor_path} not found — the cohort descriptors (split "
+                "out of the Pulumi stack's `nodes` output) supply each founding "
+                "validator's IP. A "
                 "harvested box whose descriptor is gone means the cohort "
                 "changed under the harvest: re-found rather than assembling"
             )
@@ -1443,20 +1448,24 @@ def init_main() -> None:
             if args.founders
             else "fill in one address per founding node in"
         )
-        # No --count on `up`: the authored credentials size the cohort.
+        # The authored credentials size the cohort: harvest and assemble
+        # both refuse a cohort whose node count disagrees with them.
         print(
             f"Scaffolded {args.dir}. Next:\n"
             f"  1. review {inputs_dir / SUMMIT_GENESIS_FILENAME}\n"
             f"  2. {founders_hint}\n"
             f"     {inputs_dir / FOUNDERS_FILENAME}\n"
-            f"  3. review the stack config the cohort boots from\n"
-            f"     {DEFAULT_STACK_CONFIG}\n"
-            "     (vhd_blob_url must name the image the measurements "
-            "describe;\n"
-            "      region, VM size, and operator_ip_cidr live there too)\n"
-            f"  4. seismic-tee-network up --network {args.dir}\n"
-            f"  5. seismic-tee-network harvest {args.dir}\n"
-            f"  6. seismic-tee-network assemble {args.dir}"
+            "  3. provision the cohort with the Pulumi program in\n"
+            f"     {SEISMIC_NODE_DIR}\n"
+            "     (one stack per environment; author one `nodes` entry per\n"
+            "      founding node and point measurements_path at\n"
+            f"      {inputs_dir / MEASUREMENTS_FILENAME}\n"
+            "      so a stale image pin is refused at preview — see\n"
+            "      tee/docs/runbook-devnet.md),\n"
+            f"     then split its `nodes` output into {args.dir / NODES_DIRNAME}/"
+            "<name>.json\n"
+            f"  4. seismic-tee-network harvest {args.dir}\n"
+            f"  5. seismic-tee-network assemble {args.dir}"
         )
     except (GateError, ManifestSchemaError) as e:
         logger.error("%s", e)

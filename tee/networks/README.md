@@ -28,7 +28,8 @@ tee/networks/<name>/
 │                                   used, so the quote stays verifiable
 │                                   once Intel's live collateral ages past it
 ├── nodes/                        runtime infra state (gitignored)
-│   ├── <node>.json                 descriptor from `up --network` (live IP)
+│   ├── <node>.json                 descriptor split out of the Pulumi
+│   │                               stack's `nodes` output (live IP)
 │   └── bootnodes.json              founding enode set from `configure`
 │
 │                                 artifact set: derived by `assemble`, every

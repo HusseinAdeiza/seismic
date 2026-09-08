@@ -6,10 +6,11 @@
 //! Pulumi and run standalone) and these CLIs: a CLI consumes a descriptor and
 //! never wraps Pulumi.
 //!
-//! `seismic-tee-network up` emits exactly `{public_ip, fqdn}`. A
+//! The seismic_node Pulumi program's `nodes` output is one `{public_ip, fqdn}`
+//! per node, keyed by name, and one file per node is split out of it. A
 //! bring-your-own-infra operator (Terraform, manual console, …) can hand-write
-//! the same shape, and `pulumi stack output --json` works too: only those two
-//! keys are read, and any extra keys are ignored.
+//! the same shape: only those two keys are read, and any extra keys are
+//! ignored.
 //!
 //! The file's stem is the node's name across a cohort
 //! (`dev-bootstrap-node-1.json` → `dev-bootstrap-node-1`), which is how the

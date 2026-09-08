@@ -1,5 +1,6 @@
-# Cohort descriptors written by `up --network` — runtime output (live IPs,
-# regenerated each deploy; `down --network` deletes them), never committed.
+# Cohort descriptors, split out of the Pulumi stack's `nodes` output — runtime
+# output (live IPs, regenerated each deploy, gone with the stack), never
+# committed.
 # Everything else in a network directory is its committable identity.
 */nodes/
 

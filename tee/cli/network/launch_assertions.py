@@ -24,7 +24,7 @@ network manifest pins, both hard failures:
    volume is open and the keystore visible, so an early read can
    transiently show fresh unpinned keys on a healthy node. A mismatch
    that *persists* is the dead-slot case — the fix is a re-found
-   (`down` + fresh `up`), never launching around it.
+   (`pulumi destroy` + fresh `up`), never launching around it.
 
 Each node is located by its cohort descriptor (public_ip/fqdn); the
 expected keys come from the committed harvest records
@@ -300,7 +300,8 @@ def assert_cohort_holder_keys(
     advice = (
         "A box still serving keys the manifest never pinned launched from a "
         "reboot inside the founding window — its pinned validator slot is "
-        "dead. Re-found (`down` + fresh `up`) rather than running degraded."
+        "dead. Re-found (`pulumi destroy` + fresh `up`) rather than running "
+        "degraded."
         if mismatched
         else "Holders that never answered may still be booting — re-run "
         "`configure` to re-assert once the cohort settles."

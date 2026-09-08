@@ -3,9 +3,10 @@
 Operator-facing: the commands a node operator runs against their own
 already-provisioned node (configure, verify, status today; stake / sync
 later). It is
-cloud-agnostic and descriptor-based — it never wraps Pulumi. Standing up a
-network (provisioning, harvest, founding) is the network founder's act and
-lives in the separate `seismic-tee-network` CLI.
+cloud-agnostic and descriptor-based — it never wraps Pulumi (provisioning
+is the seismic_node Pulumi program's job, for one node or a cohort).
+Founding a network (harvest, assemble, configuring the cohort) is the
+network founder's act and lives in the separate `seismic-tee-network` CLI.
 
 Wired via [project.scripts] in pyproject.toml. Each leaf forwards its argv
 to that module's argparse `main()`; see tee/cli/common/plumbing.py.

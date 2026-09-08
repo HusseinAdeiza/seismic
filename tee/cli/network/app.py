@@ -2,14 +2,13 @@
 
 The network-founder CLI — for whoever brings a network into existence
 (one of Seismic's, a fork, a private devnet), NOT for operating a single
-node of an existing network: it provisions a cohort of
-TDX nodes (`up` / `down`) and runs the one-time network-creation steps
-(`init`, `harvest`, `assemble`, `validate`, `configure`). This is the CLI
-that is *allowed* to wrap Pulumi —
-`up` / `down` drive the seismic_node Automation-API orchestrator. The
-operator CLI (`seismic-tee-node`) deliberately is not; the boundary is the node
-descriptor file (see tee/cli/common/descriptor.py), which this CLI produces
-(via provisioning) and consumes (harvest, configure).
+node of an existing network: it runs the one-time network-creation steps
+(`init`, `harvest`, `assemble`, `validate`, `configure`). It never
+provisions — neither CLI wraps Pulumi. The cohort comes from the
+seismic_node Pulumi program (tee/pulumi/seismic_node, one stack per
+environment with a `nodes` map), and this CLI starts at the node
+descriptor files (see tee/cli/common/descriptor.py) split out of that
+stack's `nodes` output; harvest and configure consume them.
 
 Wired via [project.scripts] in pyproject.toml. Each leaf forwards its argv
 to that module's argparse `main()`; see tee/cli/common/plumbing.py.
@@ -24,11 +23,12 @@ from tee.cli.common.plumbing import PASSTHROUGH, WorkflowOrderGroup, forward
 @click.group(
     cls=WorkflowOrderGroup,
     epilog="Commands are listed in the order they should be run: "
-    "init → up → harvest → assemble → validate → configure "
-    "(down tears the cohort back down).",
+    "init → harvest → assemble → validate → configure. Between init and "
+    "harvest, provision the cohort with the seismic_node Pulumi program "
+    "(tee/pulumi/seismic_node); pulumi destroy tears it down.",
 )
 def app() -> None:
-    """Seismic network founding + provisioning."""
+    """Seismic network founding."""
 
 
 @app.command(name="init", context_settings=PASSTHROUGH, add_help_option=False)
@@ -38,15 +38,6 @@ def init(argv: tuple[str, ...]) -> None:
     from tee.cli.common import manifest as manifest_mod
 
     forward(manifest_mod.init_main, "seismic-tee-network init", argv)
-
-
-@app.command(name="up", context_settings=PASSTHROUGH, add_help_option=False)
-@click.argument("argv", nargs=-1, type=click.UNPROCESSED)
-def up(argv: tuple[str, ...]) -> None:
-    """Provision a cohort of TDX nodes (one independent Pulumi stack each)."""
-    from tee.cli.network import orchestrator
-
-    forward(orchestrator.up_main, "seismic-tee-network up", argv)
 
 
 @app.command(name="harvest", context_settings=PASSTHROUGH, add_help_option=False)
@@ -83,15 +74,6 @@ def configure(argv: tuple[str, ...]) -> None:
     from tee.cli.network import cohort_configure
 
     forward(cohort_configure.main, "seismic-tee-network configure", argv)
-
-
-@app.command(name="down", context_settings=PASSTHROUGH, add_help_option=False)
-@click.argument("argv", nargs=-1, type=click.UNPROCESSED)
-def down(argv: tuple[str, ...]) -> None:
-    """Tear down cohort node(s); each stack destroys independently."""
-    from tee.cli.network import orchestrator
-
-    forward(orchestrator.down_main, "seismic-tee-network down", argv)
 
 
 if __name__ == "__main__":

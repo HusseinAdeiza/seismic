@@ -5,8 +5,8 @@
 //! the artifact set that *is* the network's identity from its authored inputs,
 //! which needs no machine at all, and then harvesting each node's founding
 //! keys and configuring the cohort, which needs all of them running. What it
-//! never does is provision — the descriptors come from the Pulumi program and
-//! the cohort helper beside it, for one node or N.
+//! never does is provision — the descriptors come from the Pulumi program,
+//! which provisions one node or N from one stack.
 //!
 //! It is the only crate allowed to depend on both sides: founding a network
 //! includes doing to each node what [`seismic_tee_node`] does to one.
