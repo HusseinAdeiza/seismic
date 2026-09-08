@@ -42,11 +42,10 @@ by the manifest; everything under `inputs/` is provenance:
 
 Each artifact is its input with derived fields filled in at assemble time;
 the raw measurements become the bootstrap policy because promotion is a
-format transformation. `assemble` also reads the cohort descriptors under
-nodes/ (runtime infra state, split out of the Pulumi stack's `nodes`
-output) for each founding
-validator's IP — delivered in the genesis file but excluded from its
-config digest, so IPs never enter network_id.
+format transformation. `assemble` also reads the cohort's descriptor map
+(nodes/nodes.json — runtime infra state, the Pulumi stack's `nodes` output
+saved as-is) for each founding validator's IP — delivered in the genesis
+file but excluded from its config digest, so IPs never enter network_id.
 
 Usage (one directory per network: `init` gathers the authored inputs — the
 only command that takes loose files, each a local path or an https:// URL —
@@ -61,8 +60,8 @@ pins the harvested validator set):
         --founders 4
     # edit tee/networks/seismic-devnet-3/inputs/summit-genesis.toml and
     # inputs/founder-withdrawal-credentials.json, then provision the cohort
-    # (the `nodes` map of a seismic_node Pulumi stack; its output is split
-    # into tee/networks/seismic-devnet-3/nodes/<name>.json), then:
+    # (the `nodes` map of a seismic_node Pulumi stack; save its output as
+    # tee/networks/seismic-devnet-3/nodes/nodes.json), then:
     #   seismic-tee-network harvest tee/networks/seismic-devnet-3
     uv run seismic-tee-network assemble tee/networks/seismic-devnet-3
     uv run seismic-tee-network validate tee/networks/seismic-devnet-3
@@ -86,7 +85,8 @@ from typing import Any
 import requests
 from eth_utils.crypto import keccak
 
-from tee.cli.common.descriptor import load_descriptor, require
+from tee.cli.common import descriptor as descriptor_mod
+from tee.cli.common.descriptor import NodeDescriptor, nodes_file
 from tee.cli.common.errors import GateError, ManifestSchemaError
 from tee.cli.common.logging_setup import setup_logging
 from tee.cli.common.repo import SEISMIC_NODE_DIR
@@ -150,11 +150,10 @@ MEASUREMENTS_FILENAME = "measurements.json"
 # and the inputs they were derived from never collide.
 INPUTS_DIRNAME = "inputs"
 
-# Cohort descriptors (split out of the Pulumi stack's `nodes` output) live
-# under this subdir of a network directory. Mutable infra state — regenerated
-# per deploy, gone with the stack — so it stays gitignored while the artifact
-# set around it commits.
-NODES_DIRNAME = "nodes"
+# The cohort's descriptor map (the Pulumi stack's `nodes` output, saved as-is)
+# lives under nodes/ — see tee/cli/common/descriptor.py, which owns that
+# layout; named here too, beside the other network-directory names.
+NODES_DIRNAME = descriptor_mod.NODES_DIRNAME
 
 # The founding cohort's inputs: founder-withdrawal-credentials.json is
 # authored (one address per founding node, paired in node-name order by
@@ -384,6 +383,31 @@ class FoundingSet:
     records: dict[str, dict[str, Any]]
 
 
+def load_descriptor_map(network_dir: Path) -> dict[str, NodeDescriptor]:
+    """Load the network's descriptor map, nodes/nodes.json, as a gate.
+
+    Every failure — no file, not JSON, an entry the CLIs can't act on — is a
+    GateError that names the file and says where the map comes from, since
+    the fix is always the same one command (save the stack's `nodes` output
+    there again).
+    """
+    path = nodes_file(network_dir)
+    if not path.is_file():
+        raise GateError(
+            f"{path} not found — save the cohort's descriptor map there: "
+            "`pulumi stack output nodes --json > "
+            f"{NODES_DIRNAME}/{descriptor_mod.NODES_FILENAME}` (a "
+            "bring-your-own-infra operator hand-writes the same shape; see "
+            "tee/cli/common/descriptor.py)"
+        )
+    try:
+        return descriptor_mod.load_descriptors(path)
+    except json.JSONDecodeError as e:
+        raise GateError(f"{path} is not valid JSON: {e}") from None
+    except ValueError as e:
+        raise GateError(str(e)) from None
+
+
 def load_founding_set(network_dir: Path) -> FoundingSet:
     """Pair the harvested cohort with its authored withdrawal credentials
     and current IPs into summit validator entries.
@@ -395,7 +419,7 @@ def load_founding_set(network_dir: Path) -> FoundingSet:
     either way assembling would pin a set other than the intended one. The
     pairing is logged and lands visibly in the emitted genesis, since
     nothing downstream can tell a swapped pair from an intended one. IPs
-    come from the cohort descriptors under nodes/ ("<ip>:<consensus
+    come from the cohort's descriptor map, nodes/nodes.json ("<ip>:<consensus
     port>"): delivered in the genesis file but excluded from its config
     digest, so the committed file is a founding-era snapshot and IP churn
     never re-founds.
@@ -411,28 +435,23 @@ def load_founding_set(network_dir: Path) -> FoundingSet:
             f"({', '.join(sorted(records))}) — author one address per "
             "founding node"
         )
-    nodes_dir = network_dir / NODES_DIRNAME
+    descriptors = load_descriptor_map(network_dir)
     validators = []
     for name, credentials in zip(sorted(records), founders, strict=True):
-        descriptor_path = nodes_dir / f"{name}.json"
-        if not descriptor_path.is_file():
+        if name not in descriptors:
             raise GateError(
-                f"{descriptor_path} not found — the cohort descriptors (split "
-                "out of the Pulumi stack's `nodes` output) supply each founding "
-                "validator's IP. A "
-                "harvested box whose descriptor is gone means the cohort "
-                "changed under the harvest: re-found rather than assembling"
+                f"{nodes_file(network_dir)} has no node {name!r} — the descriptor "
+                "map (the Pulumi stack's `nodes` output) supplies each founding "
+                "validator's IP. A harvested box that is gone from the map "
+                "means the cohort changed under the harvest: re-found rather "
+                "than assembling"
             )
-        try:
-            ip = require(load_descriptor(descriptor_path), "public_ip", descriptor_path)
-        except (json.JSONDecodeError, ValueError) as e:
-            raise GateError(f"{descriptor_path}: {e}") from None
         logger.info("founding validator %s: withdrawals to %s", name, credentials)
         validators.append(
             {
                 "node_public_key": records[name]["node_public_key"],
                 "consensus_public_key": records[name]["consensus_public_key"],
-                "ip_address": f"{ip}:{SUMMIT_CONSENSUS_PORT}",
+                "ip_address": f"{descriptors[name].public_ip}:{SUMMIT_CONSENSUS_PORT}",
                 "withdrawal_credentials": credentials,
             }
         )
@@ -1462,8 +1481,8 @@ def init_main() -> None:
             f"      {inputs_dir / MEASUREMENTS_FILENAME}\n"
             "      so a stale image pin is refused at preview — see\n"
             "      tee/docs/runbook-devnet.md),\n"
-            f"     then split its `nodes` output into {args.dir / NODES_DIRNAME}/"
-            "<name>.json\n"
+            f"     then save its `nodes` output: pulumi stack output nodes --json\n"
+            f"     > {nodes_file(args.dir)}\n"
             f"  4. seismic-tee-network harvest {args.dir}\n"
             f"  5. seismic-tee-network assemble {args.dir}"
         )

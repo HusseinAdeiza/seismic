@@ -17,6 +17,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from tee.cli.common.descriptor import NodeDescriptor
 from tee.cli.common.errors import GateError
 from tee.cli.network import cohort_configure
 from tee.cli.network.cohort_configure import (
@@ -32,20 +33,26 @@ ENODE_N1 = "enode://" + "ab" * 64 + "@1.1.1.1:30303"
 ENODE_N2 = "enode://" + "cd" * 64 + "@2.2.2.2:30303"
 
 
-def _descriptor(name: str, public_ip: str, fqdn: str) -> Path:
-    d = tempfile.mkdtemp()
-    path = Path(d) / f"{name}.json"
-    path.write_text(json.dumps({"public_ip": public_ip, "fqdn": fqdn}))
-    return path
+def _descriptors(*nodes: tuple[str, str, str]) -> dict[str, NodeDescriptor]:
+    """A descriptor map from (name, public_ip, fqdn) triples, as
+    `load_descriptors` would return it."""
+    return {name: NodeDescriptor(name, ip, fqdn) for name, ip, fqdn in nodes}
+
+
+THREE = _descriptors(
+    ("node-1", "1.1.1.1", "n1.example.com"),
+    ("node-2", "2.2.2.2", "n2.example.com"),
+    ("node-3", "3.3.3.3", "n3.example.com"),
+)
+TWO = _descriptors(
+    ("node-1", "1.1.1.1", "n1.example.com"),
+    ("node-2", "2.2.2.2", "n2.example.com"),
+)
 
 
 class BuildCohortTests(unittest.TestCase):
     def test_genesis_and_joiners(self):
-        g = _descriptor("node-1", "1.1.1.1", "n1.example.com")
-        j2 = _descriptor("node-2", "2.2.2.2", "n2.example.com")
-        j3 = _descriptor("node-3", "3.3.3.3", "n3.example.com")
-
-        nodes = build_cohort(g, [j2, j3])
+        nodes = build_cohort(THREE, "node-1", ["node-2", "node-3"])
 
         # Genesis first, exactly one (it mints root_key).
         self.assertEqual(len(nodes), 3)
@@ -59,25 +66,46 @@ class BuildCohortTests(unittest.TestCase):
         for joiner in nodes[1:]:
             self.assertFalse(joiner.genesis)
 
+    def test_joiners_default_to_the_rest_of_the_map(self):
+        # No --join: every other node in the map joins, in map (name) order.
+        nodes = build_cohort(THREE, "node-2")
+        self.assertEqual([n.name for n in nodes], ["node-2", "node-1", "node-3"])
+        self.assertEqual([n.genesis for n in nodes], [True, False, False])
+
+    def test_explicit_join_configures_a_subset(self):
+        nodes = build_cohort(THREE, "node-1", ["node-3"])
+        self.assertEqual([n.name for n in nodes], ["node-1", "node-3"])
+
     def test_genesis_only(self):
-        g = _descriptor("node-1", "1.1.1.1", "n1.example.com")
-        nodes = build_cohort(g, [])
+        nodes = build_cohort(TWO, "node-1", [])
         self.assertEqual(len(nodes), 1)
         self.assertTrue(nodes[0].genesis)
 
-    def test_duplicate_descriptor_rejected(self):
-        # Same descriptor as --genesis and --join would race conflicting POSTs
-        # (genesis_node=true and =false) against one node.
-        g = _descriptor("node-1", "1.1.1.1", "n1.example.com")
+    def test_unknown_name_rejected_naming_the_map(self):
+        # A role for a node the stack doesn't have is a typo, not a node.
+        with self.assertRaises(SystemExit) as ctx:
+            build_cohort(TWO, "node-1", ["node-9"])
+        self.assertIn("node-9", str(ctx.exception))
+        self.assertIn("node-1, node-2", str(ctx.exception))
         with self.assertRaises(SystemExit):
-            build_cohort(g, [g])
+            build_cohort(TWO, "node-9")
+
+    def test_duplicate_name_rejected(self):
+        # The same node as --genesis and --join would race conflicting POSTs
+        # (genesis_node=true and =false) against one node.
+        with self.assertRaises(SystemExit):
+            build_cohort(TWO, "node-1", ["node-1"])
+        with self.assertRaises(SystemExit):
+            build_cohort(TWO, "node-1", ["node-2", "node-2"])
 
     def test_duplicate_ip_rejected(self):
-        # Distinct descriptor files can still point at the same node.
-        g = _descriptor("node-1", "1.1.1.1", "n1.example.com")
-        j = _descriptor("node-2", "1.1.1.1", "n2.example.com")
+        # Distinct map entries can still point at the same node.
+        same_ip = _descriptors(
+            ("node-1", "1.1.1.1", "n1.example.com"),
+            ("node-2", "1.1.1.1", "n2.example.com"),
+        )
         with self.assertRaises(SystemExit):
-            build_cohort(g, [j])
+            build_cohort(same_ip, "node-1")
 
 
 class GreenfieldBootstrapTests(unittest.TestCase):
@@ -86,9 +114,7 @@ class GreenfieldBootstrapTests(unittest.TestCase):
     carrying the genesis enode."""
 
     def _cohort(self):
-        g = _descriptor("node-1", "1.1.1.1", "n1.example.com")
-        j = _descriptor("node-2", "2.2.2.2", "n2.example.com")
-        return build_cohort(g, [j])
+        return build_cohort(TWO, "node-1")
 
     def test_two_stage_assigns_bootnodes(self):
         nodes = self._cohort()
@@ -217,9 +243,7 @@ class AppraisalGateTests(unittest.TestCase):
 
 class PersistFoundingBootnodesTests(unittest.TestCase):
     def _cohort(self):
-        g = _descriptor("node-1", "1.1.1.1", "n1.example.com")
-        j = _descriptor("node-2", "2.2.2.2", "n2.example.com")
-        return build_cohort(g, [j])
+        return build_cohort(TWO, "node-1")
 
     def test_writes_full_set_when_all_ready(self):
         nodes = self._cohort()
@@ -360,15 +384,14 @@ class SpliceValidatorIpsTests(unittest.TestCase):
 
 class LoadFoundingFactsTests(unittest.TestCase):
     """The splice map joins the harvest (pinned keys) with the live
-    descriptors (current IPs); a harvested box whose descriptor is gone is a
-    cohort change, not a defaultable value."""
+    descriptor map (current IPs); a harvested box that is gone from the map
+    is a cohort change, not a defaultable value."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.dir = Path(self._tmp.name)
         (self.dir / "inputs" / "harvest").mkdir(parents=True)
-        (self.dir / "nodes").mkdir()
 
     def _harvest_record(self, name: str, node_key: str, consensus_key: str) -> None:
         (self.dir / "inputs" / "harvest" / f"{name}.json").write_text(
@@ -382,18 +405,15 @@ class LoadFoundingFactsTests(unittest.TestCase):
             )
         )
 
-    def _node_descriptor(self, name: str, public_ip: str) -> None:
-        (self.dir / "nodes" / f"{name}.json").write_text(
-            json.dumps({"public_ip": public_ip, "fqdn": f"{name}.example"})
-        )
-
     def test_joins_harvest_keys_with_descriptor_ips(self):
         self._harvest_record("node-1", NODE_KEY_1, CONSENSUS_KEY_1)
         self._harvest_record("node-2", NODE_KEY_2, CONSENSUS_KEY_2)
-        self._node_descriptor("node-1", "198.51.100.1")
-        self._node_descriptor("node-2", "198.51.100.2")
+        descriptors = _descriptors(
+            ("node-1", "198.51.100.1", "node-1.example"),
+            ("node-2", "198.51.100.2", "node-2.example"),
+        )
 
-        ip_by_pubkey, records = load_founding_facts(self.dir)
+        ip_by_pubkey, records = load_founding_facts(self.dir, descriptors)
 
         self.assertEqual(
             ip_by_pubkey,
@@ -401,15 +421,17 @@ class LoadFoundingFactsTests(unittest.TestCase):
         )
         self.assertEqual(sorted(records), ["node-1", "node-2"])
 
-    def test_missing_descriptor_is_a_cohort_change(self):
+    def test_harvested_box_gone_from_the_map_is_a_cohort_change(self):
         self._harvest_record("node-1", NODE_KEY_1, CONSENSUS_KEY_1)
+        only_node_2 = _descriptors(("node-2", "198.51.100.2", "node-2.example"))
         with self.assertRaises(SystemExit) as ctx:
-            load_founding_facts(self.dir)
+            load_founding_facts(self.dir, only_node_2)
         self.assertIn("re-found", str(ctx.exception))
+        self.assertIn("node-1", str(ctx.exception))
 
     def test_missing_harvest_names_the_prerequisite(self):
         with self.assertRaises(SystemExit) as ctx:
-            load_founding_facts(self.dir)
+            load_founding_facts(self.dir, TWO)
         self.assertIn("harvest", str(ctx.exception))
 
 

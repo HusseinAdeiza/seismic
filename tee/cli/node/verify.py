@@ -48,7 +48,7 @@ from pathlib import Path
 
 from tee.cli.common import manifest as manifest_mod
 from tee.cli.common import shell_outs
-from tee.cli.common.descriptor import load_descriptor, require
+from tee.cli.common.descriptor import add_node_args, load_node_arg
 from tee.cli.common.logging_setup import setup_logging
 from tee.cli.node.status import ENCLAVE_PORT
 
@@ -329,16 +329,7 @@ def parse_args() -> argparse.Namespace:
             "the network manifest and the measurement policy the manifest pins."
         ),
     )
-    parser.add_argument(
-        "--node",
-        type=Path,
-        required=True,
-        metavar="DESCRIPTOR",
-        help=(
-            "Path to a node descriptor JSON (e.g. `pulumi stack output "
-            "--json > node-2.json`). Provides the node's public_ip/fqdn."
-        ),
-    )
+    add_node_args(parser)
     parser.add_argument(
         "--manifest",
         type=Path,
@@ -355,8 +346,7 @@ def parse_args() -> argparse.Namespace:
     add_tooling_args(parser)
 
     args = parser.parse_args()
-    if not args.node.is_file():
-        raise SystemExit(f"--node descriptor not found: {args.node}")
+    args.descriptor = load_node_arg(args)
     if not args.manifest.is_file():
         raise SystemExit(f"--manifest file not found: {args.manifest}")
     check_policy_source_files(args)
@@ -368,12 +358,11 @@ def main() -> None:
     args = parse_args()
 
     policy_bytes = prepare_policy(args)
-    descriptor = load_descriptor(args.node)
     verify_deployment(
         args,
         policy_bytes,
-        fqdn=require(descriptor, "fqdn", args.node),
-        public_ip=require(descriptor, "public_ip", args.node),
+        fqdn=args.descriptor.fqdn,
+        public_ip=args.descriptor.public_ip,
     )
 
 

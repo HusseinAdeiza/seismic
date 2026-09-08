@@ -25,11 +25,10 @@ import sys
 import threading
 import time
 from dataclasses import dataclass
-from pathlib import Path
 
 import requests
 
-from tee.cli.common.descriptor import load_descriptor, require
+from tee.cli.common.descriptor import add_node_args, load_node_arg
 from tee.cli.common.logging_setup import setup_logging
 
 ENCLAVE_PORT = 7878
@@ -287,14 +286,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Watch a node's first-boot LUKS provisioning progress."
     )
-    parser.add_argument(
-        "--node",
-        type=Path,
-        required=True,
-        metavar="DESCRIPTOR",
-        help="Node descriptor JSON (provides public_ip); "
-        "see tee/cli/common/descriptor.py.",
-    )
+    add_node_args(parser)
     parser.add_argument(
         "--once",
         action="store_true",
@@ -308,15 +300,14 @@ def parse_args() -> argparse.Namespace:
         help=f"Poll interval (default {POLL_INTERVAL_SECONDS}s).",
     )
     args = parser.parse_args()
-    if not args.node.is_file():
-        raise SystemExit(f"--node descriptor not found: {args.node}")
+    args.descriptor = load_node_arg(args)
     return args
 
 
 def main() -> None:
     setup_logging()
     args = parse_args()
-    public_ip = require(load_descriptor(args.node), "public_ip", args.node)
+    public_ip = args.descriptor.public_ip
 
     if args.once:
         try:

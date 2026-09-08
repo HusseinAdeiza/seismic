@@ -1,6 +1,6 @@
-# Cohort descriptors, split out of the Pulumi stack's `nodes` output — runtime
-# output (live IPs, regenerated each deploy, gone with the stack), never
-# committed.
+# The cohort's descriptor map (the Pulumi stack's `nodes` output, saved as
+# nodes/nodes.json) and the founding bootnode set beside it — runtime output
+# (live IPs, regenerated each deploy, gone with the stack), never committed.
 # Everything else in a network directory is its committable identity.
 */nodes/
 

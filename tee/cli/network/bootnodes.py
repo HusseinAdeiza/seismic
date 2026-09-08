@@ -42,8 +42,8 @@ logger = logging.getLogger(__name__)
 # tdx-init's node-id grammar: exactly 128 hex chars (upper or lower).
 _ENODE_ID_RE = re.compile(r"^[0-9a-fA-F]{128}$")
 
-# Written into a network's nodes/ dir (beside the descriptors), gitignored via
-# tee/networks/.gitignore `*/nodes/`.
+# Written into a network's nodes/ dir (beside the descriptor map), gitignored
+# via tee/networks/.gitignore `*/nodes/`.
 BOOTNODES_FILENAME = "bootnodes.json"
 
 # Enode-readiness polling. reth serves seismic_nodeInfo only once it is up

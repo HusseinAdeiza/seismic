@@ -34,9 +34,9 @@ from the descriptor + role, `[node.domain]` from the descriptor fqdn +
 `--email`, and `[network]` from `--manifest` + `--reth-genesis` +
 `--summit-genesis` + `--bootnode`. Those network-wide artifacts stay
 standalone files, merged only at POST time. The node address is *brought
-by the operator* via a descriptor file (see tee/cli/common/descriptor.py),
-typically
-`pulumi stack output --json`. The CLI never provisions infrastructure
+by the operator* via a descriptor map file (see tee/cli/common/descriptor.py),
+typically `pulumi stack output nodes --json`, with `--name` picking the node
+when the file holds several. The CLI never provisions infrastructure
 (Pulumi's job).
 
 The POSTed TOML shape (`[network]`/`[node]`, split by provenance:
@@ -56,7 +56,7 @@ import requests
 
 from tee.cli.common import manifest as manifest_mod
 from tee.cli.common import shell_outs
-from tee.cli.common.descriptor import load_descriptor, require
+from tee.cli.common.descriptor import NodeDescriptor, add_node_args, load_node_arg
 from tee.cli.common.logging_setup import setup_logging
 from tee.cli.node import verify as verify_mod
 from tee.cli.node.status import watch_luks_provisioning
@@ -237,7 +237,7 @@ def post_config_to_tdx_init(ip_address: str, config_path: Path) -> None:
 
 
 def deliver_config(
-    descriptor_path: Path,
+    descriptor: NodeDescriptor,
     manifest_path: Path,
     email: str,
     *,
@@ -252,7 +252,7 @@ def deliver_config(
     The per-node delivery path behind `seismic-tee-node configure`
     (join: genesis_node=False).
 
-    Resolves the node's public_ip/fqdn from its descriptor (fqdn is the cert
+    Takes the node's public_ip/fqdn from its descriptor (fqdn is the cert
     domain and must resolve to this node, so it's required — a wrong/absent
     name fails certbot at boot). The public_ip doubles as `[node].external_ip`
     (reth's `--nat extip`), the same anti-drift reason `[node.domain]` is taken
@@ -266,9 +266,8 @@ def deliver_config(
     its own check passes — the summary is the success banner, so nothing
     should print it before the last gate.
     """
-    descriptor = load_descriptor(descriptor_path)
-    public_ip = require(descriptor, "public_ip", descriptor_path)
-    fqdn = require(descriptor, "fqdn", descriptor_path)
+    public_ip = descriptor.public_ip
+    fqdn = descriptor.fqdn
     role = "genesis" if genesis_node else "join"
 
     # Assemble the POST config before contacting the node, so bad local input
@@ -312,7 +311,8 @@ def deliver_config(
             "reach a ready state within the watch window (attestation service "
             ":7878 never came up, or the LUKS wipe errored). It may still be "
             "bootstrapping, or stuck — check attestation-service logs on the node, "
-            "then re-watch with:\n    seismic-tee-node status --node <descriptor>"
+            "then re-watch with:\n    seismic-tee-node status --node <file> "
+            "[--name <node>]"
         )
 
     if print_summary:
@@ -325,16 +325,7 @@ def parse_args() -> argparse.Namespace:
         prog="seismic-tee-node configure",
         description="Configure a provisioned Seismic TEE node to join a network.",
     )
-    parser.add_argument(
-        "--node",
-        type=Path,
-        required=True,
-        metavar="DESCRIPTOR",
-        help=(
-            "Path to a node descriptor JSON (e.g. `pulumi stack output "
-            "--json > node-2.json`). Provides the node's public_ip/fqdn."
-        ),
-    )
+    add_node_args(parser)
     parser.add_argument(
         "--manifest",
         type=Path,
@@ -413,8 +404,7 @@ def parse_args() -> argparse.Namespace:
     verify_mod.add_tooling_args(parser)
 
     args = parser.parse_args()
-    if not args.node.is_file():
-        raise SystemExit(f"--node descriptor not found: {args.node}")
+    args.descriptor = load_node_arg(args)
     if not args.manifest.is_file():
         raise SystemExit(f"--manifest file not found: {args.manifest}")
     verify_mod.check_policy_source_files(args)
@@ -424,6 +414,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     setup_logging()
     args = parse_args()
+    descriptor: NodeDescriptor = args.descriptor
 
     # Resolve the verification tooling and policy before the node is touched:
     # a missing verifier, a policy the manifest doesn't commit to, or a
@@ -433,7 +424,7 @@ def main() -> None:
     reth_genesis = resolve_reth_genesis(args.reth_genesis, args.manifest)
     summit_genesis = resolve_summit_genesis(args.summit_genesis, args.manifest)
     ready = deliver_config(
-        args.node,
+        descriptor,
         args.manifest,
         args.email,
         genesis_node=False,
@@ -452,16 +443,17 @@ def main() -> None:
         # up, so there is nothing to challenge yet. Exit nonzero — the
         # requested verification did not happen — and point at the standalone
         # command: the config this boot needs is already delivered.
+        name_flag = f" --name {args.name}" if args.name else ""
         raise SystemExit(
             "deploy verification skipped: the node was not confirmed ready. "
             f"Once it is up, run:\n    seismic-tee-node verify --node "
-            f"{args.node} --manifest {args.manifest}{verify_mod.retry_flags(args)}"
+            f"{args.node}{name_flag} --manifest {args.manifest}"
+            f"{verify_mod.retry_flags(args)}"
         )
-    descriptor = load_descriptor(args.node)
-    fqdn = require(descriptor, "fqdn", args.node)
-    public_ip = require(descriptor, "public_ip", args.node)
-    verify_mod.verify_deployment(args, policy_bytes, fqdn=fqdn, public_ip=public_ip)
-    _print_summary(fqdn, public_ip)
+    verify_mod.verify_deployment(
+        args, policy_bytes, fqdn=descriptor.fqdn, public_ip=descriptor.public_ip
+    )
+    _print_summary(descriptor.fqdn, descriptor.public_ip)
 
 
 def _print_summary(fqdn: str, public_ip: str) -> None:

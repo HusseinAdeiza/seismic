@@ -204,9 +204,9 @@
 
   <g class="node ephemeral" transform="translate(60,800)">
     <rect width="320" height="46" rx="8"/>
-    <text x="160" y="24">nodes/&lt;node&gt;.json (live IPs)</text>
+    <text x="160" y="24">nodes/nodes.json (live IPs)</text>
   </g>
-  <text class="caption" x="65" y="870">descriptors from up --network; gitignored</text>
+  <text class="caption" x="65" y="870">the stack's nodes output, saved as-is; gitignored</text>
 
   <g class="node tool" transform="translate(520,795)">
     <rect width="230" height="56" rx="8"/>

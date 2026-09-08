@@ -57,10 +57,9 @@ from typing import Any
 
 import requests
 
+from tee.cli.common import descriptor as descriptor_mod
 from tee.cli.common import manifest as manifest_mod
 from tee.cli.common import shell_outs
-from tee.cli.common.descriptor import load_descriptor, require
-from tee.cli.network import bootnodes as bootnodes_mod
 
 # summit-key-holder's HTTP port (plain HTTP: nginx and certbot exist only
 # post-configure). The node NSG restricts it to `operator_ip_cidr`, so the
@@ -93,9 +92,9 @@ class QuoteWindowClosed(Exception):
 
 @dataclass(frozen=True)
 class HarvestTarget:
-    """One cohort box: descriptor stem (its name in inputs/harvest/), its
-    IP, and the fresh 32-byte nonce (hex) minted for this run's quote
-    request."""
+    """One cohort box: its node name (its key in the descriptor map, and its
+    filename in inputs/harvest/), its IP, and the fresh 32-byte nonce (hex)
+    minted for this run's quote request."""
 
     name: str
     public_ip: str
@@ -108,27 +107,15 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "dir",
         type=Path,
         help=(
-            "Network directory (from `init`): reads the cohort "
-            f"descriptors in {manifest_mod.NODES_DIRNAME}/, the authored "
+            "Network directory (from `init`): reads the cohort's descriptor "
+            f"map {manifest_mod.NODES_DIRNAME}/{descriptor_mod.NODES_FILENAME} "
+            "(the Pulumi stack's `nodes` output — every node in it is "
+            "harvested), the authored "
             f"{manifest_mod.INPUTS_DIRNAME}/{manifest_mod.FOUNDERS_FILENAME} "
             f"and {manifest_mod.INPUTS_DIRNAME}/"
             f"{manifest_mod.MEASUREMENTS_FILENAME}, and writes the harvested "
             f"facts to {manifest_mod.INPUTS_DIRNAME}/"
             f"{manifest_mod.HARVEST_DIRNAME}/"
-        ),
-    )
-    parser.add_argument(
-        "--node",
-        type=Path,
-        nargs="+",
-        action="append",
-        default=None,
-        metavar="DESCRIPTOR",
-        help=(
-            "Node descriptor JSON file(s), one per cohort box — `--node "
-            "n1.json n2.json` and `--node n1.json --node n2.json` both work. "
-            "Default: every *.json in <dir>/nodes/ (written by `up "
-            "--network`) except bootnodes.json, sorted by name."
         ),
     )
     parser.add_argument(
@@ -177,40 +164,13 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "founders' withdrawal credentials (0x-prefixed addresses), one "
             "per founding node"
         )
-    if args.node is None:
-        nodes_dir = args.dir / manifest_mod.NODES_DIRNAME
-        # `configure` writes bootnodes.json into this same dir; it's runtime
-        # p2p state, not a node descriptor, so skip it or load_descriptor
-        # would abort on the missing fqdn/public_ip.
-        args.node = sorted(
-            p
-            for p in nodes_dir.glob("*.json")
-            if p.name != bootnodes_mod.BOOTNODES_FILENAME
-        )
-        if not args.node:
-            raise SystemExit(
-                f"no --node given and no descriptors in {nodes_dir} (split out "
-                "of the Pulumi stack's `nodes` output); pass --node explicitly"
-            )
-    else:
-        # append+nargs yields one list per --node occurrence; flatten to the
-        # cohort list callers expect.
-        args.node = [path for group in args.node for path in group]
-        # Descriptor filename stems are the harvest's node names (the
-        # inputs/harvest/ filenames, and the order the authored withdrawal
-        # credentials pair against), so compare stems, not paths: two
-        # spellings of one file or two files sharing a stem would otherwise
-        # silently collapse into one harvested box.
-        stems = [p.stem for p in args.node]
-        dupes = sorted({s for s in stems if stems.count(s) > 1})
-        if dupes:
-            raise SystemExit(
-                f"duplicate --node descriptor name(s): {', '.join(dupes)} — "
-                "each cohort box needs a unique descriptor filename stem"
-            )
-        for path in args.node:
-            if not path.is_file():
-                raise SystemExit(f"--node descriptor not found: {path}")
+    # The cohort is the descriptor map, whole: its keys are the harvest's
+    # node names (the inputs/harvest/ filenames, and the order the authored
+    # withdrawal credentials pair against), unique by construction.
+    try:
+        args.descriptors = manifest_mod.load_descriptor_map(args.dir)
+    except manifest_mod.GateError as e:
+        raise SystemExit(str(e)) from None
     return args
 
 
@@ -475,16 +435,14 @@ def main() -> None:
             "repo's bin/verify-quote and put it on PATH."
         )
 
-    targets = []
-    for path in args.node:
-        descriptor = load_descriptor(path)
-        targets.append(
-            HarvestTarget(
-                name=path.stem,
-                public_ip=require(descriptor, "public_ip", path),
-                nonce=secrets.token_bytes(32).hex(),
-            )
+    targets = [
+        HarvestTarget(
+            name=d.name,
+            public_ip=d.public_ip,
+            nonce=secrets.token_bytes(32).hex(),
         )
+        for d in args.descriptors.values()
+    ]
 
     load_founders(args.founders, [t.name for t in targets])
 

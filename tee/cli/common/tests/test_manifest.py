@@ -15,6 +15,7 @@ from unittest import mock
 
 from eth_utils.crypto import keccak
 
+from tee.cli.common import descriptor as descriptor_mod
 from tee.cli.common import manifest as manifest_mod
 from tee.cli.common import shell_outs
 from tee.cli.common.manifest import (
@@ -1054,8 +1055,8 @@ class InitUrlInputTests(unittest.TestCase):
 
 class FoundingSetTests(unittest.TestCase):
     """load_founding_set / load_harvest_records: pairing the harvest with
-    the authored credentials and the cohort descriptors into the validator
-    entries assemble pins."""
+    the authored credentials and the cohort's descriptor map into the
+    validator entries assemble pins."""
 
     ADDRESS = "0x" + "f3" * 20
 
@@ -1094,9 +1095,11 @@ class FoundingSetTests(unittest.TestCase):
         (self.harvest / f"{name}.json").write_text(json.dumps(record))
 
     def _write_descriptor(self, name: str, ip: str) -> None:
-        (self.nodes / f"{name}.json").write_text(
-            json.dumps({"public_ip": ip, "fqdn": f"{name}.example.com"})
-        )
+        """Add one node to the descriptor map (nodes/nodes.json)."""
+        path = self.nodes / descriptor_mod.NODES_FILENAME
+        nodes = json.loads(path.read_text()) if path.is_file() else {}
+        nodes[name] = {"public_ip": ip, "fqdn": f"{name}.example.com"}
+        path.write_text(json.dumps(nodes))
 
     def test_builds_validator_entries_sorted_by_node_name(self):
         # The authored credentials are positional: the i-th address pairs
@@ -1141,9 +1144,25 @@ class FoundingSetTests(unittest.TestCase):
         with self.assertRaisesRegex(GateError, r"2 withdrawal credential\(s\)"):
             load_founding_set(self.net)
 
-    def test_missing_descriptor_burns(self):
-        (self.nodes / "node-1.json").unlink()
+    def test_harvested_box_gone_from_the_map_burns(self):
+        (self.nodes / descriptor_mod.NODES_FILENAME).unlink()
+        self._write_descriptor("node-2", "203.0.113.8")
         with self.assertRaisesRegex(GateError, "re-found"):
+            load_founding_set(self.net)
+
+    def test_missing_descriptor_map_burns_naming_the_command_that_makes_it(self):
+        (self.nodes / descriptor_mod.NODES_FILENAME).unlink()
+        with self.assertRaisesRegex(GateError, "pulumi stack output nodes --json"):
+            load_founding_set(self.net)
+
+    def test_malformed_descriptor_map_burns(self):
+        (self.nodes / descriptor_mod.NODES_FILENAME).write_text("not json")
+        with self.assertRaisesRegex(GateError, "not valid JSON"):
+            load_founding_set(self.net)
+        (self.nodes / descriptor_mod.NODES_FILENAME).write_text(
+            json.dumps({"node-1": {"public_ip": None, "fqdn": "n1.example.com"}})
+        )
+        with self.assertRaisesRegex(GateError, "set to null"):
             load_founding_set(self.net)
 
     def test_malformed_credentials_rejected(self):

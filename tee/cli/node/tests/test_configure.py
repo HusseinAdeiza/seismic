@@ -227,7 +227,7 @@ class MainVerificationFlowTests(unittest.TestCase):
     def setUp(self):
         patch_manifest_tool(self)
         self.descriptor = _write(
-            ".json", json.dumps({"public_ip": "203.0.113.7", "fqdn": FQDN})
+            ".json", json.dumps({"node-1": {"public_ip": "203.0.113.7", "fqdn": FQDN}})
         )
         self.addCleanup(self.descriptor.unlink)
         self.manifest = _write(".json", FIXTURE_MANIFEST_BYTES)

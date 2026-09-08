@@ -6,9 +6,9 @@ node of an existing network: it runs the one-time network-creation steps
 (`init`, `harvest`, `assemble`, `validate`, `configure`). It never
 provisions — neither CLI wraps Pulumi. The cohort comes from the
 seismic_node Pulumi program (tee/pulumi/seismic_node, one stack per
-environment with a `nodes` map), and this CLI starts at the node
-descriptor files (see tee/cli/common/descriptor.py) split out of that
-stack's `nodes` output; harvest and configure consume them.
+environment with a `nodes` map), and this CLI starts at that map, saved
+as the network's descriptor file (see tee/cli/common/descriptor.py);
+harvest, assemble and configure consume it.
 
 Wired via [project.scripts] in pyproject.toml. Each leaf forwards its argv
 to that module's argparse `main()`; see tee/cli/common/plumbing.py.

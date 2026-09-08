@@ -19,7 +19,8 @@
 //! summit-genesis.toml                          the completed summit genesis
 //! measurement-policy-bootstrap.json            the founding accepted measurement set
 //!
-//! nodes/<node>.json                            node descriptors
+//! nodes/nodes.json                             the cohort's descriptor map
+//!                                              (the stack's `nodes` output)
 //! nodes/bootnodes.json                         the founding enode set
 //! ```
 //!
@@ -47,6 +48,9 @@ pub const HARVEST_DIRNAME: &str = "harvest";
 /// A subdirectory, so a glob over `harvest/*.json` never sees the collateral.
 pub const COLLATERAL_DIRNAME: &str = "dcap-collateral";
 pub const NODES_DIRNAME: &str = "nodes";
+/// The descriptor map, exactly as `pulumi stack output nodes --json` prints
+/// it; see [`crate::descriptor`].
+pub const NODES_FILENAME: &str = "nodes.json";
 pub const BOOTNODES_FILENAME: &str = "bootnodes.json";
 
 /// One network directory, addressed by the layout above.
@@ -130,8 +134,8 @@ impl NetworkDir {
         self.root.join(NODES_DIRNAME)
     }
 
-    pub fn descriptor(&self, node: &str) -> PathBuf {
-        self.nodes().join(format!("{node}.json"))
+    pub fn nodes_file(&self) -> PathBuf {
+        self.nodes().join(NODES_FILENAME)
     }
 
     pub fn bootnodes(&self) -> PathBuf {
@@ -168,8 +172,8 @@ mod tests {
             )
         );
         assert_eq!(
-            dir.descriptor("dev-bootstrap-node-1"),
-            Path::new("tee/networks/devnet-3/nodes/dev-bootstrap-node-1.json")
+            dir.nodes_file(),
+            Path::new("tee/networks/devnet-3/nodes/nodes.json")
         );
         assert_eq!(
             dir.bootnodes(),

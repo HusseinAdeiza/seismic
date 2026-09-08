@@ -17,9 +17,10 @@ from unittest import mock
 
 import requests
 
+from tee.cli.common import descriptor as descriptor_mod
 from tee.cli.common import manifest as manifest_mod
 from tee.cli.common import shell_outs
-from tee.cli.network import bootnodes, harvest
+from tee.cli.network import harvest
 
 NODE_KEY = "ab" * 32
 CONSENSUS_KEY = "cd" * 48
@@ -65,50 +66,37 @@ class ParseArgsTests(unittest.TestCase):
         (inputs / manifest_mod.MEASUREMENTS_FILENAME).write_text("{}")
         (inputs / manifest_mod.FOUNDERS_FILENAME).write_text("[]")
         self.nodes = self.dir / manifest_mod.NODES_DIRNAME
-        self.nodes.mkdir()
 
-    def test_node_defaults_to_nodes_dir_sorted_skipping_bootnodes(self):
-        (self.nodes / "b.json").write_text("{}")
-        (self.nodes / "a.json").write_text("{}")
-        (self.nodes / bootnodes.BOOTNODES_FILENAME).write_text("{}")
-        args = harvest._parse_args([str(self.dir)])
-        self.assertEqual(args.node, [self.nodes / "a.json", self.nodes / "b.json"])
+    def _write_map(self, nodes: dict) -> None:
+        self.nodes.mkdir(exist_ok=True)
+        (self.nodes / descriptor_mod.NODES_FILENAME).write_text(json.dumps(nodes))
 
-    def test_repeated_node_flag_accumulates(self):
-        n1 = self.nodes / "n1.json"
-        n2 = self.nodes / "n2.json"
-        n1.write_text("{}")
-        n2.write_text("{}")
-        args = harvest._parse_args(
-            [str(self.dir), "--node", str(n1), "--node", str(n2)]
+    def test_cohort_is_the_descriptor_map_in_name_order(self):
+        # The whole map is the cohort; sorted by name, the order the authored
+        # withdrawal credentials pair against (a saved `pulumi stack output
+        # --json` is already sorted, a hand-written map may not be).
+        self._write_map(
+            {
+                "b": {"public_ip": "203.0.113.2", "fqdn": "b.example"},
+                "a": {"public_ip": "203.0.113.1", "fqdn": "a.example"},
+            }
         )
-        self.assertEqual(args.node, [n1, n2])
+        args = harvest._parse_args([str(self.dir)])
+        self.assertEqual(list(args.descriptors), ["a", "b"])
+        self.assertEqual(args.descriptors["b"].public_ip, "203.0.113.2")
 
-    def test_duplicate_node_descriptor_rejected(self):
-        n1 = self.nodes / "n1.json"
-        n1.write_text("{}")
-        with self.assertRaises(SystemExit) as ctx:
-            harvest._parse_args([str(self.dir), "--node", str(n1), "--node", str(n1)])
-        self.assertIn("duplicate", str(ctx.exception))
-
-    def test_same_stem_under_different_paths_rejected(self):
-        # Stems are the harvest's node names: two descriptors sharing one
-        # stem would silently collapse into a single harvested box.
-        other = self.dir / "elsewhere"
-        other.mkdir()
-        n1 = self.nodes / "n1.json"
-        twin = other / "n1.json"
-        n1.write_text("{}")
-        twin.write_text("{}")
-        with self.assertRaises(SystemExit) as ctx:
-            harvest._parse_args([str(self.dir), "--node", str(n1), "--node", str(twin)])
-        self.assertIn("duplicate", str(ctx.exception))
-        self.assertIn("n1", str(ctx.exception))
-
-    def test_empty_nodes_dir_errors(self):
+    def test_missing_descriptor_map_errors_with_the_command_that_makes_it(self):
         with self.assertRaises(SystemExit) as ctx:
             harvest._parse_args([str(self.dir)])
-        self.assertIn("no --node given", str(ctx.exception))
+        self.assertIn(descriptor_mod.NODES_FILENAME, str(ctx.exception))
+        self.assertIn("pulumi stack output nodes --json", str(ctx.exception))
+
+    def test_malformed_map_entry_errors_naming_the_node(self):
+        self._write_map({"a": {"public_ip": "203.0.113.1"}})
+        with self.assertRaises(SystemExit) as ctx:
+            harvest._parse_args([str(self.dir)])
+        self.assertIn("'a'", str(ctx.exception))
+        self.assertIn("missing required key 'fqdn'", str(ctx.exception))
 
     def test_missing_founders_errors_with_authoring_hint(self):
         inputs = self.dir / manifest_mod.INPUTS_DIRNAME

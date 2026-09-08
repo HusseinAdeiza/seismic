@@ -28,8 +28,9 @@ tee/networks/<name>/
 │                                   used, so the quote stays verifiable
 │                                   once Intel's live collateral ages past it
 ├── nodes/                        runtime infra state (gitignored)
-│   ├── <node>.json                 descriptor split out of the Pulumi
-│   │                               stack's `nodes` output (live IP)
+│   ├── nodes.json                  the cohort's descriptor map: the Pulumi
+│   │                               stack's `nodes` output, saved as-is
+│   │                               (node name → live IP + fqdn)
 │   └── bootnodes.json              founding enode set from `configure`
 │
 │                                 artifact set: derived by `assemble`, every
@@ -60,8 +61,8 @@ manifest, and how the boot chain is sequenced to allow it — is
 Directories are committed because the directory is everything needed to
 (re)configure, join, or debug that network later, and its manifest is the
 network's immutable identity — a founded network's `network_id` must
-never drift. The `nodes/` descriptors are runtime output (live IPs) and
-stay gitignored.
+never drift. The `nodes/` map is runtime output (live IPs) and stays
+gitignored.
 
 Throwaway foundings go in a `tmp-*` directory instead — those are
 gitignored wholesale, so a scratch cohort can be founded, torn down, and

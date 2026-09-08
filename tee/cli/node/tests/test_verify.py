@@ -260,8 +260,9 @@ class MainTests(unittest.TestCase):
 
     def setUp(self):
         patch_manifest_tool(self)
+        # A one-key map: the node needs no --name.
         self.descriptor = _write(
-            ".json", json.dumps({"public_ip": PUBLIC_IP, "fqdn": FQDN})
+            ".json", json.dumps({"node-1": {"public_ip": PUBLIC_IP, "fqdn": FQDN}})
         )
         self.addCleanup(self.descriptor.unlink)
         self.measurements = _write(".json", b'[{"measurement_id": "img.vhd"}]')
@@ -286,6 +287,47 @@ class MainTests(unittest.TestCase):
         verified.assert_called_once_with(
             mock.ANY, b"policy", fqdn=FQDN, public_ip=PUBLIC_IP
         )
+
+    def test_name_picks_the_node_out_of_a_cohort_map(self):
+        cohort = _write(
+            ".json",
+            json.dumps(
+                {
+                    "node-1": {"public_ip": PUBLIC_IP, "fqdn": FQDN},
+                    "node-2": {"public_ip": "203.0.113.99", "fqdn": "other.example"},
+                }
+            ),
+        )
+        self.addCleanup(cohort.unlink)
+        argv = [*self.argv, "--name", "node-2"]
+        argv[argv.index(str(self.descriptor))] = str(cohort)
+        with (
+            mock.patch("sys.argv", argv),
+            mock.patch.object(verify, "prepare_policy", return_value=b"policy"),
+            mock.patch.object(verify, "verify_deployment") as verified,
+        ):
+            verify.main()
+        verified.assert_called_once_with(
+            mock.ANY, b"policy", fqdn="other.example", public_ip="203.0.113.99"
+        )
+
+    def test_a_cohort_map_without_name_is_rejected(self):
+        cohort = _write(
+            ".json",
+            json.dumps(
+                {
+                    "node-1": {"public_ip": PUBLIC_IP, "fqdn": FQDN},
+                    "node-2": {"public_ip": "203.0.113.99", "fqdn": "other.example"},
+                }
+            ),
+        )
+        self.addCleanup(cohort.unlink)
+        argv = list(self.argv)
+        argv[argv.index(str(self.descriptor))] = str(cohort)
+        with mock.patch("sys.argv", argv):
+            with self.assertRaises(SystemExit) as ctx:
+                verify.main()
+        self.assertIn("--name", str(ctx.exception))
 
     def test_missing_measurements_file_is_rejected(self):
         argv = self.argv + [

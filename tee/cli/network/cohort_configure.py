@@ -44,8 +44,8 @@ The summit genesis is delivered with current IPs spliced in: the committed
 summit-genesis.toml is a founding-era snapshot whose `[[validators]].ip_address`
 entries are network topology, not identity — excluded from the manifest's
 config digest — so each configure run replaces them with the live IPs from
-the cohort descriptors (`nodes/*.json`) without re-serializing any other
-field. After the whole cohort accepts its config, the launch assertions
+the cohort's descriptor map (`nodes/nodes.json`) without re-serializing any
+other field. After the whole cohort accepts its config, the launch assertions
 (see launch_assertions.py) verify each box against what the manifest pins:
 reth block 0 equals `eth.genesis_hash`, and each holder serves exactly the
 founding keys harvested from it. Any mismatch is a hard failure.
@@ -71,10 +71,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
 
+from tee.cli.common import descriptor as descriptor_mod
 from tee.cli.common import manifest as manifest_mod
 from tee.cli.common import shell_outs
 from tee.cli.common.dashboard import CohortDashboard
-from tee.cli.common.descriptor import load_descriptor, require
+from tee.cli.common.descriptor import NodeDescriptor
 from tee.cli.common.logging_setup import setup_logging
 from tee.cli.network import bootnodes as bootnodes_mod
 from tee.cli.network import launch_assertions
@@ -93,7 +94,8 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class Node:
-    """One cohort member, resolved from its descriptor + assigned role.
+    """One cohort member, resolved from its descriptor-map entry + assigned
+    role.
 
     `bootnodes` (→ `[network].bootnodes`: reth p2p + tdx-init's derived
     root-key fetch peers) is assigned by the configure flow, not here —
@@ -101,7 +103,7 @@ class Node:
     the full founding set on re-configure.
     """
 
-    name: str  # short label (the descriptor filename stem)
+    name: str  # short label (the node's key in the descriptor map)
     public_ip: str
     fqdn: str
     genesis: bool
@@ -121,31 +123,47 @@ class Appraisal:
     policy_bytes: bytes
 
 
-def _load_node(descriptor_path: Path, *, genesis: bool) -> Node:
-    descriptor = load_descriptor(descriptor_path)
+def _node(descriptor: NodeDescriptor, *, genesis: bool) -> Node:
     return Node(
-        name=descriptor_path.stem,
-        public_ip=require(descriptor, "public_ip", descriptor_path),
-        fqdn=require(descriptor, "fqdn", descriptor_path),
+        name=descriptor.name,
+        public_ip=descriptor.public_ip,
+        fqdn=descriptor.fqdn,
         genesis=genesis,
     )
 
 
-def build_cohort(genesis_path: Path, join_paths: list[Path]) -> list[Node]:
-    """Resolve the cohort: exactly one genesis (mints `root_key`), everyone
-    else a joiner. Role assignment lives here, not in a per-node flag, so
-    there is exactly one genesis by construction. Joiners' root-key source
-    needs no assignment: tdx-init derives it from the bootnodes the configure
-    flow hands them (stage-2 joiners get the genesis enode, so they fetch
-    `root_key` from `http://<genesis_ip>:7878`).
-    """
-    genesis = _load_node(genesis_path, genesis=True)
-    joiners = [_load_node(p, genesis=False) for p in join_paths]
-    nodes = [genesis, *joiners]
+def build_cohort(
+    descriptors: dict[str, NodeDescriptor],
+    genesis: str,
+    join: list[str] | None = None,
+) -> list[Node]:
+    """Resolve the cohort from the descriptor map by name: exactly one genesis
+    (mints `root_key`), everyone else a joiner. Role assignment lives here,
+    not in a per-node flag, so there is exactly one genesis by construction.
+    Joiners' root-key source needs no assignment: tdx-init derives it from
+    the bootnodes the configure flow hands them (stage-2 joiners get the
+    genesis enode, so they fetch `root_key` from `http://<genesis_ip>:7878`).
 
-    # A descriptor passed twice (--genesis reused as --join, or a copy-pasted
-    # --join) would race two conflicting POSTs against one node and silently
-    # collide on the name-keyed dashboard/result dicts — refuse instead.
+    `join` is the joiners' names; None (the default) means every other node
+    in the map, and a list configures just that subset. Names must be keys
+    of the map — a role for a node the stack doesn't have is a typo, not a
+    node.
+    """
+    if join is None:
+        join = [name for name in descriptors if name != genesis]
+    names = [genesis, *join]
+    unknown = sorted({n for n in names if n not in descriptors})
+    if unknown:
+        raise SystemExit(
+            f"no such node(s) in the descriptor map: {', '.join(unknown)} — "
+            f"it holds {', '.join(descriptors)}"
+        )
+
+    # A name given twice (--genesis reused as --join, or a copy-pasted --join)
+    # would race two conflicting POSTs against one node and silently collide
+    # on the name-keyed dashboard/result dicts — refuse instead. Two map
+    # entries sharing an IP are the same mistake in the file.
+    nodes = [_node(descriptors[name], genesis=(i == 0)) for i, name in enumerate(names)]
     for what, counts in (
         ("name", Counter(n.name for n in nodes)),
         ("public_ip", Counter(n.public_ip for n in nodes)),
@@ -154,17 +172,17 @@ def build_cohort(genesis_path: Path, join_paths: list[Path]) -> list[Node]:
         if dupes:
             raise SystemExit(
                 f"duplicate node {what}(s) in cohort: {', '.join(dupes)} — "
-                "was the same descriptor passed more than once?"
+                "was the same node named more than once?"
             )
     return nodes
 
 
 def load_founding_facts(
-    network_dir: Path,
+    network_dir: Path, descriptors: dict[str, NodeDescriptor]
 ) -> tuple[dict[str, str], dict[str, dict]]:
     """Load the founding facts the delivery needs from the network directory:
     the current-IP splice map (pinned node pubkey → "<ip>:<consensus port>",
-    from `inputs/harvest/` joined with the live `nodes/` descriptors) and the
+    from `inputs/harvest/` joined with the live descriptor map) and the
     harvest records themselves (each configured box's pinned keys, for the
     launch assertions).
     """
@@ -174,24 +192,18 @@ def load_founding_facts(
         )
     except manifest_mod.GateError as e:
         raise SystemExit(f"{network_dir}: {e}") from None
-    nodes_dir = network_dir / manifest_mod.NODES_DIRNAME
     ip_by_node_pubkey: dict[str, str] = {}
     for name in sorted(records):
-        descriptor_path = nodes_dir / f"{name}.json"
-        if not descriptor_path.is_file():
+        if name not in descriptors:
             raise SystemExit(
-                f"{descriptor_path} not found — the cohort descriptors (split "
-                "out of the Pulumi stack's `nodes` output) supply each founding "
-                "validator's current IP. "
-                "A harvested box whose descriptor is gone means the cohort "
-                "changed under the founding: re-found rather than configuring"
+                f"{manifest_mod.nodes_file(network_dir)} has no node {name!r} — "
+                "the descriptor map (the Pulumi stack's `nodes` output) supplies "
+                "each founding validator's current IP. A harvested box that is "
+                "gone from the map means the cohort changed under the founding: "
+                "re-found rather than configuring"
             )
-        try:
-            ip = require(load_descriptor(descriptor_path), "public_ip", descriptor_path)
-        except (json.JSONDecodeError, ValueError) as e:
-            raise SystemExit(f"{descriptor_path}: {e}") from None
         ip_by_node_pubkey[records[name]["node_public_key"]] = (
-            f"{ip}:{manifest_mod.SUMMIT_CONSENSUS_PORT}"
+            f"{descriptors[name].public_ip}:{manifest_mod.SUMMIT_CONSENSUS_PORT}"
         )
     return ip_by_node_pubkey, records
 
@@ -245,7 +257,7 @@ def splice_validator_ips(
     if sorted(pinned) != sorted(ip_by_node_pubkey):
         raise SystemExit(
             "the summit genesis's pinned validator set and the founding "
-            "inputs (inputs/harvest/ + nodes/ descriptors) disagree — the "
+            "inputs (inputs/harvest/ + nodes/nodes.json) disagree — the "
             "cohort changed under the founding; re-found rather than "
             "delivering a genesis that strands a pinned peer:\n"
             f"    pinned node keys:    {', '.join(sorted(pinned))}\n"
@@ -476,8 +488,9 @@ def _report(
                 "A node that took its config but did not pass the appraisal is "
                 "retried with `verify`, not with a second `configure` "
                 "(tdx-init takes one config POST per boot):\n"
-                "    seismic-tee-node verify --node <descriptor> --manifest "
-                f"{args.manifest}{verify_mod.retry_flags(args)}\n"
+                "    seismic-tee-node verify --node "
+                f"{manifest_mod.nodes_file(args.manifest.parent)} --name <node> "
+                f"--manifest {args.manifest}{verify_mod.retry_flags(args)}\n"
             )
         raise SystemExit(
             f"{len(failed)}/{len(nodes)} node(s) failed: {', '.join(failed)}"
@@ -605,24 +618,25 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--genesis",
-        type=Path,
         required=True,
-        metavar="DESCRIPTOR",
+        metavar="NAME",
         help=(
-            "Descriptor for the one genesis node (mints root_key locally). "
-            "Exactly one node per network is genesis; assigning it here (not a "
-            "per-node flag) makes a double-genesis split impossible."
+            "Name of the one genesis node (mints root_key locally), as keyed in "
+            f"the descriptor map {manifest_mod.NODES_DIRNAME}/"
+            f"{descriptor_mod.NODES_FILENAME} beside --manifest. Exactly one "
+            "node per network is genesis; assigning it here (not a per-node "
+            "flag) makes a double-genesis split impossible."
         ),
     )
     parser.add_argument(
         "--join",
-        type=Path,
         action="append",
-        default=[],
-        metavar="DESCRIPTOR",
+        default=None,
+        metavar="NAME",
         help=(
-            "Descriptor for a joining node (fetches root_key from genesis via "
-            "getWrappedRootKey). Repeatable; omit for a genesis-only bring-up."
+            "Name of a joining node (fetches root_key from genesis via "
+            "getWrappedRootKey). Repeatable. Default: every other node in the "
+            "descriptor map; name a subset to configure only those."
         ),
     )
     parser.add_argument(
@@ -676,9 +690,8 @@ def parse_args() -> argparse.Namespace:
     verify_mod.add_tooling_args(parser)
 
     args = parser.parse_args()
-    for path in [args.genesis, *args.join, args.manifest]:
-        if not path.is_file():
-            raise SystemExit(f"file not found: {path}")
+    if not args.manifest.is_file():
+        raise SystemExit(f"file not found: {args.manifest}")
     verify_mod.check_policy_source_files(args)
     return args
 
@@ -717,9 +730,14 @@ def main() -> None:
     appraisal = None if policy_bytes is None else Appraisal(args, policy_bytes)
 
     # The founding inputs live beside the manifest (the network-directory
-    # layout): the harvest supplies each box's pinned keys, the descriptors
-    # its current IP.
-    ip_by_node_pubkey, harvest_records = load_founding_facts(args.manifest.parent)
+    # layout): the harvest supplies each box's pinned keys, the descriptor
+    # map its current IP.
+    network_dir = args.manifest.parent
+    try:
+        descriptors = manifest_mod.load_descriptor_map(network_dir)
+    except manifest_mod.GateError as e:
+        raise SystemExit(str(e)) from None
+    ip_by_node_pubkey, harvest_records = load_founding_facts(network_dir, descriptors)
     spliced_bytes = splice_validator_ips(committed_genesis_bytes, ip_by_node_pubkey)
     if spliced_bytes != committed_genesis_bytes:
         print(
@@ -736,7 +754,7 @@ def main() -> None:
         f.write(spliced_bytes)
         summit_genesis = Path(f.name)
 
-    nodes = build_cohort(args.genesis, args.join)
+    nodes = build_cohort(descriptors, args.genesis, args.join)
     unharvested = sorted(n.name for n in nodes if n.name not in harvest_records)
     if unharvested:
         raise SystemExit(
@@ -751,9 +769,11 @@ def main() -> None:
         + (f", joining={joiners}" if joiners else " (genesis-only)")
     )
 
-    # bootnodes.json lives beside the descriptors (the genesis descriptor's
-    # dir, i.e. <network>/nodes/) — the founding enode set from a prior run.
-    bootnodes_path = args.genesis.parent / bootnodes_mod.BOOTNODES_FILENAME
+    # bootnodes.json lives beside the descriptor map (<network>/nodes/) — the
+    # founding enode set from a prior run.
+    bootnodes_path = (
+        network_dir / manifest_mod.NODES_DIRNAME / bootnodes_mod.BOOTNODES_FILENAME
+    )
     if bootnodes_path.exists():
         # Re-configure: hand the full founding set to every node (a node
         # listing its own enode is harmless) and configure in one parallel

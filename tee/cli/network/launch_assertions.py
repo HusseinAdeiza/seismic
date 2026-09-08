@@ -26,7 +26,7 @@ network manifest pins, both hard failures:
    that *persists* is the dead-slot case — the fix is a re-found
    (`pulumi destroy` + fresh `up`), never launching around it.
 
-Each node is located by its cohort descriptor (public_ip/fqdn); the
+Each node is located by its descriptor-map entry (public_ip/fqdn); the
 expected keys come from the committed harvest records
 (`inputs/harvest/<node>.json`), whose pairing with the pinned validator
 set `assemble` already enforced.

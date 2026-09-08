@@ -67,7 +67,6 @@ mod tests {
 
     fn descriptor() -> NodeDescriptor {
         NodeDescriptor {
-            name: "dev-bootstrap-node-1".into(),
             public_ip: "203.0.113.7".into(),
             fqdn: "az-1.seismicdev.net".into(),
         }
