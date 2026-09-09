@@ -360,10 +360,10 @@ pub(crate) mod tests {
     /// carries the canonical MeasurementRegistry runtime, so it is the one
     /// genesis these tests can hold to the real compiler's code-hash pin.
     pub(crate) const EXAMPLE_RETH_GENESIS: &[u8] =
-        include_bytes!("../../../../networks/example-devnet/reth-genesis.json");
+        include_bytes!("../../../networks/example-devnet/reth-genesis.json");
     /// The policy that example's registry storage was compiled from.
     pub(crate) const EXAMPLE_POLICY: &[u8] =
-        include_bytes!("../../../../networks/example-devnet/measurement-policy-bootstrap.json");
+        include_bytes!("../../../networks/example-devnet/measurement-policy-bootstrap.json");
 
     pub(crate) const REGISTRY: Address =
         alloy_primitives::address!("0x1000000000000000000000000000000000000001");

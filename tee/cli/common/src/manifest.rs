@@ -154,7 +154,7 @@ mod tests {
 
     /// Verbatim `tee/networks/example-devnet/network-manifest.json`.
     const EXAMPLE_DEVNET: &[u8] =
-        include_bytes!("../../../../networks/example-devnet/network-manifest.json");
+        include_bytes!("../../../networks/example-devnet/network-manifest.json");
 
     #[test]
     fn parses_the_committed_example_network() {
@@ -259,7 +259,7 @@ mod tests {
     fn the_policy_must_hash_to_the_manifests_bootstrap_policy_hash() {
         let manifest = Manifest::from_json_bytes(EXAMPLE_DEVNET).unwrap();
         let policy =
-            include_bytes!("../../../../networks/example-devnet/measurement-policy-bootstrap.json");
+            include_bytes!("../../../networks/example-devnet/measurement-policy-bootstrap.json");
 
         manifest.check_policy(policy).unwrap();
 

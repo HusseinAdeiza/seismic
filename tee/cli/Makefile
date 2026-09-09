@@ -2,12 +2,12 @@
 # directory is meant to be liftable — the public operator repo is extracted
 # from `common` + `node` — so no recipe here reaches outside the workspace.
 #
-# Run from anywhere with `make -C tee/cli/rust <target>`.
+# Run from anywhere with `make -C tee/cli <target>`.
 
 .PHONY: help check fmt fmt-check lint test drift locked
 
 help:
-	@echo "Targets (the Rust deploy CLI, tee/cli/rust):"
+	@echo "Targets (the Rust deploy CLI, tee/cli):"
 	@echo "  check       fmt-check + lint + test (CI runs this)"
 	@echo "  fmt         cargo +nightly fmt (writes changes)"
 	@echo "  fmt-check   cargo +nightly fmt --check"

@@ -1,4 +1,4 @@
-//! Cross-repo drift guards (run via `make -C tee/cli/rust drift`, or the
+//! Cross-repo drift guards (run via `make -C tee/cli drift`, or the
 //! repo-root `make test-drift`).
 //!
 //! These check this repo against the current state of its sibling repos,
@@ -35,12 +35,12 @@ use seismic_tee_network::founding::Validator;
 use seismic_tee_network::gates::{ArtifactSet, run_validation_gates};
 use seismic_tee_network::shell_outs::{Derivations, ShellOuts};
 
-/// The deploy repo root: this file is `tee/cli/rust/network/tests/drift.rs`.
+/// The deploy repo root: this file is `tee/cli/network/tests/drift.rs`.
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
-        .nth(4)
-        .expect("network/ sits four levels under the repo root")
+        .nth(3)
+        .expect("network/ sits three levels under the repo root")
         .to_path_buf()
 }
 
