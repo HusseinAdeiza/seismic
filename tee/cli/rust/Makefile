@@ -4,7 +4,7 @@
 #
 # Run from anywhere with `make -C tee/cli/rust <target>`.
 
-.PHONY: help check fmt fmt-check lint test locked
+.PHONY: help check fmt fmt-check lint test drift locked
 
 help:
 	@echo "Targets (the Rust deploy CLI, tee/cli/rust):"
@@ -12,7 +12,8 @@ help:
 	@echo "  fmt         cargo +nightly fmt (writes changes)"
 	@echo "  fmt-check   cargo +nightly fmt --check"
 	@echo "  lint        cargo clippy, warnings denied"
-	@echo "  test        cargo nextest run"
+	@echo "  test        cargo nextest run (hermetic)"
+	@echo "  drift       cross-repo drift guards (network + seismic-reth on PATH; own CI job)"
 	@echo "  locked      assert Cargo.lock needs no re-resolve (run before check)"
 
 check: fmt-check lint test
@@ -30,6 +31,12 @@ lint:
 
 test:
 	cargo nextest run --workspace
+
+# Cross-repo drift guards: network/tests/drift.rs, every test `#[ignore]`d so
+# `test` stays hermetic with nothing to skip. Needs raw.githubusercontent.com
+# and `seismic-reth` on PATH; see the file's module doc.
+drift:
+	cargo nextest run -p seismic-tee-network --test drift --run-ignored only
 
 # Assert that Cargo.lock already agrees with Cargo.toml: --locked makes cargo
 # fail rather than re-resolve and rewrite it. Catches a dependency added

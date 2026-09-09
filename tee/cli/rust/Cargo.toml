@@ -53,6 +53,11 @@ seismic-verify-quote = { git = "https://github.com/SeismicSystems/enclave.git", 
 # deserializes: a field it would reject fails to compile here.
 tdx-init-config = { git = "https://github.com/SeismicSystems/enclave.git", rev = "6b35612a1844b370fac21525d035612e861372ee" }
 
+# The 20- and 32-byte words the registry gate compares — genesis storage
+# slots and the compile report's — and keccak256 over the registry's runtime
+# code. Already in the graph through seismic-measurement-admission, whose
+# report is typed in these; one copy, at the enclave's version.
+alloy-primitives = { version = "1", default-features = false, features = ["std", "serde"] }
 anyhow = "1.0"
 base64 = "0.22"
 clap = { version = "4.5", features = ["derive"] }
@@ -70,12 +75,22 @@ reqwest = { version = "0.12", default-features = false, features = [
 ] }
 # The process-level crypto provider `tools verify` installs; see there.
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"] }
+# The harvest's per-box nonce. At the enclave's version, like jsonrpsee.
+rand = "0.9"
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+# `preserve_order`: the reth genesis `assemble` re-emits with the registry
+# storage injected keeps its authored key order, so a re-assembly diffs as the
+# injection and nothing else. The manifest renderer sorts its own keys and
+# does not depend on this.
+serde_json = { version = "1.0", features = ["preserve_order"] }
 sha2 = "0.10"
+# The terminal width the cohort dashboard truncates its rows to.
+terminal_size = "0.4"
 thiserror = "2.0"
-# `signal` for ctrl-C during a node's first-boot watch, `time` for the polls.
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "fs", "signal", "time"] }
+# `signal` for ctrl-C during a node's first-boot watch, `time` for the polls,
+# `process` for the foreign-repo shell-outs (`seismic-reth genesis-hash`,
+# `summit genesis`), `sync` for the cohort dashboard's status channel.
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "fs", "process", "signal", "sync", "time"] }
 toml = "0.9"
 
 tempfile = "3"

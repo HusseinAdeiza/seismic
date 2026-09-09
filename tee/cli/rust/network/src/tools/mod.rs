@@ -1,12 +1,14 @@
-//! `tools`: the enclave libraries, at the subprocess boundary.
+//! `tools`: the enclave libraries, at a subprocess boundary.
 //!
-//! The Python CLIs still orchestrate a founding, and every rule a network's
-//! identity rests on — the manifest's canonical bytes and strict schema,
-//! admission-ID derivation and registry genesis storage, DCAP verification of
-//! a quote — has exactly one implementation, in the enclave repo. Until the
-//! orchestration is ported, Python reaches those implementations by running a
-//! binary. It used to run three of them, one per enclave crate; now it runs
-//! this one, which links the same crates:
+//! Every rule a network's identity rests on — the manifest's canonical bytes
+//! and strict schema, admission-ID derivation and registry genesis storage,
+//! DCAP verification of a quote — has exactly one implementation, in the
+//! enclave repo, and the founding commands link it. This group exposes the
+//! same libraries as subcommands, for whoever needs one of them standalone:
+//! an auditor replaying an archived founding quote against the collateral
+//! snapshot filed beside it, a reviewer checking what a policy compiles to, a
+//! script rendering a manifest. It is the surface the retired enclave
+//! tooling binaries used to be:
 //!
 //! ```text
 //! seismic-manifest render|parse            -> tools manifest render|parse
@@ -15,12 +17,10 @@
 //! verify-quote harvest|deploy              -> tools verify harvest|deploy
 //! ```
 //!
-//! Each subcommand keeps the retired binary's contract — the same flags, `-`
-//! for stdin, the same bytes on stdout, a message on stderr and a nonzero exit
-//! with nothing on stdout for every failure — so the Python side changed only
-//! its argv. What the Rust commands will do with these libraries when they
-//! own the orchestration is a different question, answered per command as it
-//! is ported; this group exists for the seam and retires with the Python.
+//! Each subcommand keeps that binary's contract — the same flags, `-` for
+//! stdin, the same bytes on stdout, a message on stderr and a nonzero exit
+//! with nothing on stdout for every failure — so a caller that drove the old
+//! binary drives this one with the same argv.
 
 pub mod admission;
 pub mod manifest;
@@ -57,16 +57,11 @@ enum ToolsCommand {
 /// policy are hash-committed, so they must reach stdout exactly as the library
 /// produced them. Every failure is the error, which the caller prints to
 /// stderr with nothing on stdout — the contract each retired binary had.
-pub fn run(cli: ToolsCli) -> anyhow::Result<Vec<u8>> {
+pub async fn run(cli: ToolsCli) -> anyhow::Result<Vec<u8>> {
     match cli.command {
         ToolsCommand::Manifest(cli) => manifest::run(cli),
         ToolsCommand::Admission(cli) => admission::run(cli),
-        ToolsCommand::Verify(cli) => {
-            // Verification is async (collateral fetches, the node's RPC); the
-            // rest of the CLI is not yet, so the runtime lives here for now.
-            let runtime = tokio::runtime::Runtime::new().context("starting the async runtime")?;
-            runtime.block_on(verify::run(cli))
-        }
+        ToolsCommand::Verify(cli) => verify::run(cli).await,
     }
 }
 

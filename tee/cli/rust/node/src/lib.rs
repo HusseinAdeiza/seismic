@@ -21,8 +21,9 @@ pub mod configure;
 pub mod status;
 pub mod verify;
 
+/// The fake server and fixtures the tests here share with the network crate's.
 #[cfg(test)]
-pub(crate) mod test_support;
+pub(crate) use seismic_tee_common::test_support;
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -121,7 +122,7 @@ mod tests {
         assert_eq!(command.get_version(), Some(env!("CARGO_PKG_VERSION")));
     }
 
-    /// The three commands the Python CLI had, listed in workflow order.
+    /// The three operator commands, listed in workflow order.
     #[test]
     fn the_commands_are_listed_in_workflow_order() {
         let names: Vec<_> = Cli::command()

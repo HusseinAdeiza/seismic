@@ -381,21 +381,25 @@ pub async fn post_config(
         config,
         TDX_INIT_LISTENER_TIMEOUT,
         TDX_INIT_RETRY_INTERVAL,
+        |line| eprintln!("{line}"),
     )
     .await
 }
 
-/// [`post_config`] with its own patience for the listener.
+/// [`post_config`] with its own patience for the listener, reporting progress
+/// through `report` — a line at a time, so a cohort dashboard can show it as
+/// the node's status instead of it landing on stderr mid-repaint.
 pub async fn post_config_within(
     client: &reqwest::Client,
     url: &str,
     config: &InitConfig,
     listener_timeout: Duration,
     retry_interval: Duration,
+    mut report: impl FnMut(&str),
 ) -> anyhow::Result<()> {
     let body = render_config(config)?;
 
-    eprintln!("Waiting for tdx-init listener at {url}...");
+    report(&format!("Waiting for tdx-init listener at {url}..."));
     let deadline = Instant::now() + listener_timeout;
     let mut last_error = None;
     while Instant::now() < deadline {
@@ -426,7 +430,7 @@ pub async fn post_config_within(
         };
         let status = response.status();
         if status == reqwest::StatusCode::OK {
-            eprintln!("tdx-init accepted the config.");
+            report("tdx-init accepted the config.");
             return Ok(());
         }
         let text = response.text().await.unwrap_or_default();
@@ -968,6 +972,7 @@ mod tests {
             &config,
             Duration::from_secs(10),
             Duration::from_millis(20),
+            |_| {},
         )
         .await
         .unwrap();
@@ -979,6 +984,7 @@ mod tests {
             &config,
             Duration::from_millis(100),
             Duration::from_millis(20),
+            |_| {},
         )
         .await
         .unwrap_err()

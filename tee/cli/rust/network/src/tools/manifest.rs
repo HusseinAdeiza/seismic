@@ -54,8 +54,8 @@ pub fn run(cli: ManifestCli) -> anyhow::Result<Vec<u8>> {
     }
 }
 
-/// The strict verdict, as the schema crate words it: the Python side relays
-/// the message as the manifest's schema error, so nothing is added to it.
+/// The strict verdict, as the schema crate words it: a caller relays the
+/// message as the manifest's schema error, so nothing is added to it.
 fn parse(bytes: &[u8]) -> anyhow::Result<NetworkManifestV1> {
     NetworkManifestV1::from_json_bytes(bytes).context("the manifest does not satisfy the v1 schema")
 }
@@ -100,8 +100,8 @@ mod tests {
         assert_eq!(run(parse_cli(&canonical)).unwrap(), b"");
     }
 
-    /// A rejection names the field, so the Python side can relay the verdict
-    /// as the schema error it is.
+    /// A rejection names the field, so a caller can relay the verdict as the
+    /// schema error it is.
     #[test]
     fn rejections_name_the_field() {
         let dir = tempfile::tempdir().unwrap();

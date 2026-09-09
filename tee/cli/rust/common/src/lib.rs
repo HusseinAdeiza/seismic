@@ -17,6 +17,8 @@ pub mod http;
 pub mod manifest;
 pub mod network_dir;
 pub mod rpc;
+#[cfg(feature = "test-support")]
+pub mod test_support;
 
 pub use artifact::Artifact;
 pub use descriptor::{Descriptors, NodeDescriptor, load_descriptors, select_descriptor};

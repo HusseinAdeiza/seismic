@@ -1,6 +1,6 @@
 [package]
 name = "seismic-tee-network"
-description = "Founder CLI for a Seismic network: provision a cohort, harvest its founding keys, assemble its identity"
+description = "Founder CLI for a Seismic network: scaffold its inputs, harvest a cohort's founding keys, assemble its identity, configure the cohort"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -19,14 +19,26 @@ seismic-manifest.workspace = true
 seismic-measurement-admission.workspace = true
 seismic-verify-quote.workspace = true
 
+alloy-primitives.workspace = true
 anyhow.workspace = true
 clap.workspace = true
+hex.workspace = true
+jsonrpsee.workspace = true
+rand.workspace = true
+reqwest.workspace = true
 rustls.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
+# The shell-outs take paths, and `assemble` hashes artifacts that exist only
+# as bytes until they are written.
+tempfile.workspace = true
+terminal_size.workspace = true
 tokio.workspace = true
+toml.workspace = true
 
 [dev-dependencies]
-tempfile.workspace = true
+seismic-tee-common = { workspace = true, features = ["test-support"] }
 
 [[bin]]
 name = "seismic-tee-network"

@@ -1,9 +1,11 @@
 //! An HTTP/1.1 server small enough to live in the tests: canned responses,
 //! recorded requests, and a way to get a refused port.
 //!
-//! Every network interaction this crate has is a POST to a node and a read of
-//! the reply, so a test needs no more than this to exercise the real client
-//! code path — including what happens when the far end is not there yet.
+//! Every network interaction the two CLIs have is a request to a node and a
+//! read of the reply, so a test needs no more than this to exercise the real
+//! client code path — including what happens when the far end is not there
+//! yet. Shared by the node and network crates' tests through the
+//! `test-support` feature; nothing here is compiled into a release binary.
 
 use std::io::{Read as _, Write as _};
 use std::net::{SocketAddr, TcpListener, TcpStream};
