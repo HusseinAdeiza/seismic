@@ -13,12 +13,11 @@ artifact goes stale unnoticed. It needs:
 
 - network reach to raw.githubusercontent.com (the cross-repo tests fetch
   pinned artifacts from sibling repos);
-- `seismic-measurement-admission` on PATH — the enclave repo's admission
-  CLI (`cargo install --features cli` from crates/measurement-admission;
-  CI builds it from enclave's seismic branch);
-- `seismic-manifest` on PATH — the enclave repo's manifest tool
-  (`cargo install` from bin/seismic-manifest; CI builds it from the same
-  enclave revision);
+- `seismic-tee-network` on PATH — the Rust deploy CLI from tee/cli/rust
+  (`cargo install --path tee/cli/rust/network`; CI builds the workspace),
+  whose `tools` group links the enclave crates at the rev the workspace
+  pins: the admission compiler and the manifest renderer/parser under test
+  here are that rev's;
 - `seismic-reth` on PATH, for the `genesis-hash` subcommand (CI installs a
   prebuilt release with the setup-sreth action).
 
@@ -28,7 +27,6 @@ Run with:
 
 import http.client
 import json
-import shutil
 import subprocess
 import tomllib
 import unittest
@@ -52,12 +50,12 @@ from tee.cli.common.manifest import (
     validate_manifest_schema,
 )
 from tee.cli.common.shell_outs import (
-    DEFAULT_ADMISSION_BIN,
-    DEFAULT_MANIFEST_BIN,
+    DEFAULT_TEE_BIN,
     compile_measurement_policy,
     parse_manifest,
     promote_measurements,
     render_manifest,
+    resolve_tee_bin,
 )
 from tee.cli.common.tests.test_manifest import (
     FIXTURE_MANIFEST,
@@ -67,17 +65,11 @@ from tee.cli.common.tests.test_manifest import (
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 NETWORKS_DIR = REPO_ROOT / "tee" / "networks"
-ADMISSION_BIN = shutil.which(DEFAULT_ADMISSION_BIN)
-MISSING_ADMISSION_BIN = (
-    f"{DEFAULT_ADMISSION_BIN} not on PATH — this suite fails rather than "
-    "skips; build the enclave repo's admission CLI (`cargo install "
-    "--features cli` from crates/measurement-admission)"
-)
-MANIFEST_BIN = shutil.which(DEFAULT_MANIFEST_BIN)
-MISSING_MANIFEST_BIN = (
-    f"{DEFAULT_MANIFEST_BIN} not on PATH — this suite fails rather than "
-    "skips; build the enclave repo's manifest tool (`cargo install` from "
-    "bin/seismic-manifest)"
+TEE_BIN = resolve_tee_bin(DEFAULT_TEE_BIN)
+MISSING_TEE_BIN = (
+    f"{DEFAULT_TEE_BIN} (the Rust deploy CLI) not on PATH — this suite fails "
+    "rather than skips; build it with `cargo install --path "
+    "tee/cli/rust/network`"
 )
 
 
@@ -143,7 +135,7 @@ class ManifestBoundaryTests(unittest.TestCase):
     )
 
     def setUp(self):
-        self.assertIsNotNone(MANIFEST_BIN, MISSING_MANIFEST_BIN)
+        self.assertIsNotNone(TEE_BIN, MISSING_TEE_BIN)
 
     def test_render_is_canonical_and_parse_accepts_it(self):
         # Hostile input formatting: reversed key order, no whitespace. The
@@ -198,7 +190,7 @@ class RuntimeCodeDriftTests(unittest.TestCase):
     )
 
     def test_admission_crate_pins_current_registry_runtime(self):
-        self.assertIsNotNone(ADMISSION_BIN, MISSING_ADMISSION_BIN)
+        self.assertIsNotNone(TEE_BIN, MISSING_TEE_BIN)
         report = compile_measurement_policy(promoted_policy_bytes())
         artifact = json.loads(_fetch_live(self.REGISTRY_ARTIFACT_URL))
         runtime = artifact["deployedBytecode"]["object"].removeprefix("0x")
@@ -218,7 +210,7 @@ class PromoteBoundaryTests(unittest.TestCase):
     """
 
     def setUp(self):
-        self.assertIsNotNone(ADMISSION_BIN, MISSING_ADMISSION_BIN)
+        self.assertIsNotNone(TEE_BIN, MISSING_TEE_BIN)
 
     def test_promotes_make_measure_wrapper_to_schema_registers(self):
         raw = json.dumps({**RAW_MEASUREMENTS, "measurement_id": "img.vhd"}).encode()
@@ -269,7 +261,7 @@ class CompileBoundaryTests(unittest.TestCase):
     """The `compile` subprocess boundary: the report shape the gates consume."""
 
     def setUp(self):
-        self.assertIsNotNone(ADMISSION_BIN, MISSING_ADMISSION_BIN)
+        self.assertIsNotNone(TEE_BIN, MISSING_TEE_BIN)
 
     def test_compile_report_shape(self):
         policy = promoted_policy_bytes()
@@ -336,8 +328,7 @@ class CommittedNetworkDirTests(unittest.TestCase):
     """
 
     def test_committed_network_dirs_pass_their_gates(self):
-        self.assertIsNotNone(ADMISSION_BIN, MISSING_ADMISSION_BIN)
-        self.assertIsNotNone(MANIFEST_BIN, MISSING_MANIFEST_BIN)
+        self.assertIsNotNone(TEE_BIN, MISSING_TEE_BIN)
         networks = _committed_network_dirs()
         self.assertTrue(
             networks, f"no committed network directory found under {NETWORKS_DIR}"

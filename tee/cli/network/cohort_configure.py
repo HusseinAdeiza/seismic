@@ -347,7 +347,7 @@ def _configure_node(
     appraisal: Appraisal | None,
     states: dict[str, str],
     stop: threading.Event,
-    manifest_bin: str = shell_outs.DEFAULT_MANIFEST_BIN,
+    tee_bin: str = shell_outs.DEFAULT_TEE_BIN,
 ) -> bool:
     """Build + POST one node's config, poll its LUKS wipe, then deploy-verify
     it, writing the latest status line into `states[node.name]` for the
@@ -368,7 +368,7 @@ def _configure_node(
             summit_genesis_path=summit_genesis_path,
             external_ip=node.public_ip,
             bootnodes=node.bootnodes,
-            manifest_bin=manifest_bin,
+            tee_bin=tee_bin,
         )
         states[node.name] = f"POSTing config to tdx-init :{TDX_INIT_PORT}…"
         post_config_to_tdx_init(node.public_ip, config)
@@ -399,7 +399,7 @@ def _run_cohort(
     summit_genesis_path: Path,
     email: str,
     appraisal: Appraisal | None,
-    manifest_bin: str = shell_outs.DEFAULT_MANIFEST_BIN,
+    tee_bin: str = shell_outs.DEFAULT_TEE_BIN,
 ) -> dict[str, bool]:
     """Configure and appraise every node concurrently, refreshing the dashboard
     until all workers finish. Returns {node name: ok}. Threads suit this — the
@@ -429,7 +429,7 @@ def _run_cohort(
                 appraisal,
                 states,
                 stop,
-                manifest_bin,
+                tee_bin,
             )
         try:
             # Refresh while workers block on POST/poll.
@@ -504,7 +504,7 @@ def _bootstrap_greenfield(
     summit_genesis_path: Path,
     email: str,
     appraisal: Appraisal | None,
-    manifest_bin: str = shell_outs.DEFAULT_MANIFEST_BIN,
+    tee_bin: str = shell_outs.DEFAULT_TEE_BIN,
 ) -> dict[str, bool]:
     """Two-stage greenfield bootstrap: genesis first (so its enode exists),
     then the joiners pointed at it. Returns {node name: ok} across both stages.
@@ -528,7 +528,7 @@ def _bootstrap_greenfield(
         summit_genesis_path,
         email,
         appraisal,
-        manifest_bin,
+        tee_bin,
     )
     if not results.get(genesis.name):
         print(
@@ -557,7 +557,7 @@ def _bootstrap_greenfield(
             summit_genesis_path,
             email,
             appraisal,
-            manifest_bin,
+            tee_bin,
         )
     )
     return results
@@ -704,7 +704,7 @@ def main() -> None:
     # rather than as N identical per-worker errors mid-dashboard.
     try:
         manifest = manifest_mod.validate_manifest_schema(
-            args.manifest.read_bytes(), args.manifest_bin
+            args.manifest.read_bytes(), args.tee_bin
         )
     except (manifest_mod.ManifestSchemaError, manifest_mod.GateError) as e:
         raise SystemExit(f"--manifest {args.manifest}: invalid manifest: {e}") from None
@@ -721,7 +721,7 @@ def main() -> None:
         raise SystemExit(f"--summit-genesis {summit_genesis}: {e}") from None
 
     # Resolve the verifier and promote the policy once for the whole cohort,
-    # before any node is touched: a missing verify-quote, a policy the manifest
+    # before any node is touched: a missing verifier, a policy the manifest
     # doesn't commit to, or a rejected measurements file must fail while the
     # fix still costs nothing — config delivery is once per boot.
     policy_bytes = verify_mod.prepare_policy_optional(
@@ -794,7 +794,7 @@ def main() -> None:
             summit_genesis,
             args.email,
             appraisal,
-            args.manifest_bin,
+            args.tee_bin,
         )
     else:
         results = _bootstrap_greenfield(
@@ -804,7 +804,7 @@ def main() -> None:
             summit_genesis,
             args.email,
             appraisal,
-            args.manifest_bin,
+            args.tee_bin,
         )
 
     # Refresh the founding set from every node's live enode (fresh each run).

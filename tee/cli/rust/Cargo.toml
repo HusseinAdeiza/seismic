@@ -45,8 +45,12 @@ seismic-tee-node = { path = "node" }
 # seismic-crypto. Every rule the network's identity depends on has exactly one
 # implementation, and linking it rather than reimplementing it is what keeps
 # deploy's answer and a node's answer the same answer.
-seismic-network-manifest = { git = "https://github.com/SeismicSystems/enclave.git", rev = "5d59e0d214328cb877fe66f6abcc96ce8d98fb41" }
+seismic-network-manifest = { git = "https://github.com/SeismicSystems/enclave.git", rev = "6b35612a1844b370fac21525d035612e861372ee" }
+seismic-manifest = { git = "https://github.com/SeismicSystems/enclave.git", rev = "6b35612a1844b370fac21525d035612e861372ee" }
+seismic-measurement-admission = { git = "https://github.com/SeismicSystems/enclave.git", rev = "6b35612a1844b370fac21525d035612e861372ee" }
+seismic-verify-quote = { git = "https://github.com/SeismicSystems/enclave.git", rev = "6b35612a1844b370fac21525d035612e861372ee" }
 
+anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
 # default-features off drops native-tls: an operator downloads one binary, so
 # it must not link the host's OpenSSL.
@@ -54,8 +58,11 @@ reqwest = { version = "0.12", default-features = false, features = [
     "json",
     "rustls-tls",
 ] }
+# The process-level crypto provider `tools verify` installs; see there.
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "fs"] }
 
 tempfile = "3"

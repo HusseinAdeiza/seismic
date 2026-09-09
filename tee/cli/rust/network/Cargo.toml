@@ -15,7 +15,18 @@ authors.workspace = true
 seismic-tee-common.workspace = true
 seismic-tee-node.workspace = true
 
+seismic-manifest.workspace = true
+seismic-measurement-admission.workspace = true
+seismic-verify-quote.workspace = true
+
+anyhow.workspace = true
 clap.workspace = true
+rustls.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [[bin]]
 name = "seismic-tee-network"

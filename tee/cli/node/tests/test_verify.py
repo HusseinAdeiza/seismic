@@ -63,9 +63,7 @@ def _args(**overrides) -> argparse.Namespace:
     defaults = {
         "policy": None,
         "measurements": None,
-        "verify_quote_bin": "verify-quote",
-        "manifest_bin": "seismic-manifest",
-        "admission_bin": "seismic-measurement-admission",
+        "tee_bin": "seismic-tee-network",
         "attestation_type": "azure-tdx",
         "pccs_url": None,
     }
@@ -146,7 +144,7 @@ class ResolvePolicyTests(unittest.TestCase):
         promote.assert_called_once_with(
             b'[{"measurement_id": "my-build.vhd"}]',
             "azure-tdx",
-            admission_bin="seismic-measurement-admission",
+            tee_bin="seismic-tee-network",
         )
 
     def test_rejected_measurements_fail_fast(self):
@@ -182,7 +180,7 @@ class PreparePolicyTests(unittest.TestCase):
     def test_missing_verifier_fails_fast(self):
         args = _args(
             manifest=Path("/nets/devnet/network-manifest.json"),
-            verify_quote_bin="no-such-verify-quote",
+            tee_bin="no-such-tee-bin",
         )
         with self.assertRaises(SystemExit) as ctx:
             prepare_policy(args)
@@ -191,20 +189,29 @@ class PreparePolicyTests(unittest.TestCase):
     def test_verifier_without_the_deploy_subcommand_fails_fast(self):
         args = _args(manifest=Path("/nets/devnet/network-manifest.json"))
         with (
-            mock.patch.object(verify.shutil, "which", return_value="/bin/vq"),
+            mock.patch.object(
+                verify.shell_outs, "resolve_tee_bin", return_value="/bin/stn"
+            ),
             mock.patch.object(
                 verify.subprocess, "run", return_value=mock.Mock(returncode=2)
             ) as probe,
         ):
             with self.assertRaises(SystemExit) as ctx:
                 prepare_policy(args)
-        self.assertIn("no `deploy` subcommand", str(ctx.exception))
-        self.assertEqual(probe.call_args.args[0], ["verify-quote", "deploy", "--help"])
+        self.assertIn("no `tools verify deploy` subcommand", str(ctx.exception))
+        # Probed at the resolved path, so the venv's own console script of the
+        # same name is never what answers.
+        self.assertEqual(
+            probe.call_args.args[0],
+            ["/bin/stn", "tools", "verify", "deploy", "--help"],
+        )
 
     def test_resolves_the_policy_once_the_tooling_is_good(self):
         args = _args(manifest=Path("/nets/devnet/network-manifest.json"))
         with (
-            mock.patch.object(verify.shutil, "which", return_value="/bin/vq"),
+            mock.patch.object(
+                verify.shell_outs, "resolve_tee_bin", return_value="/bin/stn"
+            ),
             mock.patch.object(
                 verify.subprocess, "run", return_value=mock.Mock(returncode=0)
             ),
@@ -237,7 +244,7 @@ class VerifyDeploymentTests(unittest.TestCase):
             f"http://{PUBLIC_IP}:7878",
             manifest_path=Path("/nets/devnet/network-manifest.json"),
             policy_bytes=b"policy bytes",
-            verify_quote_bin="verify-quote",
+            tee_bin="seismic-tee-network",
             pccs_url="https://pccs.example",
         )
 

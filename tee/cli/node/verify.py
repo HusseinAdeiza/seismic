@@ -3,7 +3,8 @@
 
     seismic-tee-node verify --node n2.json --manifest m.json
 
-The enclave repo's `verify-quote deploy` owns the whole relying-party flow:
+The Rust deploy CLI's `tools verify deploy` (the enclave repo's verify-quote
+library) owns the whole relying-party flow:
 it challenges the node's attestation service with a fresh nonce
 (`getDeployVerificationEvidence` on :7878), recomputes the deploy
 verification binding from the operator's own `--manifest` copy and that
@@ -42,7 +43,6 @@ measurement itself.
 import argparse
 import json
 import logging
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -62,8 +62,9 @@ def add_policy_source_args(parser: argparse.ArgumentParser) -> None:
 
     The two sources are exclusive: `--policy` (or its default, the network's
     own artifact) consumes a published policy document, `--measurements`
-    promotes a raw measurements file into one. Only the latter needs the
-    admission CLI, so `--admission-bin`/`--attestation-type` steer it alone.
+    promotes a raw measurements file into one. Only the latter runs the
+    deploy CLI's `tools admission promote`, so `--attestation-type` steers
+    it alone.
     """
     source = parser.add_mutually_exclusive_group()
     source.add_argument(
@@ -92,11 +93,6 @@ def add_policy_source_args(parser: argparse.ArgumentParser) -> None:
         ),
     )
     parser.add_argument(
-        "--admission-bin",
-        default=shell_outs.DEFAULT_ADMISSION_BIN,
-        help="policy-compiler CLI used to promote --measurements into a policy",
-    )
-    parser.add_argument(
         "--attestation-type",
         default=shell_outs.DEFAULT_ATTESTATION_TYPE,
         help="platform the policy promoted from --measurements pins",
@@ -122,21 +118,17 @@ def add_tooling_args(parser: argparse.ArgumentParser) -> None:
     so an operator who tunes one command tunes both the same way.
     """
     parser.add_argument(
-        "--verify-quote-bin",
-        default=shell_outs.DEFAULT_VERIFY_QUOTE_BIN,
-        help="quote-verifier CLI from the enclave repo (bin/verify-quote)",
-    )
-    parser.add_argument(
-        "--manifest-bin",
-        default=shell_outs.DEFAULT_MANIFEST_BIN,
-        help="manifest tool from the enclave repo (bin/seismic-manifest), "
-        "which checks --manifest against the schema",
+        "--tee-bin",
+        default=shell_outs.DEFAULT_TEE_BIN,
+        help="the Rust deploy CLI: its `tools verify deploy` challenges the "
+        "node, `tools manifest parse` checks --manifest against the schema, "
+        "and `tools admission promote` promotes --measurements into a policy",
     )
     parser.add_argument(
         "--pccs-url",
         default=None,
         metavar="URL",
-        help="forwarded to verify-quote: PCCS URL for DCAP collateral",
+        help="forwarded to the verifier: PCCS URL for DCAP collateral",
     )
 
 
@@ -186,7 +178,7 @@ def resolve_policy(args: argparse.Namespace, *, offer_no_verify: bool = False) -
             return shell_outs.promote_measurements(
                 args.measurements.read_bytes(),
                 args.attestation_type,
-                admission_bin=args.admission_bin,
+                tee_bin=args.tee_bin,
             )
         except manifest_mod.GateError as e:
             raise SystemExit(f"--measurements {args.measurements}: {e}") from None
@@ -197,7 +189,7 @@ def resolve_policy(args: argparse.Namespace, *, offer_no_verify: bool = False) -
     policy_bytes = policy_path.read_bytes()
     try:
         manifest = manifest_mod.validate_manifest_schema(
-            args.manifest.read_bytes(), args.manifest_bin
+            args.manifest.read_bytes(), args.tee_bin
         )
     except (manifest_mod.ManifestSchemaError, manifest_mod.GateError) as e:
         raise SystemExit(f"--manifest {args.manifest}: invalid manifest: {e}") from None
@@ -223,22 +215,23 @@ def prepare_policy(args: argparse.Namespace, *, offer_no_verify: bool = False) -
     rejects fails here — where the fix costs nothing, not after a config POST
     already landed.
     """
-    if shutil.which(args.verify_quote_bin) is None:
+    tee_bin = shell_outs.resolve_tee_bin(args.tee_bin)
+    if tee_bin is None:
         raise SystemExit(
-            f"`{args.verify_quote_bin}` not found on PATH. Build the enclave "
-            "repo's bin/verify-quote and put it on PATH, or pass "
-            "--verify-quote-bin."
+            f"`{args.tee_bin}` not found on PATH; {shell_outs.BUILD_TEE_BIN_HINT}."
         )
-    # On PATH isn't enough: a verifier predating the deploy-verification
-    # subcommand would only fail after the challenge is due, which is exactly
-    # what resolving the tooling up front exists to prevent.
+    # On PATH isn't enough: a deploy CLI predating the deploy-verification
+    # tool would only fail after the challenge is due, which is exactly what
+    # resolving the tooling up front exists to prevent.
     probe = subprocess.run(
-        [args.verify_quote_bin, "deploy", "--help"], capture_output=True, timeout=60
+        [tee_bin, "tools", "verify", "deploy", "--help"],
+        capture_output=True,
+        timeout=60,
     )
     if probe.returncode != 0:
         raise SystemExit(
-            f"`{args.verify_quote_bin}` has no `deploy` subcommand. Rebuild "
-            "bin/verify-quote from the current enclave repo."
+            f"`{args.tee_bin}` has no `tools verify deploy` subcommand. Rebuild "
+            "the Rust deploy CLI from the current deploy repo."
         )
     return resolve_policy(args, offer_no_verify=offer_no_verify)
 
@@ -263,7 +256,7 @@ def challenge_node(
     """Challenge one node's attestation service and return the verifier's
     report. Raises `GateError` when the node does not pass.
 
-    The one place a `--policy`/`--measurements`/`--verify-quote-bin` argument
+    The one place a `--policy`/`--measurements`/`--tee-bin` argument
     set becomes a challenge, so every caller — the standalone command, the
     per-node `configure`, the founding cohort — appraises a node the same way.
     """
@@ -271,7 +264,7 @@ def challenge_node(
         f"http://{public_ip}:{ENCLAVE_PORT}",
         manifest_path=args.manifest,
         policy_bytes=policy_bytes,
-        verify_quote_bin=args.verify_quote_bin,
+        tee_bin=args.tee_bin,
         pccs_url=args.pccs_url,
     )
 
@@ -284,16 +277,12 @@ def retry_flags(args: argparse.Namespace) -> str:
     flags = ""
     if args.measurements is not None:
         flags += f" --measurements {args.measurements}"
-        if args.admission_bin != shell_outs.DEFAULT_ADMISSION_BIN:
-            flags += f" --admission-bin {args.admission_bin}"
         if args.attestation_type != shell_outs.DEFAULT_ATTESTATION_TYPE:
             flags += f" --attestation-type {args.attestation_type}"
     elif args.policy is not None:
         flags += f" --policy {args.policy}"
-    if args.verify_quote_bin != shell_outs.DEFAULT_VERIFY_QUOTE_BIN:
-        flags += f" --verify-quote-bin {args.verify_quote_bin}"
-    if args.manifest_bin != shell_outs.DEFAULT_MANIFEST_BIN:
-        flags += f" --manifest-bin {args.manifest_bin}"
+    if args.tee_bin != shell_outs.DEFAULT_TEE_BIN:
+        flags += f" --tee-bin {args.tee_bin}"
     if args.pccs_url is not None:
         flags += f" --pccs-url {args.pccs_url}"
     return flags

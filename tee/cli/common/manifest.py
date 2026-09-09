@@ -4,10 +4,11 @@
 travels as opaque bytes through every hop (deploy artifact -> `configure`
 merges it into the POST -> tdx-init -> /run/seismic/conf/). The strict
 schema is the enclave repo's `seismic-network-manifest` crate — the same code
-every node parses the manifest with — and rendering is its sibling tool
+every node parses the manifest with — and rendering is its sibling crate
 `seismic-manifest`:
 https://github.com/SeismicSystems/enclave/tree/seismic/bin/seismic-manifest.
-`assemble` and every reader here reach both through that CLI (shell_outs).
+`assemble` and every reader here reach both through the Rust deploy CLI's
+`tools manifest` subcommands (shell_outs).
 This module composes the manifest's values and gates them against the
 artifacts they commit to.
 
@@ -73,7 +74,6 @@ import hashlib
 import json
 import logging
 import re
-import shutil
 import sys
 import tempfile
 import tomllib
@@ -91,21 +91,20 @@ from tee.cli.common.errors import GateError, ManifestSchemaError
 from tee.cli.common.logging_setup import setup_logging
 from tee.cli.common.repo import SEISMIC_NODE_DIR
 from tee.cli.common.shell_outs import (
-    DEFAULT_ADMISSION_BIN,
     DEFAULT_ATTESTATION_TYPE,
-    DEFAULT_MANIFEST_BIN,
     DEFAULT_RETH_BIN,
     DEFAULT_SUMMIT_BIN,
-    DEFAULT_VERIFY_QUOTE_BIN,
+    DEFAULT_TEE_BIN,
     compile_measurement_policy,
     parse_manifest,
     promote_measurements,
     render_manifest,
+    resolve_tee_bin,
     reth_genesis_hash,
     summit_config_digest,
     summit_set_validators,
+    tee_bin_not_found,
     verify_harvest_record,
-    verify_quote_bin_not_found,
 )
 
 logger = logging.getLogger(__name__)
@@ -206,17 +205,17 @@ def _check_hex(value: Any, nbytes: int, fieldname: str) -> None:
 
 
 def validate_manifest_schema(
-    manifest_bytes: bytes, manifest_bin: str = DEFAULT_MANIFEST_BIN
+    manifest_bytes: bytes, tee_bin: str = DEFAULT_TEE_BIN
 ) -> dict[str, Any]:
     """Strictly parse manifest bytes against the v1 schema and return the
     document.
 
-    The verdict is the manifest tool's (`seismic-manifest parse`, the
+    The verdict is the manifest tool's (`tools manifest parse`, the
     node-side parser): unknown or missing keys, malformed hex, and an
     unsupported manifest_version all fail. Only then are the bytes loaded
     here, so callers read fields the strict parser has already accepted.
     """
-    parse_manifest(manifest_bytes, manifest_bin=manifest_bin)
+    parse_manifest(manifest_bytes, tee_bin=tee_bin)
     return json.loads(manifest_bytes)
 
 
@@ -462,7 +461,7 @@ def verify_harvest_records(
     records: dict[str, dict[str, Any]],
     policy_bytes: bytes,
     collateral_dir: Path,
-    verify_quote_bin: str = DEFAULT_VERIFY_QUOTE_BIN,
+    tee_bin: str = DEFAULT_TEE_BIN,
     verify_fn: Callable[[str, dict[str, Any], Path, Path], dict[str, Any]]
     | None = None,
 ) -> None:
@@ -481,10 +480,10 @@ def verify_harvest_records(
     it today and stop answering in about a month, which would make assemble's
     verdict depend on when it ran.
     """
-    if verify_fn is None and shutil.which(verify_quote_bin) is None:
+    if verify_fn is None and resolve_tee_bin(tee_bin) is None:
         # Tooling, not evidence: a missing verifier fails here, before the
         # loop whose failures carry burned-founding advice.
-        raise verify_quote_bin_not_found(verify_quote_bin)
+        raise tee_bin_not_found(tee_bin)
     with tempfile.NamedTemporaryFile(
         prefix="measurement-policy-", suffix=".json"
     ) as policy_file:
@@ -495,7 +494,7 @@ def verify_harvest_records(
             lambda _name, record, path, collateral: verify_harvest_record(
                 record,
                 policy_path=path,
-                verify_quote_bin=verify_quote_bin,
+                tee_bin=tee_bin,
                 collateral=collateral,
             )
         )
@@ -528,10 +527,10 @@ class GateContext:
     summit_genesis: Path
     policy_bytes: bytes
     reth_bin: str = DEFAULT_RETH_BIN
-    admission_bin: str = DEFAULT_ADMISSION_BIN
+    tee_bin: str = DEFAULT_TEE_BIN
     summit_bin: str = DEFAULT_SUMMIT_BIN
     # Injectable for tests; default to shelling out to seismic-reth, the
-    # admission CLI, and summit respectively.
+    # deploy CLI's admission tools, and summit respectively.
     genesis_hash_fn: Callable[[Path], str] | None = None
     compile_fn: Callable[[bytes], dict[str, Any]] | None = None
     digest_fn: Callable[[Path], str] | None = None
@@ -662,7 +661,7 @@ def run_validation_gates(manifest: dict[str, Any], ctx: GateContext) -> None:
     # the canonical runtime code plus exactly the compiled storage, so the
     # genesis hash commits to the reviewed policy and nothing else.
     compile_fn = ctx.compile_fn or (
-        lambda b: compile_measurement_policy(b, admission_bin=ctx.admission_bin)
+        lambda b: compile_measurement_policy(b, tee_bin=ctx.tee_bin)
     )
     report = compile_fn(ctx.policy_bytes)
     if report.get("policy_hash") != policy_hash:
@@ -741,7 +740,7 @@ def _validate_registry_account(
         raise GateError(
             f"registry {addr} genesis storage is empty: the admission policy "
             "must be genesis-pinned. Seed the account with the compiled "
-            "registry_genesis_storage (`seismic-measurement-admission "
+            "registry_genesis_storage (`seismic-tee-network tools admission "
             "compile measurement-policy-bootstrap.json`)"
         )
     if actual != expected:
@@ -823,9 +822,8 @@ def assemble(
     registry: str = DEFAULT_REGISTRY,
     authority: str = DEFAULT_AUTHORITY,
     reth_bin: str = DEFAULT_RETH_BIN,
-    admission_bin: str = DEFAULT_ADMISSION_BIN,
+    tee_bin: str = DEFAULT_TEE_BIN,
     summit_bin: str = DEFAULT_SUMMIT_BIN,
-    manifest_bin: str = DEFAULT_MANIFEST_BIN,
     genesis_hash_fn: Callable[[Path], str] | None = None,
     compile_fn: Callable[[bytes], dict[str, Any]] | None = None,
     digest_fn: Callable[[Path], str] | None = None,
@@ -850,7 +848,7 @@ def assemble(
     reviewed policy. The gates then re-validate the injected copy against an
     independent compile of the same document.
 
-    Rendering belongs to the manifest tool (`seismic-manifest render`): the
+    Rendering belongs to the manifest tool (`tools manifest render`): the
     values assembled here go to it as a JSON document and the canonical
     bytes come back, strictly parsed on the way — so a bad manifest never
     leaves the deploy tool, and the gates run over the same bytes that ship.
@@ -868,7 +866,7 @@ def assemble(
         raise GateError(f"summit genesis has no namespace string (got {namespace!r})")
 
     compile_policy = compile_fn or (
-        lambda b: compile_measurement_policy(b, admission_bin=admission_bin)
+        lambda b: compile_measurement_policy(b, tee_bin=tee_bin)
     )
     reth_genesis_bytes = inject_registry_genesis_storage(
         input_genesis_bytes, registry, compile_policy(policy_bytes)
@@ -929,7 +927,7 @@ def assemble(
         },
     }
 
-    render = render_fn or (lambda doc: render_manifest(doc, manifest_bin=manifest_bin))
+    render = render_fn or (lambda doc: render_manifest(doc, tee_bin=tee_bin))
     manifest_bytes = render(json.dumps(manifest).encode("utf-8"))
     parsed = json.loads(manifest_bytes)
     ctx = GateContext(
@@ -937,7 +935,7 @@ def assemble(
         summit_genesis=summit_genesis,
         policy_bytes=policy_bytes,
         reth_bin=reth_bin,
-        admission_bin=admission_bin,
+        tee_bin=tee_bin,
         summit_bin=summit_bin,
         genesis_hash_fn=genesis_hash_fn,
         compile_fn=compile_fn,
@@ -1275,12 +1273,13 @@ def _add_reth_bin(p: argparse.ArgumentParser) -> None:
     )
 
 
-def _add_admission_bin(p: argparse.ArgumentParser) -> None:
+def _add_tee_bin(p: argparse.ArgumentParser) -> None:
     p.add_argument(
-        "--admission-bin",
-        default=DEFAULT_ADMISSION_BIN,
-        help="policy-compiler CLI used to promote measurements and "
-        "compile the policy into registry genesis storage",
+        "--tee-bin",
+        default=DEFAULT_TEE_BIN,
+        help="the Rust deploy CLI, whose `tools` subcommands promote "
+        "measurements and compile the policy into registry genesis storage, "
+        "render the manifest and check its schema, and DCAP-verify quotes",
     )
 
 
@@ -1290,15 +1289,6 @@ def _add_summit_bin(p: argparse.ArgumentParser) -> None:
         default=DEFAULT_SUMMIT_BIN,
         help="summit binary whose `genesis digest` subcommand computes "
         "summit.genesis_config_digest",
-    )
-
-
-def _add_manifest_bin(p: argparse.ArgumentParser) -> None:
-    p.add_argument(
-        "--manifest-bin",
-        default=DEFAULT_MANIFEST_BIN,
-        help="manifest tool from the enclave repo (bin/seismic-manifest): "
-        "renders the manifest and checks its schema",
     )
 
 
@@ -1397,17 +1387,9 @@ def _parse_assemble_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="overwrite an existing manifest (a new network identity)",
     )
-    parser.add_argument(
-        "--verify-quote-bin",
-        default=DEFAULT_VERIFY_QUOTE_BIN,
-        help="DCAP verifier CLI from the enclave repo (bin/verify-quote), "
-        "used to re-verify the archived harvest quotes before the founding "
-        "set is pinned",
-    )
     _add_reth_bin(parser)
-    _add_admission_bin(parser)
+    _add_tee_bin(parser)
     _add_summit_bin(parser)
-    _add_manifest_bin(parser)
     args = parser.parse_args(argv)
     # Absolute, so every path this CLI prints is clickable in a terminal and
     # names one directory unambiguously.
@@ -1432,9 +1414,8 @@ def _parse_validate_args(argv: list[str] | None = None) -> argparse.Namespace:
         "there (manifest, summit genesis, policy) against its reth genesis",
     )
     _add_reth_bin(parser)
-    _add_admission_bin(parser)
+    _add_tee_bin(parser)
     _add_summit_bin(parser)
-    _add_manifest_bin(parser)
     args = parser.parse_args(argv)
     # Absolute, so every path this CLI prints is clickable in a terminal and
     # names one directory unambiguously.
@@ -1516,13 +1497,13 @@ def assemble_main() -> None:
         policy_bytes = promote_measurements(
             args.measurements.read_bytes(),
             args.attestation_type,
-            admission_bin=args.admission_bin,
+            tee_bin=args.tee_bin,
         )
         verify_harvest_records(
             founding.records,
             policy_bytes,
             args.dir / INPUTS_DIRNAME / HARVEST_DIRNAME / COLLATERAL_DIRNAME,
-            verify_quote_bin=args.verify_quote_bin,
+            tee_bin=args.tee_bin,
         )
         assembled = assemble(
             name=args.name,
@@ -1533,9 +1514,8 @@ def assemble_main() -> None:
             registry=args.registry,
             authority=args.authority,
             reth_bin=args.reth_bin,
-            admission_bin=args.admission_bin,
+            tee_bin=args.tee_bin,
             summit_bin=args.summit_bin,
-            manifest_bin=args.manifest_bin,
         )
         write_artifact_set(args.out, assembled, force=args.force)
         logger.info("wrote %s", args.out / MANIFEST_FILENAME)
@@ -1553,13 +1533,13 @@ def validate_main() -> None:
     args = _parse_validate_args()
     try:
         manifest_bytes = args.manifest.read_bytes()
-        manifest = validate_manifest_schema(manifest_bytes, args.manifest_bin)
+        manifest = validate_manifest_schema(manifest_bytes, args.tee_bin)
         ctx = GateContext(
             reth_genesis=args.reth_genesis,
             summit_genesis=args.summit_genesis,
             policy_bytes=args.measurement_policy.read_bytes(),
             reth_bin=args.reth_bin,
-            admission_bin=args.admission_bin,
+            tee_bin=args.tee_bin,
             summit_bin=args.summit_bin,
         )
         run_validation_gates(manifest, ctx)

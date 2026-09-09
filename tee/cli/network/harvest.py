@@ -17,14 +17,16 @@ Verification here is load-bearing, not hygiene: consensus membership is
 gated by whose pubkeys enter the genesis validator set, and founding keys
 bypass the deposit contract's admission path — so the harvest is the one
 moment TEE residency can be checked before the set is pinned. The check
-shells out to the enclave repo's `verify-quote` (exit 0 plus one JSON
-report on stdout ⇔ verified), against the policy promoted from
-`inputs/measurements.json` by the same admission CLI `assemble` uses.
+shells out to the Rust deploy CLI's `tools verify harvest` (the enclave
+repo's verify-quote library; exit 0 plus one JSON report on stdout ⇔
+verified), against the policy promoted from `inputs/measurements.json`
+by the same `tools admission promote` `assemble` uses.
 This check is purely preventive: future users and joiners should re-run
 the same verification against the archive rather than trust this run's
 verdict. Each archived record is a complete input to that check —
-`verify-quote harvest --record inputs/harvest/<node>.json --policy
-measurement-policy-bootstrap.json`, and nothing from this repo.
+`seismic-tee-network tools verify harvest --record inputs/harvest/<node>.json
+--policy measurement-policy-bootstrap.json`, and nothing else from this
+repo.
 
 The verifier also hands back the DCAP collateral it consumed, which the
 archive keeps at `inputs/harvest/dcap-collateral/<node>.json`. Intel's
@@ -47,7 +49,6 @@ import argparse
 import json
 import re
 import secrets
-import shutil
 import tempfile
 import time
 from dataclasses import dataclass
@@ -72,11 +73,6 @@ HOLDER_PORT = 7879
 POLL_INTERVAL_SECONDS = 5
 HARVEST_TIMEOUT_SECONDS = 15 * 60
 WAIT_LOG_INTERVAL_SECONDS = 30
-
-# The DCAP verifier from the enclave repo (bin/verify-quote), expected on
-# PATH like the admission CLI. Shared constant with `assemble`,
-# which re-verifies the archived quotes before pinning the founding set.
-DEFAULT_VERIFY_QUOTE_BIN = shell_outs.DEFAULT_VERIFY_QUOTE_BIN
 
 # Holder pubkeys are summit's keystore wire format: lowercase bare hex,
 # exactly as `commonware_utils::hex` renders — the spelling summit's
@@ -119,15 +115,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--verify-quote-bin",
-        default=DEFAULT_VERIFY_QUOTE_BIN,
-        help="DCAP verifier CLI from the enclave repo (bin/verify-quote)",
-    )
-    parser.add_argument(
-        "--admission-bin",
-        default=shell_outs.DEFAULT_ADMISSION_BIN,
-        help="policy-compiler CLI used to promote the measurements into the "
-        "policy each quote is verified against",
+        "--tee-bin",
+        default=shell_outs.DEFAULT_TEE_BIN,
+        help="the Rust deploy CLI: its `tools verify harvest` DCAP-verifies "
+        "each quote, and its `tools admission promote` promotes the "
+        "measurements into the policy each quote is verified against",
     )
     parser.add_argument(
         "--attestation-type", default=shell_outs.DEFAULT_ATTESTATION_TYPE
@@ -136,7 +128,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--pccs-url",
         default=None,
         metavar="URL",
-        help="forwarded to verify-quote: PCCS URL for DCAP collateral",
+        help="forwarded to the verifier: PCCS URL for DCAP collateral",
     )
     parser.add_argument(
         "--force",
@@ -338,16 +330,16 @@ def verify_record(
     target: HarvestTarget,
     record: dict[str, Any],
     policy_path: Path,
-    verify_bin: str,
+    tee_bin: str,
     dump_collateral: Path,
     *,
     pccs_url: str | None,
 ) -> tuple[dict[str, Any], bytes]:
-    """DCAP-verify one harvest record via the enclave repo's `verify-quote`
-    (the shared shell-out in shell_outs.py — `assemble` re-runs the same check
-    over each archived record before pinning the set). A failure burns the
-    harvest: a founding key whose quote doesn't verify must never reach
-    `assemble`.
+    """DCAP-verify one harvest record via the deploy CLI's `tools verify
+    harvest` (the shared shell-out in shell_outs.py — `assemble` re-runs the
+    same check over each archived record before pinning the set). A failure
+    burns the harvest: a founding key whose quote doesn't verify must never
+    reach `assemble`.
 
     Returns the verification report and the bytes the verifier wrote to
     `dump_collateral` — the DCAP collateral this verdict depended on, which
@@ -357,7 +349,7 @@ def verify_record(
         report = shell_outs.verify_harvest_record(
             record,
             policy_path=policy_path,
-            verify_quote_bin=verify_bin,
+            tee_bin=tee_bin,
             pccs_url=pccs_url,
             dump_collateral=dump_collateral,
         )
@@ -428,11 +420,9 @@ def main() -> None:
     args = _parse_args()
 
     # Fail on a missing verifier before touching the cohort.
-    verify_bin = shutil.which(args.verify_quote_bin)
-    if verify_bin is None:
+    if shell_outs.resolve_tee_bin(args.tee_bin) is None:
         raise SystemExit(
-            f"`{args.verify_quote_bin}` not found on PATH. Build the enclave "
-            "repo's bin/verify-quote and put it on PATH."
+            f"`{args.tee_bin}` not found on PATH; {shell_outs.BUILD_TEE_BIN_HINT}."
         )
 
     targets = [
@@ -453,7 +443,7 @@ def main() -> None:
         policy_bytes = shell_outs.promote_measurements(
             args.measurements.read_bytes(),
             args.attestation_type,
-            admission_bin=args.admission_bin,
+            tee_bin=args.tee_bin,
         )
     except manifest_mod.GateError as e:
         raise SystemExit(f"{args.measurements}: {e}") from None
@@ -482,7 +472,7 @@ def main() -> None:
                 target,
                 record,
                 Path(policy_file.name),
-                verify_bin,
+                args.tee_bin,
                 Path(collateral_tmp) / f"{target.name}.json",
                 pccs_url=args.pccs_url,
             )

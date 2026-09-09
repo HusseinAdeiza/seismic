@@ -14,10 +14,17 @@
 //! It stays in the private repo when the public operator repo is extracted, so
 //! anything an operator needs belongs on the other side of the seam — the node
 //! descriptor — not here.
+//!
+//! Until the founding commands are ported, the Python CLI of the same name
+//! runs them and reaches the enclave libraries through this binary's [`tools`]
+//! group.
 
+pub mod tools;
+
+use std::io::Write as _;
 use std::process::ExitCode;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 
 /// The name the binary is installed and invoked as.
 pub const BIN_NAME: &str = "seismic-tee-network";
@@ -34,16 +41,46 @@ pub const BIN_NAME: &str = "seismic-tee-network";
                   Joining an existing network is the operator CLI's job \
                   (seismic-tee-node), not this one's."
 )]
-pub struct Cli {}
+pub struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// The enclave libraries at the subprocess boundary, for the Python CLI
+    /// that still orchestrates a founding.
+    Tools(tools::ToolsCli),
+}
 
 /// Parse the command line and run it.
 pub fn run() -> ExitCode {
-    let _cli = Cli::parse();
-
-    // `--help` and `--version` answer for themselves, so reaching here means a
-    // bare invocation, and there is nothing yet to do.
-    eprintln!("{BIN_NAME}: no commands are implemented yet.");
-    ExitCode::FAILURE
+    let cli = Cli::parse();
+    let result = match cli.command {
+        Command::Tools(tools) => tools::run(tools),
+    };
+    match result {
+        Ok(output) => {
+            // Byte-verbatim: a rendered manifest or a passed-through policy
+            // must reach stdout exactly as the library produced it.
+            let mut stdout = std::io::stdout().lock();
+            if stdout
+                .write_all(&output)
+                .and_then(|()| stdout.flush())
+                .is_err()
+            {
+                return ExitCode::FAILURE;
+            }
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            // The whole chain, one cause per line: a DCAP failure is several
+            // layers deep and the last one alone rarely says what happened.
+            // Nothing reaches stdout on failure — the subprocess contract.
+            eprintln!("error: {err:?}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 #[cfg(test)]
@@ -70,5 +107,52 @@ mod tests {
     #[test]
     fn the_two_clis_are_named_apart() {
         assert_ne!(BIN_NAME, seismic_tee_node::BIN_NAME);
+    }
+
+    /// The argv the Python side sends, exactly: the seam is that spelling.
+    #[test]
+    fn the_tools_group_answers_the_python_sides_argv() {
+        for argv in [
+            vec!["tools", "manifest", "render", "-"],
+            vec!["tools", "manifest", "parse", "-"],
+            vec![
+                "tools",
+                "admission",
+                "promote",
+                "--attestation-type",
+                "azure-tdx",
+                "-",
+            ],
+            vec!["tools", "admission", "compile", "-"],
+            vec![
+                "tools",
+                "verify",
+                "harvest",
+                "--record",
+                "-",
+                "--policy",
+                "p.json",
+                "--dump-collateral",
+                "c.json",
+            ],
+            vec![
+                "tools",
+                "verify",
+                "deploy",
+                "--endpoint",
+                "http://n:7878",
+                "--manifest",
+                "m.json",
+                "--policy",
+                "p.json",
+                "--pccs-url",
+                "http://pccs",
+            ],
+        ] {
+            let full: Vec<&str> = std::iter::once(BIN_NAME)
+                .chain(argv.iter().copied())
+                .collect();
+            assert!(Cli::try_parse_from(&full).is_ok(), "{argv:?}");
+        }
     }
 }

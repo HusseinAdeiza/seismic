@@ -2,7 +2,7 @@
 
 Covers the offline logic: arg parsing, cohort/founder pairing, the
 quote-poll loop and its burn conditions (fetch mocked — no live network
-calls), the verify-quote shell-out contract (subprocess mocked), and the
+calls), the `tools verify harvest` shell-out contract (subprocess mocked), and the
 harvest record — what it carries, and the inputs/harvest/ archive.
 
 Run with:
@@ -285,14 +285,17 @@ class VerifyRecordTests(unittest.TestCase):
         # The shell-out lives in shell_outs.verify_harvest_record (shared with
         # `assemble`'s re-verification); harvest wraps it with the
         # burn messaging.
-        with mock.patch.object(
-            shell_outs.subprocess, "run", side_effect=run_verify_quote
-        ) as run:
+        with (
+            mock.patch.object(shell_outs, "resolve_tee_bin", lambda name: name),
+            mock.patch.object(
+                shell_outs.subprocess, "run", side_effect=run_verify_quote
+            ) as run,
+        ):
             verified = harvest.verify_record(
                 target(),
                 harvest.build_record(target(), quote_body()),
                 Path("/tmp/policy.json"),
-                "verify-quote",
+                shell_outs.DEFAULT_TEE_BIN,
                 self.dump,
                 pccs_url=kwargs.get("pccs_url"),
             )
@@ -305,7 +308,10 @@ class VerifyRecordTests(unittest.TestCase):
         # verified.
         self.assertEqual(collateral, self.COLLATERAL)
         cmd = run.call_args.args[0]
-        self.assertEqual(cmd[:4], ["verify-quote", "harvest", "--record", "-"])
+        self.assertEqual(
+            cmd[:6],
+            [shell_outs.DEFAULT_TEE_BIN, "tools", "verify", "harvest", "--record", "-"],
+        )
         self.assertEqual(cmd[-2:], ["--dump-collateral", str(self.dump)])
         # The record travels over stdin as one document: the claims and the
         # evidence the archive keeps, verified together.

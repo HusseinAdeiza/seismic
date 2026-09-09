@@ -38,7 +38,7 @@ from tee.cli.common.manifest import (
     write_artifact_set,
 )
 from tee.cli.common.shell_outs import (
-    DEFAULT_ADMISSION_BIN,
+    DEFAULT_TEE_BIN,
     parse_manifest,
     promote_measurements,
     render_manifest,
@@ -109,7 +109,7 @@ def promoted_policy_bytes(measurement_id: str = "img.vhd") -> bytes:
 
 
 def fake_render_manifest(document: bytes) -> bytes:
-    """Test stand-in for `seismic-manifest render`: the canonical rendering
+    """Test stand-in for `tools manifest render`: the canonical rendering
     (2-space indent, sorted keys, raw UTF-8, one trailing newline) without
     the strict parse, so assembled bytes look like the tool's and the
     byte-level assertions around them stay meaningful. The strict verdict
@@ -121,8 +121,8 @@ def fake_render_manifest(document: bytes) -> bytes:
     ).encode("utf-8")
 
 
-def fake_parse_manifest(manifest_bytes: bytes, manifest_bin: str = "") -> None:
-    """Test stand-in for `seismic-manifest parse`: any JSON document passes.
+def fake_parse_manifest(manifest_bytes: bytes, tee_bin: str = "") -> None:
+    """Test stand-in for `tools manifest parse`: any JSON document passes.
     Patch it over `tee.cli.common.manifest.parse_manifest` wherever a
     hermetic test reaches `validate_manifest_schema`."""
     json.loads(manifest_bytes)
@@ -132,6 +132,15 @@ def patch_manifest_tool(test: unittest.TestCase) -> None:
     """Route a test case's manifest validation through the stand-in for the
     rest of the test (the real tool is a drift-suite prerequisite only)."""
     patcher = mock.patch.object(manifest_mod, "parse_manifest", fake_parse_manifest)
+    patcher.start()
+    test.addCleanup(patcher.stop)
+
+
+def patch_tee_bin(test: unittest.TestCase) -> None:
+    """Let a shell-out test that mocks `subprocess.run` get as far as the
+    subprocess: the deploy CLI is not on PATH in a hermetic run, so its
+    resolution is stubbed to hand the configured name straight through."""
+    patcher = mock.patch.object(shell_outs, "resolve_tee_bin", lambda name: name)
     patcher.start()
     test.addCleanup(patcher.stop)
 
@@ -173,9 +182,9 @@ class ManifestToolTests(unittest.TestCase):
     def test_missing_binary_is_a_gate_error(self):
         document = json.dumps(FIXTURE_MANIFEST).encode()
         with self.assertRaisesRegex(GateError, "not found"):
-            render_manifest(document, manifest_bin="no-such-manifest-tool")
+            render_manifest(document, tee_bin="no-such-tee-bin")
         with self.assertRaisesRegex(GateError, "not found"):
-            parse_manifest(FIXTURE_MANIFEST_BYTES, manifest_bin="no-such-manifest-tool")
+            parse_manifest(FIXTURE_MANIFEST_BYTES, tee_bin="no-such-tee-bin")
 
     def test_schema_returns_the_document_the_tool_accepted(self):
         patch_manifest_tool(self)
@@ -185,12 +194,12 @@ class ManifestToolTests(unittest.TestCase):
     def test_schema_passes_the_binary_through(self):
         seen = {}
 
-        def record(manifest_bytes, manifest_bin=""):
-            seen["bin"] = manifest_bin
+        def record(manifest_bytes, tee_bin=""):
+            seen["bin"] = tee_bin
 
         with mock.patch.object(manifest_mod, "parse_manifest", record):
-            validate_manifest_schema(FIXTURE_MANIFEST_BYTES, "custom-manifest-tool")
-        self.assertEqual(seen["bin"], "custom-manifest-tool")
+            validate_manifest_schema(FIXTURE_MANIFEST_BYTES, "custom-tee-bin")
+        self.assertEqual(seen["bin"], "custom-tee-bin")
 
 
 class PromoteTests(unittest.TestCase):
@@ -201,7 +210,7 @@ class PromoteTests(unittest.TestCase):
     def test_missing_binary_is_a_gate_error(self):
         raw = json.dumps(RAW_MEASUREMENTS).encode()
         with self.assertRaisesRegex(GateError, "not found"):
-            promote_measurements(raw, admission_bin="no-such-admission-cli")
+            promote_measurements(raw, tee_bin="no-such-tee-bin")
 
 
 class NetworkSectionTests(unittest.TestCase):
@@ -1194,9 +1203,9 @@ class FoundingSetTests(unittest.TestCase):
 
 
 class VerifyHarvestRecordsTests(unittest.TestCase):
-    """The assemble-time re-verification driver (the verify-quote shell-out
-    itself is exercised through the harvest tests, which mock the same
-    subprocess boundary)."""
+    """The assemble-time re-verification driver (the `tools verify harvest`
+    shell-out itself is exercised through the harvest tests, which mock the
+    same subprocess boundary)."""
 
     RECORD = {
         "harvest_nonce": "11" * 32,
@@ -1279,7 +1288,7 @@ class VerifyHarvestRecordsTests(unittest.TestCase):
                 {"node-1": dict(self.RECORD)},
                 b"policy",
                 self.collateral_dir,
-                verify_quote_bin="no-such-verify-quote",
+                tee_bin="no-such-tee-bin",
             )
         # Tooling, not evidence: the preflight fails before the loop, so a
         # missing verifier never carries the burned-founding advice.
@@ -1287,12 +1296,15 @@ class VerifyHarvestRecordsTests(unittest.TestCase):
 
 
 class OfflineHarvestVerificationTests(unittest.TestCase):
-    """The offline half of the `verify-quote harvest` shell-out: the archived
+    """The offline half of the `tools verify harvest` shell-out: the archived
     snapshot is what the record is verified against, so no collateral service
     is reached and the verdict is the same on day 1 and day 400."""
 
     RECORD = {"harvest_nonce": "11" * 32, "evidence": {}}
     REPORT = {"verified": True, "attestation_type": "azure-tdx", "pcrs": {}}
+
+    def setUp(self):
+        patch_tee_bin(self)
 
     def test_collateral_reaches_argv(self):
         snapshot = Path("/nets/devnet/inputs/harvest/dcap-collateral/node-1.json")
@@ -1306,11 +1318,13 @@ class OfflineHarvestVerificationTests(unittest.TestCase):
             verify_harvest_record(
                 self.RECORD,
                 policy_path=Path("/tmp/policy.json"),
-                verify_quote_bin="verify-quote",
                 collateral=snapshot,
             )
         cmd = run.call_args.args[0]
-        self.assertEqual(cmd[:4], ["verify-quote", "harvest", "--record", "-"])
+        self.assertEqual(
+            cmd[:6],
+            [DEFAULT_TEE_BIN, "tools", "verify", "harvest", "--record", "-"],
+        )
         self.assertEqual(cmd[-2:], ["--collateral", str(snapshot)])
         # Offline mode reaches no collateral service, so nothing points at one.
         self.assertNotIn("--pccs-url", cmd)
@@ -1328,12 +1342,15 @@ class OfflineHarvestVerificationTests(unittest.TestCase):
 
 
 class VerifyNodeDeploymentTests(unittest.TestCase):
-    """The `verify-quote deploy` shell-out contract. The verifier owns the
+    """The `tools verify deploy` shell-out contract. The verifier owns the
     whole relying-party flow (nonce, RPC, binding, verification); this side
     only assembles the argv and enforces the exit-0-plus-report contract."""
 
     ENDPOINT = "http://203.0.113.7:7878"
     REPORT = {"verified": True, "attestation_type": "azure-tdx", "pcrs": {}}
+
+    def setUp(self):
+        patch_tee_bin(self)
 
     def _verify(self, returncode=0, stdout=b"", stderr=b"", **kwargs):
         policy_at_call: list[bytes] = []
@@ -1351,7 +1368,6 @@ class VerifyNodeDeploymentTests(unittest.TestCase):
                 self.ENDPOINT,
                 manifest_path=Path("/nets/devnet/network-manifest.json"),
                 policy_bytes=b"policy bytes",
-                verify_quote_bin="verify-quote",
                 **kwargs,
             )
         return report, run, policy_at_call[0]
@@ -1360,7 +1376,7 @@ class VerifyNodeDeploymentTests(unittest.TestCase):
         report, run, policy = self._verify(stdout=json.dumps(self.REPORT).encode())
         self.assertTrue(report["verified"])
         cmd = run.call_args.args[0]
-        self.assertEqual(cmd[:2], ["verify-quote", "deploy"])
+        self.assertEqual(cmd[:4], [DEFAULT_TEE_BIN, "tools", "verify", "deploy"])
         self.assertIn(self.ENDPOINT, cmd)
         self.assertIn("/nets/devnet/network-manifest.json", cmd)
         # The verifier is challenged against exactly the promoted policy.
@@ -1385,12 +1401,14 @@ class VerifyNodeDeploymentTests(unittest.TestCase):
         self.assertIn("https://pccs.example", cmd)
 
     def test_missing_verifier_binary_is_a_gate_error(self):
+        # The real resolution: nothing of that name is anywhere on PATH.
+        mock.patch.stopall()
         with self.assertRaisesRegex(GateError, "not found"):
             verify_node_deployment(
                 self.ENDPOINT,
                 manifest_path=Path("/nets/devnet/network-manifest.json"),
                 policy_bytes=b"policy",
-                verify_quote_bin="no-such-verify-quote",
+                tee_bin="no-such-tee-bin",
             )
 
 
@@ -1416,9 +1434,7 @@ class DirCliTests(unittest.TestCase):
     def test_assemble_dir_resolution(self):
         args = manifest_mod._parse_assemble_args(["networks/testnet-1"])
         self.assertEqual(args.name, "testnet-1")
-        self.assertEqual(args.admission_bin, DEFAULT_ADMISSION_BIN)
-        self.assertEqual(args.verify_quote_bin, shell_outs.DEFAULT_VERIFY_QUOTE_BIN)
-        self.assertEqual(args.manifest_bin, shell_outs.DEFAULT_MANIFEST_BIN)
+        self.assertEqual(args.tee_bin, DEFAULT_TEE_BIN)
         # assemble reads the authored inputs under inputs/.
         self.assertEqual(args.reth_genesis, self.NET / "inputs/reth-genesis.json")
         self.assertEqual(args.summit_genesis, self.NET / "inputs/summit-genesis.toml")
@@ -1485,8 +1501,7 @@ class DirCliTests(unittest.TestCase):
         net = Path("networks/t").resolve()
         args = manifest_mod._parse_validate_args(["networks/t"])
         self.assertEqual(args.manifest, net / "network-manifest.json")
-        self.assertEqual(args.admission_bin, DEFAULT_ADMISSION_BIN)
-        self.assertEqual(args.manifest_bin, shell_outs.DEFAULT_MANIFEST_BIN)
+        self.assertEqual(args.tee_bin, DEFAULT_TEE_BIN)
         # validate reads the *shipped* summit genesis, not the authored input.
         self.assertEqual(args.summit_genesis, net / "summit-genesis.toml")
         self.assertEqual(

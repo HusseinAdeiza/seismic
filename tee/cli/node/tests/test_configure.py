@@ -261,7 +261,7 @@ class MainVerificationFlowTests(unittest.TestCase):
 
     def test_missing_verifier_aborts_before_any_delivery(self):
         with (
-            mock.patch("sys.argv", self.argv + ["--verify-quote-bin", "no-such"]),
+            mock.patch("sys.argv", self.argv + ["--tee-bin", "no-such"]),
             mock.patch.object(configure, "deliver_config") as deliver,
         ):
             with self.assertRaises(SystemExit):
@@ -295,7 +295,9 @@ class MainVerificationFlowTests(unittest.TestCase):
         with (
             mock.patch("sys.argv", self.argv),
             mock.patch.object(
-                configure.verify_mod.shutil, "which", return_value="/bin/vq"
+                configure.verify_mod.shell_outs,
+                "resolve_tee_bin",
+                return_value="/bin/stn",
             ),
             mock.patch.object(
                 configure.verify_mod.subprocess,
