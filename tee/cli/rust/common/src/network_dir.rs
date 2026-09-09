@@ -22,6 +22,8 @@
 //! nodes/nodes.json                             the cohort's descriptor map
 //!                                              (the stack's `nodes` output)
 //! nodes/bootnodes.json                         the founding enode set
+//! nodes/<node>.init-config.toml                the config `configure` POSTed
+//!                                              to that node, byte-exact
 //! ```
 //!
 //! These are layout facts, not configuration: both CLIs name them, so they are
@@ -52,6 +54,11 @@ pub const NODES_DIRNAME: &str = "nodes";
 /// it; see [`crate::descriptor`].
 pub const NODES_FILENAME: &str = "nodes.json";
 pub const BOOTNODES_FILENAME: &str = "bootnodes.json";
+/// `<node>` + this: the tdx-init config as it was POSTed to that node, kept
+/// as the record of what the node booted with and as a body `curl` can
+/// replay. Under `nodes/` because it is per-deploy output like the
+/// descriptor map — it carries live IPs and the bootnode set of the moment.
+pub const INIT_CONFIG_SUFFIX: &str = ".init-config.toml";
 
 /// One network directory, addressed by the layout above.
 ///
@@ -66,6 +73,20 @@ pub struct NetworkDir {
 impl NetworkDir {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
+    }
+
+    /// The directory a manifest sits in, read as a network directory.
+    ///
+    /// This is the artifact-set convention the single-node commands rely on:
+    /// an operator is handed `--manifest`, and the reth genesis, summit
+    /// genesis and measurement policy that manifest pins are the files
+    /// `assemble` wrote beside it — so a command that defaults to "beside
+    /// `--manifest`" is defaulting to the very files the manifest's hashes
+    /// were computed from. A manifest named with no directory component
+    /// resolves its siblings relative to the working directory, as the flag
+    /// itself did.
+    pub fn of_manifest(manifest: &Path) -> Self {
+        Self::new(manifest.parent().unwrap_or_else(|| Path::new("")))
     }
 
     pub fn root(&self) -> &Path {
@@ -141,6 +162,11 @@ impl NetworkDir {
     pub fn bootnodes(&self) -> PathBuf {
         self.nodes().join(BOOTNODES_FILENAME)
     }
+
+    /// The record of the config POSTed to `node`.
+    pub fn init_config(&self, node: &str) -> PathBuf {
+        self.nodes().join(format!("{node}{INIT_CONFIG_SUFFIX}"))
+    }
 }
 
 #[cfg(test)]
@@ -179,6 +205,32 @@ mod tests {
             dir.bootnodes(),
             Path::new("tee/networks/devnet-3/nodes/bootnodes.json")
         );
+        assert_eq!(
+            dir.init_config("dev-bootstrap-node-1"),
+            Path::new("tee/networks/devnet-3/nodes/dev-bootstrap-node-1.init-config.toml")
+        );
+    }
+
+    /// The single-node commands resolve the files a manifest pins from its
+    /// own directory — including when the flag names a bare filename.
+    #[test]
+    fn the_artifact_set_is_found_beside_the_manifest() {
+        let dir = NetworkDir::of_manifest(Path::new("tee/networks/devnet-3/network-manifest.json"));
+        assert_eq!(
+            dir.policy(),
+            Path::new("tee/networks/devnet-3/measurement-policy-bootstrap.json")
+        );
+        assert_eq!(
+            dir.reth_genesis(),
+            Path::new("tee/networks/devnet-3/reth-genesis.json")
+        );
+        assert_eq!(
+            dir.summit_genesis(),
+            Path::new("tee/networks/devnet-3/summit-genesis.toml")
+        );
+
+        let bare = NetworkDir::of_manifest(Path::new("network-manifest.json"));
+        assert_eq!(bare.reth_genesis(), Path::new("reth-genesis.json"));
     }
 
     /// The artifact set and the inputs it was derived from share basenames and

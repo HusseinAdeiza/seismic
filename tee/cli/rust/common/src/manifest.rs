@@ -15,6 +15,7 @@ use std::ops::Deref;
 use std::path::Path;
 
 use seismic_network_manifest::{NetworkId, NetworkManifestV1};
+use sha2::{Digest, Sha256};
 
 use crate::error::{Error, Result};
 
@@ -54,6 +55,87 @@ impl Manifest {
 
     pub fn network_id(&self) -> NetworkId {
         self.network_id
+    }
+
+    // The gates over the artifacts a manifest pins. Each is a cheap structural
+    // check the manifest duplicates a field for, run deploy-side so a mistake
+    // fails before a POST rather than as tdx-init's 400 (or, for the policy,
+    // before a node is appraised against a document this network never
+    // committed to). The *hash* commitments — `eth.genesis_hash`,
+    // `summit.genesis_config_digest` — need reth's and summit's own code and
+    // are enforced by the founder's `assemble`/`validate`; these are the
+    // fields tdx-init itself checks at POST time.
+
+    /// The reth genesis is valid JSON whose `config.chainId` is this
+    /// manifest's `eth.chain_id` — the mirror of tdx-init's POST-time check,
+    /// so a genesis other than the one the manifest was assembled from fails
+    /// the POST build rather than booting a forked node.
+    pub fn check_reth_genesis(&self, genesis: &[u8]) -> Result<()> {
+        let genesis: serde_json::Value = serde_json::from_slice(genesis)
+            .map_err(|e| Error::gate(format!("reth genesis is not valid JSON: {e}")))?;
+        let chain_id = genesis.get("config").and_then(|c| c.get("chainId"));
+        let Some(chain_id) = chain_id.and_then(serde_json::Value::as_u64) else {
+            return Err(Error::gate(format!(
+                "reth genesis config.chainId is {}, not an int",
+                chain_id.map_or_else(|| "absent".to_string(), ToString::to_string),
+            )));
+        };
+        if chain_id != self.eth.chain_id {
+            return Err(Error::gate(format!(
+                "reth genesis config.chainId {chain_id} does not match the manifest's \
+                 eth.chain_id {}",
+                self.eth.chain_id,
+            )));
+        }
+        Ok(())
+    }
+
+    /// The summit genesis is valid TOML whose `namespace` is this manifest's
+    /// `summit.namespace` — the mirror of tdx-init's POST-time check. A
+    /// delivered copy may differ from the artifact-set file in its validator
+    /// IPs (topology, not identity), which is why the check is on the field
+    /// and not on the bytes.
+    pub fn check_summit_genesis(&self, genesis: &[u8]) -> Result<()> {
+        let text = std::str::from_utf8(genesis)
+            .map_err(|e| Error::gate(format!("summit genesis is not valid TOML: {e}")))?;
+        let genesis: toml::Table = toml::from_str(text)
+            .map_err(|e| Error::gate(format!("summit genesis is not valid TOML: {e}")))?;
+        let namespace = genesis.get("namespace");
+        let Some(namespace) = namespace.and_then(toml::Value::as_str) else {
+            return Err(Error::gate(format!(
+                "summit genesis namespace is {}, not a string",
+                namespace.map_or_else(|| "absent".to_string(), ToString::to_string),
+            )));
+        };
+        if namespace != self.summit.namespace {
+            return Err(Error::gate(format!(
+                "summit genesis namespace {namespace:?} does not match the manifest's \
+                 summit.namespace {:?}",
+                self.summit.namespace,
+            )));
+        }
+        Ok(())
+    }
+
+    /// The policy document is the one this manifest commits to:
+    /// `measurements.bootstrap_policy_hash == SHA-256(policy bytes)`.
+    ///
+    /// A byte hash, so it holds for the exact file — the same document the
+    /// registry's genesis-seeded admission IDs were compiled from. Every
+    /// consumer of a network's policy artifact runs this before use, because
+    /// appraising a node against a policy this network never committed to
+    /// proves nothing about joining it.
+    pub fn check_policy(&self, policy: &[u8]) -> Result<()> {
+        let computed: [u8; 32] = Sha256::digest(policy).into();
+        if computed != self.measurements.bootstrap_policy_hash {
+            // `0x`-prefixed lowercase, as the manifest spells its hashes.
+            return Err(Error::gate(format!(
+                "measurements.bootstrap_policy_hash mismatch: manifest has 0x{}, computed 0x{}",
+                hex::encode(self.measurements.bootstrap_policy_hash),
+                hex::encode(computed),
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -112,6 +194,82 @@ mod tests {
                 .network_id(),
             Manifest::from_json_bytes(reformatted).unwrap().network_id(),
         );
+    }
+
+    /// The reth genesis check is on `config.chainId` alone: the hash
+    /// commitment is `assemble`'s to enforce, and tdx-init checks this field.
+    #[test]
+    fn the_reth_genesis_must_carry_the_manifests_chain_id() {
+        let manifest = Manifest::from_json_bytes(EXAMPLE_DEVNET).unwrap();
+
+        manifest
+            .check_reth_genesis(br#"{"config": {"chainId": 5124}, "alloc": {}}"#)
+            .unwrap();
+
+        let err = manifest
+            .check_reth_genesis(br#"{"config": {"chainId": 9999}}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("chainId 9999"), "{err}");
+        assert!(err.contains("eth.chain_id 5124"), "{err}");
+
+        let err = manifest
+            .check_reth_genesis(br#"{"config": {"chainId": "5124"}}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not an int"), "{err}");
+
+        let err = manifest.check_reth_genesis(b"{").unwrap_err().to_string();
+        assert!(err.contains("not valid JSON"), "{err}");
+    }
+
+    /// The summit genesis check is on `namespace` alone, so a delivered copy
+    /// with current validator IPs spliced in still passes.
+    #[test]
+    fn the_summit_genesis_must_carry_the_manifests_namespace() {
+        let manifest = Manifest::from_json_bytes(EXAMPLE_DEVNET).unwrap();
+
+        manifest
+            .check_summit_genesis(b"namespace = \"example-devnet\"\nvalidators = []\n")
+            .unwrap();
+
+        let err = manifest
+            .check_summit_genesis(b"namespace = \"other-net\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("\"other-net\""), "{err}");
+        assert!(err.contains("summit.namespace \"example-devnet\""), "{err}");
+
+        let err = manifest
+            .check_summit_genesis(b"validators = []\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("absent, not a string"), "{err}");
+
+        let err = manifest
+            .check_summit_genesis(b"namespace = [")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not valid TOML"), "{err}");
+    }
+
+    /// The policy check is a byte hash: the committed example's policy passes
+    /// as it is on disk, and one trailing newline fails it.
+    #[test]
+    fn the_policy_must_hash_to_the_manifests_bootstrap_policy_hash() {
+        let manifest = Manifest::from_json_bytes(EXAMPLE_DEVNET).unwrap();
+        let policy =
+            include_bytes!("../../../../networks/example-devnet/measurement-policy-bootstrap.json");
+
+        manifest.check_policy(policy).unwrap();
+
+        let err = manifest
+            .check_policy(&[policy.as_slice(), b"\n"].concat())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("bootstrap_policy_hash mismatch"), "{err}");
+        assert!(err.contains("manifest has 0x"), "{err}");
+        assert!(err.contains("computed 0x"), "{err}");
     }
 
     #[test]

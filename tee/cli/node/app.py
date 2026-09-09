@@ -8,8 +8,13 @@ is the seismic_node Pulumi program's job, for one node or a cohort).
 Founding a network (harvest, assemble, configuring the cohort) is the
 network founder's act and lives in the separate `seismic-tee-network` CLI.
 
-Wired via [project.scripts] in pyproject.toml. Each leaf forwards its argv
-to that module's argparse `main()`; see tee/cli/common/plumbing.py.
+Retired as an entry point: `seismic-tee-node` is the Rust binary built from
+tee/cli/rust/node, which runs every command below, and pyproject.toml no
+longer wires this group to that name. The modules stay because the Python
+`seismic-tee-network configure` imports their primitives (`build_config`,
+`post_config_to_tdx_init`, `poll_provisioning`, the appraisal); they go with
+the Python founding port. Each leaf forwards its argv to that module's
+argparse `main()`; see tee/cli/common/plumbing.py.
 """
 
 import click

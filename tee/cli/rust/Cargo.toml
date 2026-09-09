@@ -49,9 +49,19 @@ seismic-network-manifest = { git = "https://github.com/SeismicSystems/enclave.gi
 seismic-manifest = { git = "https://github.com/SeismicSystems/enclave.git", rev = "6b35612a1844b370fac21525d035612e861372ee" }
 seismic-measurement-admission = { git = "https://github.com/SeismicSystems/enclave.git", rev = "6b35612a1844b370fac21525d035612e861372ee" }
 seismic-verify-quote = { git = "https://github.com/SeismicSystems/enclave.git", rev = "6b35612a1844b370fac21525d035612e861372ee" }
+# The schema of the config POSTed to tdx-init, as the type tdx-init itself
+# deserializes: a field it would reject fails to compile here.
+tdx-init-config = { git = "https://github.com/SeismicSystems/enclave.git", rev = "6b35612a1844b370fac21525d035612e861372ee" }
 
 anyhow = "1.0"
+base64 = "0.22"
 clap = { version = "4.5", features = ["derive"] }
+hex = "0.4"
+# The JSON-RPC client, for the attestation service's status reads. Already
+# in the graph through seismic-verify-quote, which reaches the same port with
+# it; the version must stay the enclave's so there is one copy. Only the HTTP
+# client: this binary serves nothing and opens no websockets.
+jsonrpsee = { version = "0.26", default-features = false, features = ["http-client"] }
 # default-features off drops native-tls: an operator downloads one binary, so
 # it must not link the host's OpenSSL.
 reqwest = { version = "0.12", default-features = false, features = [
@@ -62,7 +72,10 @@ reqwest = { version = "0.12", default-features = false, features = [
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+sha2 = "0.10"
 thiserror = "2.0"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "fs"] }
+# `signal` for ctrl-C during a node's first-boot watch, `time` for the polls.
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "fs", "signal", "time"] }
+toml = "0.9"
 
 tempfile = "3"

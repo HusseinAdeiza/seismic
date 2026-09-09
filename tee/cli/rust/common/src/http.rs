@@ -27,13 +27,33 @@ pub const SUMMIT_KEY_HOLDER_PORT: u16 = 7879;
 /// which is why this is short and shared.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// The client every deploy-side request goes out on.
+/// How long the TCP connect alone may take before it counts as a *connect*
+/// failure.
 ///
-/// Named in the user agent so a node's logs distinguish the deploy tooling
-/// from anything else that reached it.
+/// A node that is not up yet does not always refuse: while its network stack
+/// is still coming up, or behind an NSG that drops rather than rejects, the
+/// SYN goes unanswered and the connect hangs. Without this, such a hang would
+/// run into [`REQUEST_TIMEOUT`] and surface as a request timeout, which
+/// callers rightly do not retry (a POST that timed out mid-flight may have
+/// landed). With it, the hang is reported as a connect error — the same class
+/// as "connection refused" — and the retry loops wait it out like any other
+/// not-up-yet node. Shorter than [`REQUEST_TIMEOUT`] so it is the one that
+/// fires.
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// What every request from this tooling identifies itself as, so a node's
+/// logs distinguish the deploy CLIs from anything else that reached it. Sent
+/// by this client and by [`crate::rpc`] alike.
+pub const USER_AGENT: &str = concat!("seismic-tee-cli/", env!("CARGO_PKG_VERSION"));
+
+/// The client the plain-HTTP requests go out on: tdx-init's config receiver
+/// and summit-key-holder, the endpoints that speak HTTP rather than JSON-RPC.
+/// JSON-RPC endpoints are reached through [`crate::rpc`] instead, with the
+/// same user agent and request timeout.
 pub fn client() -> Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
-        .user_agent(concat!("seismic-tee-cli/", env!("CARGO_PKG_VERSION")))
+        .user_agent(USER_AGENT)
+        .connect_timeout(CONNECT_TIMEOUT)
         .timeout(REQUEST_TIMEOUT)
         .build()?)
 }

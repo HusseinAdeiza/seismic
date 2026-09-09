@@ -44,6 +44,22 @@ pub enum Error {
 
     #[error(transparent)]
     Http(#[from] reqwest::Error),
+
+    /// A node's JSON-RPC endpoint gave no answer: connection refused, a
+    /// timeout, or a reply that was not JSON-RPC. The normal state of a node
+    /// still coming up, which is why pollers keep going on it.
+    #[error("no answer from {url}")]
+    RpcTransport {
+        url: String,
+        #[source]
+        source: jsonrpsee::core::ClientError,
+    },
+
+    /// A node's JSON-RPC endpoint answered, with an error object. Unlike
+    /// [`Self::RpcTransport`] this is never the normal state of a node coming
+    /// up.
+    #[error("RPC error from {url}: {message}")]
+    Rpc { url: String, message: String },
 }
 
 impl Error {
