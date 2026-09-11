@@ -4337,6 +4337,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "seismic-tee"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "seismic-tee-admission",
+ "seismic-tee-network",
+ "seismic-tee-node",
+ "tokio",
+]
+
+[[package]]
+name = "seismic-tee-admission"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "seismic-measurement-admission",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "seismic-tee-common"
 version = "0.1.0"
 dependencies = [

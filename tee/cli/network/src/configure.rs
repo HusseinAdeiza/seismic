@@ -1,7 +1,7 @@
 //! `configure`: found a network in one command.
 //!
 //! ```text
-//! seismic-tee-network configure --genesis devnet-3-1 \
+//! seismic-tee network configure --genesis devnet-3-1 \
 //!     --manifest tee/networks/devnet-3/network-manifest.json
 //! ```
 //!
@@ -33,7 +33,7 @@
 //! set.
 //!
 //! Every node is deploy-verified as soon as it reaches a ready state — the
-//! `seismic-tee-node verify` check, run as its own task so a fast box is
+//! `seismic-tee node verify` check, run as its own task so a fast box is
 //! appraised while a slow one still wipes its disk. The founder is a relying
 //! party the moment stage 2 hands genesis's enode to the joiners, so the
 //! genesis gate lands before that: a genesis node that does not pass stops the
@@ -51,8 +51,8 @@
 //! the launch assertions (see [`crate::launch`]) verify each box against what
 //! the manifest pins.
 //!
-//! Founding is the founder's act, so this lives on the network CLI; joining an
-//! already-live network is the operator `seismic-tee-node configure`. Both go
+//! Founding is the founder's act, so this lives in the `network` group; joining
+//! an already-live network is `seismic-tee node configure`. Both go
 //! through the node crate's `build_config` / `post_config` primitives and its
 //! status poller, so each node's POSTed config and wipe-watch are identical —
 //! only `[node].genesis_node` and the bootnode set differ.
@@ -768,7 +768,7 @@ fn report(
         println!(
             "A node that took its config but did not pass the appraisal is retried with `verify`, \
              not with a second `configure` (tdx-init takes one config POST per boot):\n    \
-             seismic-tee-node verify --node {} --name <node> --manifest {}{}\n",
+             seismic-tee node verify --node {} --name <node> --manifest {}{}\n",
             dir.nodes_file().display(),
             args.manifest.display(),
             retry_flags(&args.policy_source, &args.verifier),
@@ -819,7 +819,7 @@ pub struct ConfigureArgs {
     pub email: String,
 
     /// Found the cohort without deploy-verifying it. By default each node is
-    /// appraised once it is up — the same check as `seismic-tee-node verify`,
+    /// appraised once it is up — the same check as `seismic-tee node verify`,
     /// against the policy --manifest pins — and a node that fails counts as
     /// failed.
     #[arg(long)]
@@ -859,7 +859,7 @@ pub async fn run(args: ConfigureArgs) -> anyhow::Result<ExitCode> {
     let appraisal = if args.no_verify {
         eprintln!(
             "warning: --no-verify: this cohort's nodes will not be appraised. Run \
-             `seismic-tee-node verify` before relying on an unappraised node."
+             `seismic-tee node verify` before relying on an unappraised node."
         );
         None
     } else {
@@ -901,7 +901,7 @@ pub async fn run(args: ConfigureArgs) -> anyhow::Result<ExitCode> {
         bail!(
             "node(s) without a founding harvest record: {} — this command configures a founding \
              cohort, and every box's launch is asserted against the keys harvested from it. A \
-             joiner arriving after founding uses `seismic-tee-node configure`.",
+             joiner arriving after founding uses `seismic-tee node configure`.",
             unharvested.join(", ")
         );
     }
@@ -921,7 +921,7 @@ pub async fn run(args: ConfigureArgs) -> anyhow::Result<ExitCode> {
         }
     );
 
-    // Collateral fetches go over TLS; see `tools verify` for why the provider
+    // Collateral fetches go over TLS; see `node verify` for why the provider
     // is chosen here.
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let shared = Arc::new(Shared {

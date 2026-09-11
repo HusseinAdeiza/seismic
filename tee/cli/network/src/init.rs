@@ -4,7 +4,7 @@
 //! `https://` URL — and the first step of a founding:
 //!
 //! ```text
-//! seismic-tee-network init tee/networks/devnet-3 \
+//! seismic-tee network init tee/networks/devnet-3 \
 //!     --reth-genesis https://raw.githubusercontent.com/.../dev.json \
 //!     --summit-genesis tee/networks/summit-genesis-starter.toml \
 //!     --measurements ../seismic-images/build/measurements.json \
@@ -349,7 +349,7 @@ pub async fn run(args: InitArgs) -> anyhow::Result<ExitCode> {
          (one stack per environment; author one `nodes` entry per\n      founding node and point \
          measurements_path at\n      {}\n      so a stale image pin is refused at preview — see\n      \
          tee/docs/runbook-devnet.md),\n     then save its `nodes` output: pulumi stack output nodes \
-         --json\n     > {}\n  4. seismic-tee-network harvest {}\n  5. seismic-tee-network assemble {}",
+         --json\n     > {}\n  4. seismic-tee network harvest {}\n  5. seismic-tee network assemble {}",
         root.display(),
         dir.input_summit_genesis().display(),
         dir.founders().display(),

@@ -172,7 +172,7 @@ fn validate_registry_account(
         bail!(
             "registry {address} genesis storage is empty: the admission policy must be \
              genesis-pinned. Seed the account with the compiled registry_genesis_storage \
-             (`seismic-tee-network tools admission compile measurement-policy-bootstrap.json`)"
+             (`seismic-tee admission compile measurement-policy-bootstrap.json`)"
         );
     }
     if &actual != expected {
@@ -227,7 +227,7 @@ impl ArtifactSet {
         let manifest_path = dir.manifest();
         if !manifest_path.is_file() {
             bail!(
-                "{} not found — no artifact set to validate; derive one with `seismic-tee-network \
+                "{} not found — no artifact set to validate; derive one with `seismic-tee network \
                  assemble`",
                 manifest_path.display()
             );

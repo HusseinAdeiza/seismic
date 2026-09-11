@@ -1,6 +1,6 @@
 [package]
 name = "seismic-tee-node"
-description = "Operator CLI for a Seismic TEE node: configure it on first boot, and verify its attestation"
+description = "The `node` command group of the Seismic TEE deploy CLI: configure a node on first boot, and verify its attestation"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,8 +8,8 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
-# The dependency direction the two CLIs are split on, as a Cargo edge: the
-# operator half may reach the shared foundation and nothing else in this
+# The dependency direction the library crates are split on, as a Cargo edge:
+# the operator half may reach the shared foundation and nothing else in this
 # workspace. Where the seam runs is this file's decision, not that of whichever
 # command first needs it.
 seismic-tee-common.workspace = true
@@ -38,7 +38,3 @@ toml.workspace = true
 [dev-dependencies]
 seismic-tee-common = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
-
-[[bin]]
-name = "seismic-tee-node"
-path = "src/main.rs"

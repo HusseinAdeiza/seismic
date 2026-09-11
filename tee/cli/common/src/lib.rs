@@ -1,14 +1,15 @@
-//! Shared foundation for the two deploy CLIs.
+//! Shared foundation of the deploy CLI's two command-bearing crates.
 //!
-//! Everything here is common to `seismic-tee-node` (operator-facing) and
-//! `seismic-tee-network` (founder-facing): the node descriptor map that is the
-//! seam between them, the network-directory layout they both read, the
-//! manifest they both trust and the gates it puts the other artifacts
-//! through, and the HTTP, JSON-RPC and error types they both speak.
+//! Everything here is common to `seismic-tee-node` (the `node` group: act on
+//! your own node) and `seismic-tee-network` (the `network` group and the rest
+//! of the founder side): the node descriptor map that is the seam between
+//! them, the network-directory layout they both read, the manifest they both
+//! trust and the gates it puts the other artifacts through, and the HTTP,
+//! JSON-RPC and error types they both speak.
 //!
 //! This crate depends on neither side, so nothing founder-only belongs in it:
-//! the operator crate must stay buildable without a single founder-only
-//! dependency.
+//! the node crate must stay buildable without a single founder-only
+//! dependency, whichever binary mounts it.
 
 pub mod artifact;
 pub mod descriptor;

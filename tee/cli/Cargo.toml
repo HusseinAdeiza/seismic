@@ -1,35 +1,43 @@
-# The Rust deploy CLI: founding a Seismic network, and joining one.
+# The Rust deploy CLI: one binary, `seismic-tee`, over three library crates.
 #
-# Provisioning is out of scope in both directions — neither CLI creates a
-# machine or destroys one. The work spans both sides of a machine's existence:
-# deriving the artifact set that is a network's identity needs no machine at
-# all, while configuring a node and verifying its attestation needs one
-# already running. The node descriptor is where those two halves meet, and it
-# comes from the Pulumi program and the cohort helper beside it, for one node
-# or N.
+# Provisioning is out of scope in both directions — the CLI neither creates a
+# machine nor destroys one. The work spans both sides of a machine's
+# existence: deriving the artifact set that is a network's identity needs no
+# machine at all, while configuring a node and verifying its attestation needs
+# one already running. The node descriptor is where those two halves meet, and
+# it comes from the Pulumi program and the cohort helper beside it, for one
+# node or N.
 #
 # The workspace is scoped to this directory rather than the repo root: deploy
 # is a multi-purpose repo and this is one subsystem in it.
 #
-# Three crates, split by audience. The split is a rule about who may depend on
-# whom, and here the compiler enforces it:
+# Four library crates, split by who may depend on whom, and one binary that
+# mounts them. The split is a rule the compiler enforces:
 #
-#   common   node descriptor, network-directory layout, HTTP and error types.
-#            Depends on neither side.
-#   node     -> seismic-tee-node, the operator CLI. Cloud-agnostic. Depends
-#            only on common.
-#   network  -> seismic-tee-network, the founder CLI. The only crate allowed
-#            to depend on both.
+#   common       node descriptor, network-directory layout, HTTP and error
+#                types. Depends on neither side.
+#   node         the `node` command group: stand up and appraise one node.
+#                Cloud-agnostic. Depends only on common.
+#   network      the `network` group and `verify-founding`: found a network,
+#                audit a founding. The only crate allowed to depend on both.
+#   admission    the `admission` group: review what a measurement policy
+#                compiles to. Depends on neither side.
+#   seismic-tee  the binary. Mounts the three command-bearing crates and owns
+#                nothing else.
 #
-# The whole workspace is headed for a public repo; the split is what keeps
-# the operator half free of founder-only dependencies whichever way the
-# binaries are cut.
+# The whole workspace is headed for a public repo. The split is what keeps each
+# party's crate free of the others' dependencies — the operator half free of
+# founder-only ones, the founder half free of governance's — and it needs no
+# second binary to enforce it: the command groups follow the trust model's
+# parties, one crate each (see seismic-tee/src/main.rs).
 [workspace]
 resolver = "3"
 members = [
-    "common",  # -> seismic-tee-common  (library)
-    "node",    # -> seismic-tee-node    (library + binary)
-    "network", # -> seismic-tee-network (library + binary)
+    "common",      # -> seismic-tee-common  (library)
+    "node",        # -> seismic-tee-node    (library)
+    "network",     # -> seismic-tee-network (library)
+    "admission",   # -> seismic-tee-admission (library)
+    "seismic-tee", # -> seismic-tee         (binary)
 ]
 
 [workspace.package]
@@ -42,6 +50,8 @@ authors = ["Seismic Systems"]
 [workspace.dependencies]
 seismic-tee-common = { path = "common" }
 seismic-tee-node = { path = "node" }
+seismic-tee-network = { path = "network" }
+seismic-tee-admission = { path = "admission" }
 
 # Enclave libraries, pinned by rev — the same mechanism seismic-reth uses for
 # seismic-crypto. Every rule the network's identity depends on has exactly one
@@ -67,7 +77,7 @@ hex = "0.4"
 # The JSON-RPC client, for the attestation service's status reads. Already
 # in the graph through seismic-verify-quote, which reaches the same port with
 # it; the version must stay the enclave's so there is one copy. Only the HTTP
-# client: this binary serves nothing and opens no websockets.
+# client: the binary serves nothing and opens no websockets.
 jsonrpsee = { version = "0.26", default-features = false, features = ["http-client"] }
 # default-features off drops native-tls: an operator downloads one binary, so
 # it must not link the host's OpenSSL.
@@ -75,7 +85,7 @@ reqwest = { version = "0.12", default-features = false, features = [
     "json",
     "rustls-tls",
 ] }
-# The process-level crypto provider `tools verify` installs; see there.
+# The process-level crypto provider `node verify` installs; see there.
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"] }
 # The harvest's per-box nonce. At the enclave's version, like jsonrpsee.
 rand = "0.9"

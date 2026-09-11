@@ -1,7 +1,7 @@
 //! `verify`: deploy-verify a node's TDX attestation before relying on it.
 //!
 //! ```text
-//! seismic-tee-node verify --node n2.json --manifest m.json
+//! seismic-tee node verify --node n2.json --manifest m.json
 //! ```
 //!
 //! The enclave's verify-quote library owns the whole relying-party flow: it
@@ -269,7 +269,7 @@ pub async fn verify_deployment(
         Err(error) => bail!(
             "{fqdn} ({public_ip}): deploy verification FAILED:\n{error:?}\nDo not rely on this \
              node — publish its address, hand it to later nodes as a bootnode — until \
-             `seismic-tee-node verify` passes against it."
+             `seismic-tee node verify` passes against it."
         ),
     }
 }

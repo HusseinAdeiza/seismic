@@ -1,6 +1,6 @@
 [package]
 name = "seismic-tee-common"
-description = "Shared foundation for the Seismic TEE deploy CLIs: node descriptor, network-directory layout, HTTP and error types"
+description = "Shared foundation of the Seismic TEE deploy CLI: node descriptor, network-directory layout, HTTP and error types"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,7 +8,7 @@ repository.workspace = true
 authors.workspace = true
 
 [features]
-# A fake HTTP server and fixtures for the two CLIs' tests. A feature rather
+# A fake HTTP server and fixtures for the node and network crates' tests. A feature rather
 # than a dev-dependency because the node and network crates share it, and a
 # crate's dev-dependencies are not visible to its dependents.
 test-support = ["dep:tempfile"]

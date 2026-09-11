@@ -1,0 +1,23 @@
+[package]
+name = "seismic-tee"
+description = "The Seismic TEE deploy CLI: found a network, stand up and appraise a node, review a measurement policy, audit a founding"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+# The mount point for the three command-bearing crates, and nothing else: the
+# groups' code lives in the libraries, whose one-way dependency rule
+# (../Cargo.toml) a binary that links them all leaves untouched.
+seismic-tee-admission.workspace = true
+seismic-tee-network.workspace = true
+seismic-tee-node.workspace = true
+
+clap.workspace = true
+tokio.workspace = true
+
+[[bin]]
+name = "seismic-tee"
+path = "src/main.rs"

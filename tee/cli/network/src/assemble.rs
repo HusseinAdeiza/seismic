@@ -1,7 +1,7 @@
 //! `assemble`: derive the artifact set from a network directory's inputs.
 //!
 //! ```text
-//! seismic-tee-network assemble tee/networks/devnet-3
+//! seismic-tee network assemble tee/networks/devnet-3
 //! ```
 //!
 //! The step that pins the founding validator set into `network_id`. It reads
@@ -304,7 +304,7 @@ pub fn write_artifact_set(
 /// The harvest verified these records when it collected them, but nothing
 /// downstream trusts that run's verdict: assemble is the step that pins the
 /// validator set into `network_id`, so it hands each archived record back to
-/// the verifier before pinning anything, and `verify-harvest` runs the same
+/// the verifier before pinning anything, and `verify-founding` runs the same
 /// function over the committed directory for as long as it exists (the
 /// records are plain files that may have been copied, committed, and edited
 /// since the harvest).
@@ -321,7 +321,7 @@ pub async fn verify_harvest_records(
     policy: &[u8],
 ) -> anyhow::Result<()> {
     // Replaying a snapshot parses Intel's material, whose TLS-bearing types
-    // want a rustls process default; see `tools verify` for why one has to
+    // want a rustls process default; see `node verify` for why one has to
     // be chosen. Idempotent: a second install is a no-op error.
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
@@ -436,7 +436,7 @@ pub async fn run(args: AssembleArgs) -> anyhow::Result<ExitCode> {
     let policy = promote_measurements(&raw, None, Some(&args.attestation_type))
         .with_context(|| format!("{}", measurements.display()))?;
 
-    // The offline replay gate — the same function `verify-harvest` runs over
+    // The offline replay gate — the same function `verify-founding` runs over
     // the committed directory afterwards.
     verify_harvest_records(&dir, &founding.records, &policy).await?;
 

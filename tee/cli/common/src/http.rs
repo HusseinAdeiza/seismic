@@ -1,4 +1,4 @@
-//! Where a node listens, and the client both CLIs reach it with.
+//! Where a node listens, and the client both command groups reach it with.
 //!
 //! A deployed node is a sealed VM: there is no SSH, so every interaction is an
 //! HTTP or JSON-RPC call to one of the ports below. Two of them are

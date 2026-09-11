@@ -17,8 +17,8 @@
 //! a miss would compute the hash against a different alloy pin than the node,
 //! silently — and summit has no genesis library to link. A prebuilt binary
 //! carries its own resolved graph. The enclave crates, by contrast, are linked
-//! (see `gates`), so the `tools` group's admission and manifest shell-outs
-//! have no counterpart here.
+//! (see `gates`), so admission compilation and manifest rendering have no
+//! counterpart here.
 //!
 //! Each method owns one subcommand's contract — argv, what travels on
 //! stdin/stdout, what a failure means — and every failure names the command

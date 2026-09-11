@@ -26,7 +26,7 @@
 //!                                              to that node, byte-exact
 //! ```
 //!
-//! These are layout facts, not configuration: both CLIs name them, so they are
+//! These are layout facts, not configuration: both command groups name them, so they are
 //! spelled once here.
 
 use std::path::{Path, PathBuf};

@@ -3,7 +3,7 @@
 One directory per network: the committable identity of a founded
 network. The authored inputs live under `inputs/`, joined mid-founding by
 the harvested facts (`inputs/harvest/` — the cohort's TEE-born founding
-keys and their quotes); `seismic-tee-network assemble` derives
+keys and their quotes); `seismic-tee network assemble` derives
 the artifact set from them at the top level. Everything top-level is
 hash-pinned by `network-manifest.json` — whose SHA-256 is the network's
 `network_id` — and everything under `inputs/` is provenance. What the
@@ -12,7 +12,7 @@ hashes the exact file bytes:
 [the network manifest doc](https://github.com/SeismicSystems/seismic/blob/main/docs/tee/network-manifest.md).
 
 A committed directory is auditable as a whole, by anyone, offline:
-`seismic-tee-network verify-harvest <dir>` re-verifies its founding — every
+`seismic-tee verify-founding <dir>` re-verifies its founding — every
 archived quote against its own collateral snapshot and the policy the
 manifest pins, and the archive against the validator set the summit
 genesis seats.
@@ -52,7 +52,7 @@ The committed `summit-genesis.toml` is a founding-era snapshot: its
 validator entries carry the IPs the cohort had at assemble time, which
 are network topology, not identity — summit's config digest (the
 manifest's pin) excludes them, and peers authenticate by the pinned
-ed25519 keys. `seismic-tee-network configure` therefore splices each
+ed25519 keys. `seismic-tee network configure` therefore splices each
 box's current descriptor IP into the copy it delivers, touching no other
 field, and then asserts the launch against the pins (reth block 0,
 holder keys). The committed file itself never changes after assemble.

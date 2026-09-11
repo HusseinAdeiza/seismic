@@ -1,10 +1,18 @@
-//! `verify-harvest`: re-verify a network's founding from its committed
-//! directory, offline.
+//! `verify-founding`: re-verify a network's founding — the genesis validator
+//! set's TEE provenance — from its committed directory, offline.
 //!
 //! ```text
-//! seismic-tee-network verify-harvest tee/networks/devnet-3
-//! seismic-tee-network verify-harvest tee/networks/devnet-3 --record devnet-3-2
+//! seismic-tee verify-founding tee/networks/devnet-3
+//! seismic-tee verify-founding tee/networks/devnet-3 --record devnet-3-2
 //! ```
+//!
+//! The auditor's command, and the binary's one top-level command. The auditor
+//! takes no trust-sensitive action of their own — they verify the other
+//! parties' after the fact — and their subject is the network's record as a
+//! whole, so the command sits beside the groups rather than in any of them.
+//! "Founding" is the docs' word for exactly this event and names what is
+//! verified; "harvest", the founder's own name for the step that produced
+//! the archive, is not something an auditor has to know.
 //!
 //! A committed network directory is everything an auditor needs to ask the
 //! founding's question again: *these* keys were minted in measured boxes,
@@ -14,7 +22,7 @@
 //! - reads `network-manifest.json` through the strict schema and takes
 //!   `measurement-policy-bootstrap.json` beside it, refusing a policy whose
 //!   hash is not the manifest's `bootstrap_policy_hash` — the same check
-//!   `seismic-tee-node verify` applies before appraising a node;
+//!   `seismic-tee node verify` applies before appraising a node;
 //! - reads the founding validator set from the completed `summit-genesis.toml`
 //!   beside the manifest, and checks that every archived record's keys are
 //!   seated there and every seat is vouched for by an archived record;
@@ -29,8 +37,8 @@
 //! holding part of an archive; the pinned set is then only asked to seat that
 //! record. There is no `--pccs-url`: nothing here reaches a network.
 //!
-//! This is `validate`'s sibling: `validate` audits the artifact set against
-//! itself, this audits the archive the set was pinned from. It is the offline
+//! This is `network validate`'s sibling: `validate` audits the artifact set
+//! against itself, this audits the archive the set was pinned from. It is the offline
 //! half of `assemble`'s gate on that archive — the two run one function,
 //! [`verify_harvest_records`] — with a directory in front of it. Neither
 //! needs the founder's shell-outs, so an auditor needs this binary and
@@ -56,7 +64,7 @@ use crate::founding::{FoundingRecords, is_bare_hex, load_harvest_records};
 use crate::init::absolute;
 
 #[derive(Debug, Args)]
-pub struct VerifyHarvestArgs {
+pub struct VerifyFoundingArgs {
     /// Committed network directory: the artifact set `assemble` wrote at its
     /// top level (network-manifest.json, measurement-policy-bootstrap.json,
     /// summit-genesis.toml) and the founding archive under inputs/harvest/.
@@ -257,7 +265,7 @@ pub async fn audit_founding(
     })
 }
 
-pub async fn run(args: VerifyHarvestArgs) -> anyhow::Result<ExitCode> {
+pub async fn run(args: VerifyFoundingArgs) -> anyhow::Result<ExitCode> {
     if !args.dir.is_dir() {
         bail!("network directory not found: {}", args.dir.display());
     }
@@ -364,10 +372,10 @@ mod tests {
     #[derive(Parser)]
     struct Probe {
         #[command(flatten)]
-        args: VerifyHarvestArgs,
+        args: VerifyFoundingArgs,
     }
 
-    fn parse(argv: &[&str]) -> VerifyHarvestArgs {
+    fn parse(argv: &[&str]) -> VerifyFoundingArgs {
         Probe::try_parse_from(std::iter::once(&"probe").chain(argv))
             .expect("well-formed argv")
             .args

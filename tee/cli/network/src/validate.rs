@@ -1,7 +1,7 @@
 //! `validate`: re-run all gates over an assembled network directory.
 //!
 //! ```text
-//! seismic-tee-network validate tee/networks/devnet-3
+//! seismic-tee network validate tee/networks/devnet-3
 //! ```
 //!
 //! Audits the artifact set `assemble` wrote there — manifest, injected reth
@@ -90,7 +90,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains(MANIFEST_FILENAME), "{err}");
-        assert!(err.contains("seismic-tee-network assemble"), "{err}");
+        assert!(err.contains("seismic-tee network assemble"), "{err}");
     }
 
     /// Every pin is re-derived: a genesis hash, a digest, a policy hash or a

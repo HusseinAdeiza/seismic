@@ -1,6 +1,6 @@
 //! A file's bytes, kept with the path they came from.
 //!
-//! The artifacts both CLIs deliver — a reth genesis, a summit genesis, a
+//! The artifacts both command groups deliver — a reth genesis, a summit genesis, a
 //! measurement policy — are checked against the manifest and then shipped
 //! byte-verbatim, and a check that fails on their *contents* still has to name
 //! the *file*, which by then is several calls away from the flag that named

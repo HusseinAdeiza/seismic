@@ -3,7 +3,7 @@
 //! The attestation service serves `getLuksProvisioningStatus` on `:7878`
 //! (JSON-RPC) for the duration of the first-boot disk wipe — the one long
 //! (1h+), otherwise opaque phase. This module polls it and renders a progress
-//! bar, and is the shared poller behind both `seismic-tee-node status` and
+//! bar, and is the shared poller behind both `seismic-tee node status` and
 //! `configure`'s default post-POST wait (and the founding cohort's dashboard,
 //! which is why the state machine renders nothing itself).
 //!

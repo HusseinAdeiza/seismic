@@ -4,16 +4,16 @@
 //! manifest, and POST it to the node's tdx-init HTTP receiver:
 //!
 //! ```text
-//! seismic-tee-node configure --node n2.json \
+//! seismic-tee node configure --node n2.json \
 //!     --bootnode enode://<pubkey>@<ip>:30303 --manifest m.json
 //! ```
 //!
-//! The operator CLI only ever *joins* an existing network (`genesis_node =
+//! The `node` group only ever *joins* an existing network (`genesis_node =
 //! false`): the node fetches `root_key` via `getWrappedRootKey` from a peer
 //! tdx-init derives from `--bootnode` (`http://<host>:7878` per bootnode).
 //! Founding a network — designating the one genesis node that mints `root_key`
-//! locally — is owned by `seismic-tee-network configure`, not exposed here.
-//! [`build_config`] and [`post_config`] are the shared primitives both CLIs
+//! locally — is owned by `seismic-tee network configure`, not exposed here.
+//! [`build_config`] and [`post_config`] are the shared primitives both groups
 //! call; `genesis_node` is a library-only knob with no flag on this command.
 //!
 //! The node is deploy-verified once it reaches a ready state — the `verify`
@@ -466,7 +466,7 @@ pub struct ConfigureArgs {
     #[command(flatten)]
     pub node: NodeArgs,
 
-    /// Network manifest JSON (from `seismic-tee-network assemble`). Merged
+    /// Network manifest JSON (from `seismic-tee network assemble`). Merged
     /// into the POSTed config as [network].manifest_base64; shared across
     /// every node, so it lives outside the per-node flags.
     #[arg(long, value_name = "FILE")]
@@ -504,7 +504,7 @@ pub struct ConfigureArgs {
     pub email: String,
 
     /// Configure the node without deploy-verifying it. By default the node is
-    /// appraised once it is up — the same check as `seismic-tee-node verify`,
+    /// appraised once it is up — the same check as `seismic-tee node verify`,
     /// against the policy --manifest pins — and this command exits nonzero
     /// unless it passes.
     #[arg(long)]
@@ -541,7 +541,7 @@ pub async fn run(args: ConfigureArgs) -> anyhow::Result<ExitCode> {
     // fix still costs nothing, not after the config POST landed.
     let policy = if args.no_verify {
         eprintln!(
-            "warning: --no-verify: this node will not be appraised. Run `seismic-tee-node \
+            "warning: --no-verify: this node will not be appraised. Run `seismic-tee node \
              verify` before relying on an unappraised node."
         );
         None
@@ -634,7 +634,7 @@ pub async fn run(args: ConfigureArgs) -> anyhow::Result<ExitCode> {
         // command: the config this boot needs is already delivered.
         bail!(
             "deploy verification skipped: the node was not confirmed ready. Once it is up, \
-             run:\n    seismic-tee-node verify{} --manifest {}{}",
+             run:\n    seismic-tee node verify{} --manifest {}{}",
             args.node.as_flags(),
             args.manifest.display(),
             verify::retry_flags(&args.policy_source, &args.verifier),
@@ -653,7 +653,7 @@ pub async fn run(args: ConfigureArgs) -> anyhow::Result<ExitCode> {
             "config delivered to {fqdn} ({public_ip}), but the node did not reach a ready state \
              within the watch window (attestation service :{ATTESTATION_RPC_PORT} never came \
              up, or the LUKS wipe errored). It may still be bootstrapping, or stuck — check \
-             attestation-service logs on the node, then re-watch with:\n    seismic-tee-node \
+             attestation-service logs on the node, then re-watch with:\n    seismic-tee node \
              status{}",
             args.node.as_flags(),
         );
@@ -673,7 +673,7 @@ pub async fn run(args: ConfigureArgs) -> anyhow::Result<ExitCode> {
             _ = tokio::signal::ctrl_c() => {
                 println!(
                     "\nInterrupted during deploy verification — the config is delivered. \
-                     Appraise the node with:\n    seismic-tee-node verify{} --manifest {}{}",
+                     Appraise the node with:\n    seismic-tee node verify{} --manifest {}{}",
                     args.node.as_flags(),
                     args.manifest.display(),
                     verify::retry_flags(&args.policy_source, &args.verifier),

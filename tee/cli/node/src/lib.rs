@@ -1,21 +1,26 @@
-//! The operator half: act on your own node.
+//! `node`: stand up and appraise a node — the operator's command group.
 //!
-//! This CLI is for any operator joining a Seismic network. It is
-//! cloud-agnostic and starts at the node descriptor — it consumes a descriptor
-//! for an already-running node and talks to it over HTTP. **It never
-//! provisions**: producing descriptors is the Pulumi program's job. Founding a
-//! network, or auditing one, is the other CLI's job (`seismic-tee-network`),
-//! and this crate must never depend on it: the crates are split on that line
-//! so the compiler enforces it, and this half plus [`seismic_tee_common`] stays
-//! free of founder-only dependencies.
+//! The group is named for its subject rather than for a party of the trust
+//! model. The validator's trust-sensitive actions there — release and fetch
+//! `root_key`, stake, resync — are the enclave's, not a human's, and a
+//! non-staking full-node operator runs exactly these commands, so what the
+//! commands share is the node. They are cloud-agnostic and start at the node
+//! descriptor: each consumes a descriptor for an already-running node and
+//! talks to it over HTTP. **They never provision**: producing descriptors is
+//! the Pulumi program's job. Founding a network is the `network` group's
+//! ([`seismic_tee_network`]), and this crate must never depend on it: the
+//! crates are split on that line so the compiler enforces it, and this half
+//! plus [`seismic_tee_common`] stays free of founder-only dependencies
+//! whichever binary mounts it.
 //!
-//! Three commands, in the order an operator meets them: [`configure`] delivers
-//! a node's config on first boot and waits for it to come up, [`verify`]
-//! appraises a running node's attestation, and [`status`] watches the
-//! first-boot disk wipe on its own. The founder CLI configures a cohort by
-//! doing to each node what these do to one, so the flows behind the commands
-//! — building the config, POSTing it, the status poller, the appraisal — are
-//! this crate's library surface as well as its binary's.
+//! Three commands, in the order an operator meets them: [`configure`]
+//! delivers a node's config on first boot and waits for it to come up,
+//! [`verify`] appraises a running node's attestation, and [`status`] watches
+//! the first-boot disk wipe on its own. The `network` group configures a
+//! cohort by doing to each node what these do to one, so the flows behind the
+//! commands — building the config, POSTing it, the status poller, the
+//! appraisal — are this crate's library surface as well as its command
+//! group's.
 
 pub mod args;
 pub mod configure;
@@ -30,36 +35,28 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use anyhow::{Context as _, bail};
-use clap::{Parser, Subcommand};
+use clap::Subcommand;
 use seismic_tee_common::Manifest;
 
-/// The name the binary is installed and invoked as.
-pub const BIN_NAME: &str = "seismic-tee-node";
-
-#[derive(Debug, Parser)]
-#[command(
-    name = BIN_NAME,
-    version,
-    about = "Configure and verify your own Seismic TEE node",
-    long_about = "Configure and verify your own Seismic TEE node.\n\n\
-                  Cloud-agnostic, and never provisions: it consumes a \
-                  descriptor of an already-running node and reaches the node \
-                  over HTTP."
-)]
-pub struct Cli {
-    #[command(subcommand)]
-    command: Command,
-}
-
-/// Declared in workflow order, which is the order `--help` lists them in.
+/// The `node` command group, declared in workflow order — the order `--help`
+/// lists them in.
 #[derive(Debug, Subcommand)]
-enum Command {
+pub enum NodeCommand {
     /// Configure a node to join a network: assemble + POST config to tdx-init.
     Configure(configure::ConfigureArgs),
     /// Deploy-verify a node's TDX attestation against the intended image.
     Verify(verify::VerifyArgs),
     /// Watch a node's first-boot LUKS provisioning progress.
     Status(status::StatusArgs),
+}
+
+/// Run one `node` command.
+pub async fn run(command: NodeCommand) -> anyhow::Result<ExitCode> {
+    match command {
+        NodeCommand::Configure(args) => configure::run(args).await,
+        NodeCommand::Verify(args) => verify::run(args).await,
+        NodeCommand::Status(args) => status::run(args).await,
+    }
 }
 
 /// Read `--manifest`: present, and a manifest the strict v1 schema accepts.
@@ -74,132 +71,33 @@ pub fn load_manifest(path: &Path) -> anyhow::Result<Manifest> {
     Manifest::load(path).with_context(|| format!("--manifest {}: invalid manifest", path.display()))
 }
 
-/// Parse the command line and run it.
-pub fn run() -> ExitCode {
-    let cli = Cli::parse();
-    let runtime = match tokio::runtime::Runtime::new() {
-        Ok(runtime) => runtime,
-        Err(error) => {
-            eprintln!("error: starting the async runtime: {error}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let result = runtime.block_on(async {
-        match cli.command {
-            Command::Configure(args) => configure::run(args).await,
-            Command::Verify(args) => verify::run(args).await,
-            Command::Status(args) => status::run(args).await,
-        }
-    });
-    match result {
-        Ok(code) => code,
-        Err(error) => {
-            // The whole chain, one cause per line: a DCAP failure is several
-            // layers deep and the last one alone rarely says what happened.
-            eprintln!("error: {error:?}");
-            ExitCode::FAILURE
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use clap::CommandFactory;
+    use clap::{CommandFactory, Parser};
 
     use super::*;
     use crate::test_support::{FIXTURE_MANIFEST, write_file};
 
-    #[test]
-    fn the_command_tree_is_well_formed() {
-        Cli::command().debug_assert();
+    /// The group as the binary mounts it.
+    #[derive(Parser)]
+    struct Probe {
+        #[command(subcommand)]
+        command: NodeCommand,
     }
 
-    /// The released binary reports the crate's version, which is what an
-    /// operator quotes when reporting a problem.
     #[test]
-    fn the_binary_is_named_and_versioned() {
-        let command = Cli::command();
-        assert_eq!(command.get_name(), BIN_NAME);
-        assert_eq!(command.get_version(), Some(env!("CARGO_PKG_VERSION")));
+    fn the_command_tree_is_well_formed() {
+        Probe::command().debug_assert();
     }
 
     /// The three operator commands, listed in workflow order.
     #[test]
     fn the_commands_are_listed_in_workflow_order() {
-        let names: Vec<_> = Cli::command()
+        let names: Vec<_> = Probe::command()
             .get_subcommands()
             .map(|c| c.get_name().to_string())
             .collect();
         assert_eq!(names, ["configure", "verify", "status"]);
-    }
-
-    /// The argv the docs and runbook spell, exactly.
-    #[test]
-    fn the_documented_invocations_parse() {
-        for argv in [
-            vec![
-                "configure",
-                "--node",
-                "/tmp/nodes.json",
-                "--bootnode",
-                "enode://ab@1.2.3.4:30303",
-                "--manifest",
-                "./network-manifest.json",
-            ],
-            vec![
-                "configure",
-                "--node",
-                "nodes/nodes.json",
-                "--name",
-                "tmp-devnet-1-2",
-                "--bootnode",
-                "enode://ab@1.2.3.4:30303",
-                "--manifest",
-                "network-manifest.json",
-                "--no-verify",
-                "--yes",
-            ],
-            vec![
-                "configure",
-                "-y",
-                "--node",
-                "n.json",
-                "--bootnode",
-                "enode://ab@1.2.3.4:30303",
-                "--manifest",
-                "m.json",
-                "--dump-config",
-                "/tmp/n.init-config.toml",
-            ],
-            vec![
-                "verify",
-                "--node",
-                "/tmp/nodes.json",
-                "--manifest",
-                "./network-manifest.json",
-            ],
-            vec![
-                "verify",
-                "--node",
-                "n.json",
-                "--manifest",
-                "m.json",
-                "--measurements",
-                "measurements.json",
-                "--attestation-type",
-                "azure-tdx",
-                "--pccs-url",
-                "http://pccs",
-            ],
-            vec!["status", "--node", "n.json", "--name", "dev-2"],
-            vec!["status", "--node", "n.json", "--once"],
-            vec!["status", "--node", "n.json", "--interval", "10"],
-        ] {
-            let full: Vec<&str> = std::iter::once(BIN_NAME)
-                .chain(argv.iter().copied())
-                .collect();
-            assert!(Cli::try_parse_from(&full).is_ok(), "{argv:?}");
-        }
     }
 
     #[test]

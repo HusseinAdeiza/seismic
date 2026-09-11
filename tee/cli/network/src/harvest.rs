@@ -1,7 +1,7 @@
 //! `harvest`: collect and DCAP-verify each cohort box's summit keys.
 //!
 //! ```text
-//! seismic-tee-network harvest tee/networks/devnet-3
+//! seismic-tee network harvest tee/networks/devnet-3
 //! ```
 //!
 //! A founding cohort boots identity-free: each box's `summit-key-holder`
@@ -24,7 +24,7 @@
 //! It is purely preventive: future users and joiners re-run the same
 //! verification against the archive rather than trust this run's verdict.
 //! Each archived record is a complete input to that check, which
-//! `seismic-tee-network verify-harvest` replays over the whole committed
+//! `seismic-tee verify-founding` replays over the whole committed
 //! directory. The record shape is frozen: it is what the verifier reads back.
 //!
 //! The verifier also hands back the DCAP collateral it consumed, which the
@@ -518,7 +518,7 @@ pub async fn run(args: HarvestArgs) -> anyhow::Result<ExitCode> {
     let quotes = collect_quotes(&client, &targets, HARVEST_TIMEOUT, POLL_INTERVAL).await?;
     assert_unique_keys(&quotes)?;
 
-    // Collateral fetches go over TLS; see `tools verify` for why the provider
+    // Collateral fetches go over TLS; see `node verify` for why the provider
     // is chosen here.
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let harvested_at = utc_timestamp(SystemTime::now());

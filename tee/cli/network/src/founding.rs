@@ -134,7 +134,7 @@ pub fn load_harvest_records(dir: &NetworkDir) -> anyhow::Result<FoundingRecords>
     if paths.is_empty() {
         bail!(
             "no harvest records in {} — assemble pins the founding validator set from them; \
-             provision the cohort (the Pulumi program's `nodes` map) and run `seismic-tee-network \
+             provision the cohort (the Pulumi program's `nodes` map) and run `seismic-tee network \
              harvest` first",
             harvest_dir.display()
         );
@@ -412,7 +412,7 @@ pub(crate) mod tests {
         let (_tmp, dir) = network_dir();
         let err = load_harvest_records(&dir).unwrap_err().to_string();
         assert!(err.contains("no harvest records"), "{err}");
-        assert!(err.contains("seismic-tee-network harvest"), "{err}");
+        assert!(err.contains("seismic-tee network harvest"), "{err}");
     }
 
     #[test]
