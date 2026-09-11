@@ -298,29 +298,37 @@ pub fn write_artifact_set(
     Ok(())
 }
 
-/// Re-verify every archived founding record against the compiled policy,
-/// offline, at the instant its own collateral snapshot was held to.
+/// Re-verify every archived founding record against `policy`, offline, at
+/// the instant its own collateral snapshot was held to.
 ///
-/// The harvest verified these records when it collected them, but assemble is
-/// the step that pins the validator set into `network_id` — so it hands each
-/// archived record back to the verifier rather than trusting an earlier run's
-/// verdict (the records are plain files that may have been copied, committed,
-/// and edited between harvest and assemble).
+/// The harvest verified these records when it collected them, but nothing
+/// downstream trusts that run's verdict: assemble is the step that pins the
+/// validator set into `network_id`, so it hands each archived record back to
+/// the verifier before pinning anything, and `verify-harvest` runs the same
+/// function over the committed directory for as long as it exists (the
+/// records are plain files that may have been copied, committed, and edited
+/// since the harvest).
 ///
 /// Each record is checked against the snapshot archived beside it, so this
 /// gate behaves the same on the founding day and four hundred days later. A
 /// record with no snapshot fails: Intel's live collateral would answer for it
-/// today and stop answering in about a month, which would make assemble's
-/// verdict depend on when it ran.
+/// today and stop answering in about a month, which would make the verdict
+/// depend on when it ran. Fails on the first record that does not verify,
+/// naming it; one line per verified record on stderr.
 pub async fn verify_harvest_records(
     dir: &NetworkDir,
     records: &FoundingRecords,
     policy: &[u8],
 ) -> anyhow::Result<()> {
+    // Replaying a snapshot parses Intel's material, whose TLS-bearing types
+    // want a rustls process default; see `tools verify` for why one has to
+    // be chosen. Idempotent: a second install is a no-op error.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
     // Fail closed: there is no accept-any path, so an unparseable policy must
     // stop the run rather than widen it.
     let policy = SeismicMeasurementPolicy::from_json_bytes(policy)
-        .context("loading the promoted measurement policy")?;
+        .context("loading the measurement policy")?;
     for (name, record) in records {
         let collateral_path = dir.collateral_record(name);
         if !collateral_path.is_file() {
@@ -428,9 +436,8 @@ pub async fn run(args: AssembleArgs) -> anyhow::Result<ExitCode> {
     let policy = promote_measurements(&raw, None, Some(&args.attestation_type))
         .with_context(|| format!("{}", measurements.display()))?;
 
-    // Collateral replay parses Intel's material, whose TLS-bearing types want
-    // a process default; see `tools verify`.
-    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    // The offline replay gate — the same function `verify-harvest` runs over
+    // the committed directory afterwards.
     verify_harvest_records(&dir, &founding.records, &policy).await?;
 
     let assembled = assemble(

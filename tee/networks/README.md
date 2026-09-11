@@ -11,6 +11,12 @@ manifest's fields mean, what `network_id` transitively commits to, and why it
 hashes the exact file bytes:
 [the network manifest doc](https://github.com/SeismicSystems/seismic/blob/main/docs/tee/network-manifest.md).
 
+A committed directory is auditable as a whole, by anyone, offline:
+`seismic-tee-network verify-harvest <dir>` re-verifies its founding — every
+archived quote against its own collateral snapshot and the policy the
+manifest pins, and the archive against the validator set the summit
+genesis seats.
+
 ```text
 tee/networks/<name>/
 ├── inputs/                       provenance (authored + harvested)

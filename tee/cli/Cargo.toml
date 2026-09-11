@@ -21,7 +21,9 @@
 #   network  -> seismic-tee-network, the founder CLI. The only crate allowed
 #            to depend on both.
 #
-# The public operator repo is extracted along that line.
+# The whole workspace is headed for a public repo; the split is what keeps
+# the operator half free of founder-only dependencies whichever way the
+# binaries are cut.
 [workspace]
 resolver = "3"
 members = [

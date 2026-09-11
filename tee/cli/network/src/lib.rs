@@ -17,6 +17,13 @@
 //! cohort is provisioned with the Pulumi program; `pulumi destroy` tears it
 //! down.
 //!
+//! A sixth is not a founding step but the audit of one: [`verify_harvest`]
+//! re-verifies a committed network directory's founding offline — every
+//! archived quote against its own collateral snapshot and the policy the
+//! manifest pins, the archive against the validator set the summit genesis
+//! seats. Its audience is anyone holding the directory, which is why the
+//! founder CLI is the auditor's tool as well.
+//!
 //! Every rule the network's identity rests on — the manifest's canonical bytes
 //! and strict schema, admission-ID derivation and registry genesis storage,
 //! DCAP verification of a quote — has exactly one implementation, in the
@@ -24,14 +31,14 @@
 //! implementation is a foreign repo's node binary (`summit genesis`,
 //! `seismic-reth genesis-hash`) are shell-outs ([`shell_outs`]). The [`tools`]
 //! group exposes the linked enclave libraries at a subprocess boundary for
-//! standalone use — an auditor replaying an archived founding quote needs
-//! nothing but this binary.
+//! standalone use.
 //!
 //! It is the only crate allowed to depend on both sides: founding a network
-//! includes doing to each node what [`seismic_tee_node`] does to one. It stays
-//! in the private repo when the public operator repo is extracted, so anything
-//! an operator needs belongs on the other side of the seam — the node
-//! descriptor — not here.
+//! includes doing to each node what [`seismic_tee_node`] does to one. The
+//! rule cuts the other way too: anything that acts on one node belongs on the
+//! other side of the seam — the node descriptor — not here. This crate is
+//! headed for the same public repo as the operator half, since an auditor who
+//! can read `assemble` can see what `verify-harvest` re-runs.
 
 pub mod assemble;
 pub mod bootnodes;
@@ -45,6 +52,7 @@ pub mod launch;
 pub mod shell_outs;
 pub mod tools;
 pub mod validate;
+pub mod verify_harvest;
 
 use std::io::Write as _;
 use std::process::ExitCode;
@@ -68,7 +76,9 @@ pub const BIN_NAME: &str = "seismic-tee-network";
     after_help = "Commands are listed in the order they should be run: init → harvest → \
                   assemble → validate → configure. Between init and harvest, provision the \
                   cohort with the seismic_node Pulumi program (tee/pulumi/seismic_node); \
-                  pulumi destroy tears it down."
+                  pulumi destroy tears it down.\n\n\
+                  verify-harvest is not a founding step: it audits a committed network \
+                  directory's founding, offline, at any later time."
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -86,6 +96,8 @@ enum Command {
     Assemble(assemble::AssembleArgs),
     /// Re-run all gates over an assembled network directory.
     Validate(validate::ValidateArgs),
+    /// Re-verify a network's founding from its committed directory, offline.
+    VerifyHarvest(verify_harvest::VerifyHarvestArgs),
     /// Configure a cohort in parallel: one genesis + N joiners, one command.
     Configure(configure::ConfigureArgs),
     /// The enclave libraries at a subprocess boundary: render and check
@@ -109,6 +121,7 @@ pub fn run() -> ExitCode {
             Command::Harvest(args) => harvest::run(args).await,
             Command::Assemble(args) => assemble::run(args).await,
             Command::Validate(args) => validate::run(args).await,
+            Command::VerifyHarvest(args) => verify_harvest::run(args).await,
             Command::Configure(args) => configure::run(args).await,
             Command::Tools(tools) => {
                 let output = tools::run(tools).await?;
@@ -162,7 +175,8 @@ mod tests {
         assert_ne!(BIN_NAME, seismic_tee_node::BIN_NAME);
     }
 
-    /// The five founding commands in founding order, then the tools.
+    /// The five founding commands in founding order, the audit beside the
+    /// gate it extends, then the tools.
     #[test]
     fn the_commands_are_listed_in_founding_order() {
         let names: Vec<_> = Cli::command()
@@ -176,6 +190,7 @@ mod tests {
                 "harvest",
                 "assemble",
                 "validate",
+                "verify-harvest",
                 "configure",
                 "tools"
             ]
@@ -237,6 +252,8 @@ mod tests {
             ],
             vec!["validate", "tee/networks/devnet-3"],
             vec!["validate", "n", "--reth-bin", "r", "--summit-bin", "s"],
+            vec!["verify-harvest", "tee/networks/devnet-3"],
+            vec!["verify-harvest", "n", "--record", "n-2"],
             vec![
                 "configure",
                 "--genesis",

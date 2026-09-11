@@ -23,10 +23,9 @@
 //! `inputs/measurements.json` by the same admission compiler `assemble` uses.
 //! It is purely preventive: future users and joiners re-run the same
 //! verification against the archive rather than trust this run's verdict.
-//! Each archived record is a complete input to that check —
-//! `seismic-tee-network tools verify harvest --record inputs/harvest/<node>.json
-//! --policy measurement-policy-bootstrap.json`. The record shape is frozen:
-//! it is what the verifier reads back.
+//! Each archived record is a complete input to that check, which
+//! `seismic-tee-network verify-harvest` replays over the whole committed
+//! directory. The record shape is frozen: it is what the verifier reads back.
 //!
 //! The verifier also hands back the DCAP collateral it consumed, which the
 //! archive keeps at `inputs/harvest/dcap-collateral/<node>.json`. Intel's TCB

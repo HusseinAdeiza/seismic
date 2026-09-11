@@ -298,7 +298,7 @@ pub fn load_founding_set(dir: &NetworkDir) -> anyhow::Result<FoundingSet> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use serde_json::json;
 
     use super::*;
@@ -308,7 +308,7 @@ mod tests {
     pub(crate) const NODE_KEY_2: &str =
         "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
-    fn consensus_key(byte: &str) -> String {
+    pub(crate) fn consensus_key(byte: &str) -> String {
         byte.repeat(48)
     }
 
@@ -324,13 +324,13 @@ mod tests {
         })
     }
 
-    fn write(dir: &NetworkDir, relative: &Path, contents: &str) {
+    pub(crate) fn write(dir: &NetworkDir, relative: &Path, contents: &str) {
         let path = dir.root().join(relative);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, contents).unwrap();
     }
 
-    fn write_harvest(dir: &NetworkDir, name: &str, record: &serde_json::Value) {
+    pub(crate) fn write_harvest(dir: &NetworkDir, name: &str, record: &serde_json::Value) {
         write(
             dir,
             &Path::new("inputs/harvest").join(format!("{name}.json")),
@@ -338,7 +338,7 @@ mod tests {
         );
     }
 
-    fn network_dir() -> (tempfile::TempDir, NetworkDir) {
+    pub(crate) fn network_dir() -> (tempfile::TempDir, NetworkDir) {
         let tmp = tempfile::tempdir().unwrap();
         let dir = NetworkDir::new(tmp.path());
         (tmp, dir)

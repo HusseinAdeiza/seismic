@@ -5,10 +5,11 @@
 //! DCAP verification of a quote — has exactly one implementation, in the
 //! enclave repo, and the founding commands link it. This group exposes the
 //! same libraries as subcommands, for whoever needs one of them standalone:
-//! an auditor replaying an archived founding quote against the collateral
-//! snapshot filed beside it, a reviewer checking what a policy compiles to, a
-//! script rendering a manifest. It is the surface the retired enclave
-//! tooling binaries used to be:
+//! a reviewer checking what a policy compiles to, a script rendering a
+//! manifest, a hand replay of one archived quote against the collateral
+//! snapshot filed beside it. Auditing a whole founding is a command of its
+//! own — `verify-harvest` — not this group's. It is the
+//! surface the retired enclave tooling binaries used to be:
 //!
 //! ```text
 //! seismic-manifest render|parse            -> tools manifest render|parse

@@ -6,9 +6,9 @@
 //! manifest they both trust and the gates it puts the other artifacts
 //! through, and the HTTP, JSON-RPC and error types they both speak.
 //!
-//! This crate depends on neither side. It is the half that lifts out with the
-//! operator CLI when the public operator repo is extracted, so nothing
-//! founder-only belongs in it.
+//! This crate depends on neither side, so nothing founder-only belongs in it:
+//! the operator crate must stay buildable without a single founder-only
+//! dependency.
 
 pub mod artifact;
 pub mod descriptor;

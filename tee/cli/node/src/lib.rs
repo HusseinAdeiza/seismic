@@ -4,9 +4,10 @@
 //! cloud-agnostic and starts at the node descriptor — it consumes a descriptor
 //! for an already-running node and talks to it over HTTP. **It never
 //! provisions**: producing descriptors is the Pulumi program's job. Founding a
-//! network is the other CLI's job (`seismic-tee-network`), and this crate must
-//! never depend on it: the public operator repo is extracted along that line,
-//! and this half plus [`seismic_tee_common`] lifts out wholesale.
+//! network, or auditing one, is the other CLI's job (`seismic-tee-network`),
+//! and this crate must never depend on it: the crates are split on that line
+//! so the compiler enforces it, and this half plus [`seismic_tee_common`] stays
+//! free of founder-only dependencies.
 //!
 //! Three commands, in the order an operator meets them: [`configure`] delivers
 //! a node's config on first boot and waits for it to come up, [`verify`]
