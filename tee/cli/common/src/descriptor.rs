@@ -28,15 +28,22 @@
 //! [`NetworkDir::nodes_file`]: crate::NetworkDir::nodes_file
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::fmt::Display;
+use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::error::{Error, Result};
 
 /// One provisioned node, as the `nodes` map describes it. Its name is its key
 /// in a [`Descriptors`] map.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// Round-trips through TOML as well as JSON: this is the shape of one
+/// `[networks.<name>.nodes]` entry in the context file, so the context crate
+/// stores and re-reads a node table with no second definition of what a node
+/// is.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NodeDescriptor {
     /// The address the operator-only ports are reached on.
     pub public_ip: String,
@@ -108,8 +115,8 @@ impl DescriptorEntry {
         keys
     }
 
-    /// Validate into a descriptor, naming the file and the node on failure.
-    fn into_descriptor(self, path: &Path, name: &str) -> Result<NodeDescriptor> {
+    /// Validate into a descriptor, naming the label and the node on failure.
+    fn into_descriptor(self, label: &dyn Display, name: &str) -> Result<NodeDescriptor> {
         // An absent key, an explicit `null`, and an empty string all fail the
         // same way — a descriptor that can't reach a node — and all three are
         // caught here rather than at the first request. They are reported
@@ -120,18 +127,15 @@ impl DescriptorEntry {
         let require = |key: &str, value: &RequiredKey| match value {
             Some(Some(value)) if !value.is_empty() => Ok(value.clone()),
             Some(Some(_)) => Err(Error::gate(format!(
-                "descriptor file {}: node `{name}` has an empty `{key}`",
-                path.display(),
+                "descriptor file {label}: node `{name}` has an empty `{key}`",
             ))),
             Some(None) => Err(Error::gate(format!(
-                "descriptor file {}: node `{name}` has `{key}` set to null \
+                "descriptor file {label}: node `{name}` has `{key}` set to null \
                  (Pulumi emits null for an output that never got set)",
-                path.display(),
             ))),
             None => Err(Error::gate(format!(
-                "descriptor file {}: node `{name}` is missing required key `{key}`; \
+                "descriptor file {label}: node `{name}` is missing required key `{key}`; \
                  got keys {:?}",
-                path.display(),
                 self.keys(),
             ))),
         };
@@ -152,23 +156,26 @@ impl DescriptorEntry {
 /// `null`, or empty.
 pub fn load_descriptors(path: &Path) -> Result<Descriptors> {
     let bytes = std::fs::read(path).map_err(|e| Error::read(path, e))?;
-    parse_descriptors(path, &bytes)
+    parse_descriptors(&path.display(), &bytes)
 }
 
-fn parse_descriptors(path: &Path, bytes: &[u8]) -> Result<Descriptors> {
-    let value: serde_json::Value =
-        serde_json::from_slice(bytes).map_err(|e| Error::json(path, e))?;
+/// Parse a descriptor map out of `bytes`, naming `label` in every failure.
+///
+/// `label` is a path's `Display` for [`load_descriptors`], and `<stdin>` for
+/// `ctx set-nodes`, which parses the same bytes read off stdin through this
+/// same function so a malformed map gets the same errors either way.
+pub fn parse_descriptors(label: &dyn Display, bytes: &[u8]) -> Result<Descriptors> {
+    let value: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|e| Error::json(PathBuf::from(label.to_string()), e))?;
     let Some(entries) = value.as_object() else {
         return Err(Error::gate(format!(
-            "descriptor file {} must be a JSON object mapping node name → \
+            "descriptor file {label} must be a JSON object mapping node name → \
              {{public_ip, fqdn}} (the stack's `nodes` output)",
-            path.display(),
         )));
     };
     if entries.is_empty() {
         return Err(Error::gate(format!(
-            "descriptor file {} holds no nodes — is the stack's `nodes` map empty?",
-            path.display(),
+            "descriptor file {label} holds no nodes — is the stack's `nodes` map empty?",
         )));
     }
     if entries.contains_key("public_ip")
@@ -179,10 +186,9 @@ fn parse_descriptors(path: &Path, bytes: &[u8]) -> Result<Descriptors> {
         // descriptor file had before it was the map. Say so rather than
         // reporting "node `fqdn` must be an object".
         return Err(Error::gate(format!(
-            "descriptor file {} is a single node's {{public_ip, fqdn}}, not the \
+            "descriptor file {label} is a single node's {{public_ip, fqdn}}, not the \
              map; the descriptor file is {{<name>: {{public_ip, fqdn}}, …}} — \
              wrap it under the node's name",
-            path.display(),
         )));
     }
 
@@ -190,15 +196,14 @@ fn parse_descriptors(path: &Path, bytes: &[u8]) -> Result<Descriptors> {
     for (name, entry) in entries {
         if !entry.is_object() {
             return Err(Error::gate(format!(
-                "descriptor file {}: node `{name}` must be an object with \
+                "descriptor file {label}: node `{name}` must be an object with \
                  public_ip and fqdn; got {}",
-                path.display(),
                 json_kind(entry),
             )));
         }
-        let entry: DescriptorEntry =
-            serde_json::from_value(entry.clone()).map_err(|e| Error::json(path, e))?;
-        descriptors.insert(name.clone(), entry.into_descriptor(path, name)?);
+        let entry: DescriptorEntry = serde_json::from_value(entry.clone())
+            .map_err(|e| Error::json(PathBuf::from(label.to_string()), e))?;
+        descriptors.insert(name.clone(), entry.into_descriptor(label, name)?);
     }
     Ok(descriptors)
 }
@@ -207,11 +212,13 @@ fn parse_descriptors(path: &Path, bytes: &[u8]) -> Result<Descriptors> {
 ///
 /// With one entry in the file it is the node; with several, `name` says
 /// which. Returns the node's name with it, since the descriptor itself does
-/// not carry it.
+/// not carry it. `holder` names what holds the map — a descriptor file's
+/// path, or the context's `network <name> in <config path>` — so the same
+/// error work reads well for either caller.
 pub fn select_descriptor<'a>(
     descriptors: &'a Descriptors,
     name: Option<&str>,
-    path: &Path,
+    holder: &dyn Display,
 ) -> Result<(&'a str, &'a NodeDescriptor)> {
     let names = || {
         descriptors
@@ -226,8 +233,7 @@ pub fn select_descriptor<'a>(
             Ok((name, descriptor))
         }
         None => Err(Error::gate(format!(
-            "descriptor file {} holds {} nodes ({}); pass --name to say which",
-            path.display(),
+            "{holder} holds {} nodes ({}); pass --name to say which",
             descriptors.len(),
             names(),
         ))),
@@ -236,8 +242,7 @@ pub fn select_descriptor<'a>(
             .map(|(name, descriptor)| (name.as_str(), descriptor))
             .ok_or_else(|| {
                 Error::gate(format!(
-                    "descriptor file {} has no node `{name}`; it holds {}",
-                    path.display(),
+                    "{holder} has no node `{name}`; it holds {}",
                     names(),
                 ))
             }),
@@ -258,8 +263,6 @@ fn json_kind(value: &serde_json::Value) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use super::*;
 
     const N1: &str = r#"{"public_ip": "203.0.113.7", "fqdn": "n1.seismicdev.net"}"#;
@@ -273,7 +276,7 @@ mod tests {
     }
 
     fn parse(json: &str) -> Result<Descriptors> {
-        parse_descriptors(&PathBuf::from("nodes/nodes.json"), json.as_bytes())
+        parse_descriptors(&"nodes/nodes.json", json.as_bytes())
     }
 
     fn fails(json: &str) -> String {
@@ -406,31 +409,69 @@ mod tests {
     /// One entry needs no name; several do; an unknown name lists the choices.
     #[test]
     fn selects_the_one_node_a_single_node_command_acts_on() {
-        let path = PathBuf::from("nodes/nodes.json");
+        let holder = "nodes/nodes.json";
         let one = parse(&format!(r#"{{"dev-1": {N1}}}"#)).unwrap();
         let two = parse(&format!(r#"{{"dev-1": {N1}, "dev-2": {N2}}}"#)).unwrap();
 
-        assert_eq!(select_descriptor(&one, None, &path).unwrap().0, "dev-1");
+        assert_eq!(select_descriptor(&one, None, &holder).unwrap().0, "dev-1");
         assert_eq!(
-            select_descriptor(&one, Some("dev-1"), &path).unwrap().0,
+            select_descriptor(&one, Some("dev-1"), &holder).unwrap().0,
             "dev-1"
         );
         assert_eq!(
-            select_descriptor(&two, Some("dev-2"), &path).unwrap().0,
+            select_descriptor(&two, Some("dev-2"), &holder).unwrap().0,
             "dev-2"
         );
 
-        let err = select_descriptor(&two, None, &path)
+        let err = select_descriptor(&two, None, &holder)
             .unwrap_err()
             .to_string();
         assert!(err.contains("pass --name"), "{err}");
         assert!(err.contains("dev-1, dev-2"), "{err}");
 
-        let err = select_descriptor(&two, Some("dev-9"), &path)
+        let err = select_descriptor(&two, Some("dev-9"), &holder)
             .unwrap_err()
             .to_string();
         assert!(err.contains("no node `dev-9`"), "{err}");
         assert!(err.contains("dev-1, dev-2"), "{err}");
+    }
+
+    /// `select_descriptor` names whatever `holder` it is given — a
+    /// descriptor file's path for `--node FILE`, or the context's own
+    /// `network <name> in <config path>` phrasing — with no "descriptor
+    /// file " prefix baked in.
+    #[test]
+    fn select_descriptors_messages_name_the_holder_they_were_given() {
+        let two = parse(&format!(r#"{{"dev-1": {N1}, "dev-2": {N2}}}"#)).unwrap();
+        let holder = "network `devnet-1` in /config.toml";
+
+        let err = select_descriptor(&two, None, &holder)
+            .unwrap_err()
+            .to_string();
+        assert!(err.starts_with(holder), "{err}");
+
+        let err = select_descriptor(&two, Some("dev-9"), &holder)
+            .unwrap_err()
+            .to_string();
+        assert!(err.starts_with(holder), "{err}");
+    }
+
+    /// The context crate stores a node table as `[networks.<name>.nodes]`
+    /// entries, so a [`NodeDescriptor`] must round-trip through TOML with no
+    /// second definition of what a node is.
+    #[test]
+    fn node_descriptor_round_trips_through_toml() {
+        let toml = r#"public_ip = "203.0.113.7"
+fqdn = "n1.seismicdev.net"
+"#;
+        let parsed: NodeDescriptor = toml::from_str(toml).unwrap();
+        assert_eq!(parsed, n1());
+        assert_eq!(toml::to_string(&parsed).unwrap(), toml);
+
+        let err = toml::from_str::<NodeDescriptor>("public_ip = \"1\"\nbogus = 1")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("bogus"), "{err}");
     }
 
     #[test]

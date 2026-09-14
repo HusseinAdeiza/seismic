@@ -36,7 +36,8 @@ impl NodeArgs {
             bail!("--node descriptor file not found: {}", self.node.display());
         }
         let descriptors = load_descriptors(&self.node)?;
-        let (name, descriptor) = select_descriptor(&descriptors, self.name.as_deref(), &self.node)?;
+        let (name, descriptor) =
+            select_descriptor(&descriptors, self.name.as_deref(), &self.node.display())?;
         Ok((name.to_string(), descriptor.clone()))
     }
 

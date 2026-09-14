@@ -11,13 +11,16 @@
 # The workspace is scoped to this directory rather than the repo root: deploy
 # is a multi-purpose repo and this is one subsystem in it.
 #
-# Four library crates, split by who may depend on whom, and one binary that
+# Five library crates, split by who may depend on whom, and one binary that
 # mounts them. The split is a rule the compiler enforces:
 #
 #   common       node descriptor, network-directory layout, HTTP and error
 #                types. Depends on neither side.
+#   context      the config file that remembers which network and node the
+#                commands act on: pointers only, no credentials. Depends on
+#                neither side, on common alone, so every group may read it.
 #   node         the `node` command group: stand up and appraise one node.
-#                Cloud-agnostic. Depends only on common.
+#                Cloud-agnostic. Depends only on common and context.
 #   network      the `network` group and `verify-founding`: found a network,
 #                audit a founding. The only crate allowed to depend on both.
 #   admission    the `admission` group: review what a measurement policy
@@ -34,6 +37,7 @@
 resolver = "3"
 members = [
     "common",      # -> seismic-tee-common  (library)
+    "context",     # -> seismic-tee-context (library)
     "node",        # -> seismic-tee-node    (library)
     "network",     # -> seismic-tee-network (library)
     "admission",   # -> seismic-tee-admission (library)
@@ -49,6 +53,7 @@ authors = ["Seismic Systems"]
 
 [workspace.dependencies]
 seismic-tee-common = { path = "common" }
+seismic-tee-context = { path = "context" }
 seismic-tee-node = { path = "node" }
 seismic-tee-network = { path = "network" }
 seismic-tee-admission = { path = "admission" }
@@ -72,7 +77,9 @@ tdx-init-config = { git = "https://github.com/SeismicSystems/enclave.git", rev =
 alloy-primitives = { version = "1", default-features = false, features = ["std", "serde"] }
 anyhow = "1.0"
 base64 = "0.22"
-clap = { version = "4.5", features = ["derive"] }
+# "env": ContextArgs's `--context` also reads `SEISMIC_CONTEXT`, so a shell
+# pinned to a selection (`eval "$(seismic-tee env)"`) is read by every command.
+clap = { version = "4.5", features = ["derive", "env"] }
 hex = "0.4"
 # The JSON-RPC client, for the attestation service's status reads. Already
 # in the graph through seismic-verify-quote, which reaches the same port with
@@ -104,5 +111,9 @@ thiserror = "2.0"
 # `summit genesis`), `sync` for the cohort dashboard's status channel.
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "fs", "process", "signal", "sync", "time"] }
 toml = "0.9"
+# Comment-preserving writes of the context file: `ctx use` sets one key in a
+# file a human wrote, so the rest of it must survive the write. Already in the
+# graph as toml's own dependency.
+toml_edit = "0.25"
 
 tempfile = "3"
