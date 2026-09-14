@@ -13,7 +13,7 @@ hashes the exact file bytes:
 
 A committed directory is auditable as a whole, by anyone, offline:
 `seismic-tee verify-founding <dir>` re-verifies its founding — every
-archived quote against its own collateral snapshot and the policy the
+archived quote against the bundle archived with it and the policy the
 manifest pins, and the archive against the validator set the summit
 genesis seats.
 
@@ -28,11 +28,12 @@ tee/networks/<name>/
 │   │                               authored: one address per founding
 │   │                               node, in node-name order
 │   └── harvest/                    written by `network harvest`
-│       ├── <node>.json             founding pubkeys + quote + verification
-│       └── dcap-collateral/
-│           └── <node>.json         the DCAP collateral that verification
-│                                   used, so the quote stays verifiable
-│                                   once Intel's live collateral ages past it
+│       └── <node>.json             the founding archive: pubkeys + quote,
+│                                   the DCAP collateral that verification
+│                                   used, the instant it judged at, and the
+│                                   trust anchors it judged with — so the
+│                                   quote stays verifiable once Intel's live
+│                                   collateral ages past it
 ├── nodes/                        runtime infra state (gitignored)
 │   ├── nodes.json                  the cohort's descriptor map: the Pulumi
 │   │                               stack's `nodes` output, saved as-is

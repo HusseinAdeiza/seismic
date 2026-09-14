@@ -118,8 +118,7 @@ pub type FoundingRecords = BTreeMap<String, FoundingRecord>;
 /// the evidence object — and rejects a pubkey repeated across boxes: summit's
 /// genesis keys validator accounts by node pubkey, so a repeated key silently
 /// collapses the set, and a shared consensus key is accidental-equivocation
-/// material. The collateral subdirectory is not a record and is never read
-/// here.
+/// material.
 pub fn load_harvest_records(dir: &NetworkDir) -> anyhow::Result<FoundingRecords> {
     let harvest_dir = dir.harvest();
     let mut paths: Vec<_> = match std::fs::read_dir(&harvest_dir) {
@@ -312,15 +311,36 @@ pub(crate) mod tests {
         byte.repeat(48)
     }
 
-    /// A harvest record as `harvest` archives it.
+    /// Evidence in the backend's own serialization, claiming Azure TDX: a
+    /// stand-in quote (`[1, 2, 3]` as base64) under the platform metadata
+    /// the holder serves. Parses as an `AttestationExchangeMessage`; never
+    /// verifies.
+    pub(crate) fn azure_evidence() -> serde_json::Value {
+        json!({
+            "attestation_evidence": {
+                "quote": "AQID",
+                "platform": {
+                    "attestation_type": "azure-tdx",
+                    "ram_bytes": 0,
+                    "num_disks": 0,
+                    "acpi": null,
+                },
+            },
+        })
+    }
+
+    /// Evidence declaring no attestation, in the backend's serialization.
+    pub(crate) fn no_attestation_evidence() -> serde_json::Value {
+        json!({"attestation_evidence": null})
+    }
+
+    /// A harvest record as the harvest builds it from the holder's answer.
     pub(crate) fn record(node_key: &str, consensus_byte: &str) -> serde_json::Value {
         json!({
             "harvest_nonce": "11".repeat(32),
             "node_public_key": node_key,
             "consensus_public_key": consensus_key(consensus_byte),
-            "evidence": {"attestation_type": "azure-tdx", "attestation": [1, 2, 3]},
-            "harvested_at": "2026-01-01T00:00:00+00:00",
-            "verification": {"verified": true},
+            "evidence": azure_evidence(),
         })
     }
 
@@ -394,12 +414,6 @@ pub(crate) mod tests {
         let (_tmp, dir) = network_dir();
         write_harvest(&dir, "node-2", &record(NODE_KEY_2, "dd"));
         write_harvest(&dir, "node-1", &record(NODE_KEY_1, "cc"));
-        // The collateral subdirectory is not a record.
-        write(
-            &dir,
-            Path::new("inputs/harvest/dcap-collateral/node-1.json"),
-            "{}",
-        );
 
         let records = load_harvest_records(&dir).unwrap();
         assert_eq!(records.keys().collect::<Vec<_>>(), ["node-1", "node-2"]);

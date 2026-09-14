@@ -10,8 +10,8 @@
 //! inputs/summit-genesis.toml                   summit parameter choices
 //! inputs/measurements.json                     raw PCR map from `make measure`
 //! inputs/founder-withdrawal-credentials.json   one address per founder
-//! inputs/harvest/<node>.json                   harvested founding pubkeys + quote
-//! inputs/harvest/dcap-collateral/<node>.json   the collateral that quote verified against
+//! inputs/harvest/<node>.json                   the founding archive: harvested pubkeys +
+//!                                              quote, and the bundle that quote verified against
 //!
 //! network-manifest.json                        the network's identity; SHA-256 = network_id
 //! reth-genesis.json                            the input genesis with compiled
@@ -47,8 +47,6 @@ pub const FOUNDERS_FILENAME: &str = "founder-withdrawal-credentials.json";
 
 pub const INPUTS_DIRNAME: &str = "inputs";
 pub const HARVEST_DIRNAME: &str = "harvest";
-/// A subdirectory, so a glob over `harvest/*.json` never sees the collateral.
-pub const COLLATERAL_DIRNAME: &str = "dcap-collateral";
 pub const NODES_DIRNAME: &str = "nodes";
 /// The descriptor map, exactly as `pulumi stack output nodes --json` prints
 /// it; see [`crate::descriptor`].
@@ -137,16 +135,11 @@ impl NetworkDir {
         self.inputs().join(HARVEST_DIRNAME)
     }
 
+    /// One node's founding archive: its harvested record and everything the
+    /// verification of it rested on, in one document (the verify-quote
+    /// library's archive format).
     pub fn harvest_record(&self, node: &str) -> PathBuf {
         self.harvest().join(format!("{node}.json"))
-    }
-
-    pub fn collateral(&self) -> PathBuf {
-        self.harvest().join(COLLATERAL_DIRNAME)
-    }
-
-    pub fn collateral_record(&self, node: &str) -> PathBuf {
-        self.collateral().join(format!("{node}.json"))
     }
 
     // Infra state.
@@ -190,12 +183,6 @@ mod tests {
         assert_eq!(
             dir.harvest_record("dev-bootstrap-node-1"),
             Path::new("tee/networks/devnet-3/inputs/harvest/dev-bootstrap-node-1.json")
-        );
-        assert_eq!(
-            dir.collateral_record("dev-bootstrap-node-1"),
-            Path::new(
-                "tee/networks/devnet-3/inputs/harvest/dcap-collateral/dev-bootstrap-node-1.json"
-            )
         );
         assert_eq!(
             dir.nodes_file(),

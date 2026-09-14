@@ -26,11 +26,11 @@
 //! - reads the founding validator set from the completed `summit-genesis.toml`
 //!   beside the manifest, and checks that every archived record's keys are
 //!   seated there and every seat is vouched for by an archived record;
-//! - replays every record under `inputs/harvest/` against the collateral
-//!   snapshot archived beside it, at the instant that snapshot was held to,
-//!   reaching no collateral service. A record with no snapshot fails, as
-//!   `assemble` fails it: live collateral would answer today and stop
-//!   answering in a month.
+//! - replays every record under `inputs/harvest/` from the archive it is:
+//!   the quote against the DCAP bundle archived with it, at the instant that
+//!   verification was held to, reaching no collateral service. A record that
+//!   is not a whole archive fails, as `assemble` fails it: live collateral
+//!   would answer today and stop answering in a month.
 //!
 //! One line per record; the first failure ends the run with a nonzero exit,
 //! naming the record. `--record <node>` narrows to one record for an auditor
@@ -203,10 +203,7 @@ fn read_pinned(path: &Path, what: &str) -> anyhow::Result<Vec<u8>> {
 /// replayed, so a directory that is not one artifact set fails by file, not
 /// as a verification failure of a quote it never applied to. `record`
 /// narrows the archive to one node.
-pub async fn audit_founding(
-    dir: &NetworkDir,
-    record: Option<&str>,
-) -> anyhow::Result<FoundingAudit> {
+pub fn audit_founding(dir: &NetworkDir, record: Option<&str>) -> anyhow::Result<FoundingAudit> {
     let manifest_path = dir.manifest();
     if !manifest_path.is_file() {
         bail!(
@@ -258,7 +255,7 @@ pub async fn audit_founding(
         )
     })?;
 
-    verify_harvest_records(dir, &records, &policy).await?;
+    verify_harvest_records(dir, &records, &policy)?;
     Ok(FoundingAudit {
         manifest,
         verified: records.keys().cloned().collect(),
@@ -270,7 +267,7 @@ pub async fn run(args: VerifyFoundingArgs) -> anyhow::Result<ExitCode> {
         bail!("network directory not found: {}", args.dir.display());
     }
     let dir = NetworkDir::new(absolute(&args.dir)?);
-    let audit = audit_founding(&dir, args.record.as_deref()).await?;
+    let audit = audit_founding(&dir, args.record.as_deref())?;
     println!("network_id: {}", audit.manifest.network_id());
     println!(
         "{} founding record(s) re-verified offline against the policy the manifest pins, and \
@@ -340,9 +337,10 @@ mod tests {
             .collect()
     }
 
-    /// A committed network directory as `assemble` leaves it, minus the
-    /// collateral snapshots: every check before the replay passes, and the
-    /// replay fails closed on the first record's missing snapshot.
+    /// A committed network directory as `assemble` leaves it, except that
+    /// its records are bare harvest records rather than whole founding
+    /// archives: every check before the replay passes, and the replay fails
+    /// closed on the first record.
     fn committed_dir() -> (tempfile::TempDir, NetworkDir) {
         let (tmp, dir) = network_dir();
         write(
@@ -365,8 +363,8 @@ mod tests {
         (tmp, dir)
     }
 
-    async fn failure(dir: &NetworkDir, record: Option<&str>) -> String {
-        format!("{:?}", audit_founding(dir, record).await.unwrap_err())
+    fn failure(dir: &NetworkDir, record: Option<&str>) -> String {
+        format!("{:?}", audit_founding(dir, record).unwrap_err())
     }
 
     #[derive(Parser)]
@@ -478,24 +476,26 @@ mod tests {
 
     /// Every artifact is checked against the manifest before a quote is
     /// replayed, and each failure names its file.
-    #[tokio::test]
-    async fn the_artifact_set_is_checked_before_any_replay() {
+    #[test]
+    fn the_artifact_set_is_checked_before_any_replay() {
         let (_tmp, dir) = committed_dir();
 
         // The whole set reaches the replay, which fails closed on the first
-        // record's missing snapshot — so everything before it passed.
-        let err = failure(&dir, None).await;
-        assert!(err.contains("node-1: no DCAP collateral archived"), "{err}");
+        // record, a bare record with no bundle — so everything before it
+        // passed.
+        let err = failure(&dir, None);
+        assert!(err.contains("node-1:"), "{err}");
+        assert!(err.contains("is not a founding archive"), "{err}");
 
         let policy = std::fs::read(dir.policy()).unwrap();
         std::fs::write(dir.policy(), [policy.as_slice(), b"\n"].concat()).unwrap();
-        let err = failure(&dir, None).await;
+        let err = failure(&dir, None);
         assert!(err.contains("bootstrap_policy_hash mismatch"), "{err}");
         assert!(err.contains("not one artifact set"), "{err}");
         std::fs::write(dir.policy(), &policy).unwrap();
 
         std::fs::remove_file(dir.policy()).unwrap();
-        let err = failure(&dir, None).await;
+        let err = failure(&dir, None);
         assert!(err.contains(POLICY_FILENAME), "{err}");
         assert!(err.contains("not found"), "{err}");
         std::fs::write(dir.policy(), &policy).unwrap();
@@ -506,20 +506,20 @@ mod tests {
             genesis.replacen(NAMESPACE, "other-net", 1),
         )
         .unwrap();
-        let err = failure(&dir, None).await;
+        let err = failure(&dir, None);
         assert!(err.contains("namespace \"other-net\""), "{err}");
         std::fs::write(dir.summit_genesis(), &genesis).unwrap();
 
         std::fs::remove_file(dir.manifest()).unwrap();
-        let err = failure(&dir, None).await;
+        let err = failure(&dir, None);
         assert!(err.contains(MANIFEST_FILENAME), "{err}");
         assert!(err.contains("not an assembled network directory"), "{err}");
     }
 
     /// The archive and the seated set must be one founding, in both
     /// directions.
-    #[tokio::test]
-    async fn the_archive_must_be_the_seated_set() {
+    #[test]
+    fn the_archive_must_be_the_seated_set() {
         let (_tmp, dir) = committed_dir();
 
         std::fs::write(
@@ -527,7 +527,7 @@ mod tests {
             summit_genesis(NAMESPACE, &[(NODE_KEY_1, "cc")]),
         )
         .unwrap();
-        let err = failure(&dir, None).await;
+        let err = failure(&dir, None);
         assert!(err.contains("does not seat: node-2"), "{err}");
         assert!(err.contains(SUMMIT_GENESIS_FILENAME), "{err}");
 
@@ -543,18 +543,19 @@ mod tests {
             ),
         )
         .unwrap();
-        let err = failure(&dir, None).await;
+        let err = failure(&dir, None);
         assert!(err.contains("no archived quote vouches for"), "{err}");
     }
 
     /// `--record` narrows the replay to one node and relaxes the set check to
     /// that node's seat; an unknown name lists what the archive holds.
-    #[tokio::test]
-    async fn record_narrows_to_a_partial_archive() {
+    #[test]
+    fn record_narrows_to_a_partial_archive() {
         let (_tmp, dir) = committed_dir();
 
-        let err = failure(&dir, Some("node-2")).await;
-        assert!(err.contains("node-2: no DCAP collateral archived"), "{err}");
+        let err = failure(&dir, Some("node-2"));
+        assert!(err.contains("node-2:"), "{err}");
+        assert!(err.contains("is not a founding archive"), "{err}");
         assert!(!err.contains("node-1"), "{err}");
 
         // The rest of the seated set need not be vouched for by one record.
@@ -570,10 +571,10 @@ mod tests {
             ),
         )
         .unwrap();
-        let err = failure(&dir, Some("node-2")).await;
-        assert!(err.contains("node-2: no DCAP collateral archived"), "{err}");
+        let err = failure(&dir, Some("node-2"));
+        assert!(err.contains("is not a founding archive"), "{err}");
 
-        let err = failure(&dir, Some("node-9")).await;
+        let err = failure(&dir, Some("node-9"));
         assert!(err.contains("no record \"node-9\""), "{err}");
         assert!(err.contains("node-1, node-2"), "{err}");
     }

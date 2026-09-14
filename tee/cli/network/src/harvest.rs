@@ -25,13 +25,16 @@
 //! verification against the archive rather than trust this run's verdict.
 //! Each archived record is a complete input to that check, which
 //! `seismic-tee verify-founding` replays over the whole committed
-//! directory. The record shape is frozen: it is what the verifier reads back.
+//! directory.
 //!
-//! The verifier also hands back the DCAP collateral it consumed, which the
-//! archive keeps at `inputs/harvest/dcap-collateral/<node>.json`. Intel's TCB
-//! Info, QE Identity and both CRLs carry `nextUpdate` on a roughly 30-day
-//! cadence, so without that snapshot a founding quote stops being
-//! re-verifiable about a month after the founding.
+//! The archived file is the verifier's own document, written verbatim: the
+//! record beside everything the verdict rested on — the DCAP collateral the
+//! verifier consumed, the instant it judged at, digests of the trust anchors
+//! it judged with, and its report. Intel's TCB Info, QE Identity and both
+//! CRLs carry `nextUpdate` on a roughly 30-day cadence, so without that
+//! bundle a founding quote stops being re-verifiable about a month after the
+//! founding. The document shape is the verifier's and frozen: it is what the
+//! verifier reads back.
 //!
 //! Any anomaly burns the whole harvest: a quote window already closed (HTTP
 //! 410 — the box accepted a config POST), a failed verification, or a cohort
@@ -43,16 +46,14 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, bail};
 use clap::Args;
 use seismic_measurement_admission::promote_measurements;
 use seismic_tee_common::network_dir::INPUTS_DIRNAME;
 use seismic_tee_common::{Descriptors, NetworkDir, NodeDescriptor, http};
-use seismic_verify_quote::{
-    HarvestCollateral, HarvestRecord, SeismicMeasurementPolicy, verify_harvest,
-};
+use seismic_verify_quote::{HarvestRecord, SeismicMeasurementPolicy, verify_harvest};
 use serde_json::{Value, json};
 
 use crate::assemble::DEFAULT_ATTESTATION_TYPE;
@@ -296,9 +297,9 @@ pub fn assert_unique_keys(quotes: &BTreeMap<String, Quote>) -> anyhow::Result<()
 /// One box's harvest record: the nonce this run minted, the pubkeys its holder
 /// served, and the evidence whose `report_data` binds all three.
 ///
-/// Built before verification and archived afterwards unchanged (plus the
-/// run's timestamp and the verifier's report), so the document the verifier
-/// passed is the document a later reader re-verifies.
+/// The verifier's input. The archive it renders carries these same four
+/// fields beside the verdict's provenance, so the document a later reader
+/// re-verifies is the one the verifier passed.
 pub fn build_record(target: &HarvestTarget, quote: &Quote) -> Value {
     json!({
         "harvest_nonce": target.nonce_hex(),
@@ -309,31 +310,24 @@ pub fn build_record(target: &HarvestTarget, quote: &Quote) -> Value {
 }
 
 /// DCAP-verify one harvest record, live, against `policy`. Returns the
-/// verifier's report and the archived-collateral document the verdict
-/// depended on. A failure burns the harvest: a founding key whose quote
-/// doesn't verify must never reach `assemble`.
+/// founding archive document the verifier rendered for it: the record, the
+/// bundle the verdict depended on, and the verifier's report. A failure burns
+/// the harvest: a founding key whose quote doesn't verify must never reach
+/// `assemble`.
 pub async fn verify_record(
     name: &str,
     record: &Value,
     policy: &SeismicMeasurementPolicy,
     pccs_url: Option<&str>,
-) -> anyhow::Result<(Value, String)> {
+) -> anyhow::Result<String> {
     let verdict = async {
         let record: HarvestRecord =
             serde_json::from_value(record.clone()).context("the harvest record does not parse")?;
-        let verified = verify_harvest(
-            record,
-            policy.clone(),
-            HarvestCollateral::Live {
-                pccs_url: pccs_url.map(str::to_string),
-            },
-        )
-        .await?;
+        let verified = verify_harvest(record, policy.clone(), pccs_url.map(str::to_string)).await?;
         // The verifier is the only component that knows which bundle it used;
         // it renders the archive document and reads it back before handing it
-        // over, so a snapshot that cannot be replayed fails the harvest here.
-        let collateral = verified.archived_collateral()?;
-        anyhow::Ok((verified.to_json(), collateral))
+        // over, so a document that cannot be replayed fails the harvest here.
+        verified.archive_document()
     }
     .await;
     verdict.map_err(|error| {
@@ -348,13 +342,11 @@ pub async fn verify_record(
 ///
 /// The archive is founding provenance — the nonces it holds are what make the
 /// archived quotes re-verifiable — so replacing it is a deliberate re-harvest,
-/// not a default. Both trees count: a leftover collateral file would otherwise
-/// outlive the record it belongs to and read as provenance for a quote it
-/// never verified.
+/// not a default.
 pub fn check_overwrite(dir: &NetworkDir, names: &[String], force: bool) -> anyhow::Result<()> {
     let existing: Vec<&str> = names
         .iter()
-        .filter(|name| dir.harvest_record(name).exists() || dir.collateral_record(name).exists())
+        .filter(|name| dir.harvest_record(name).exists())
         .map(String::as_str)
         .collect();
     if !existing.is_empty() && !force {
@@ -368,60 +360,24 @@ pub fn check_overwrite(dir: &NetworkDir, names: &[String], force: bool) -> anyho
     Ok(())
 }
 
-/// Write the archive's two trees, one file per box. Returns the paths written.
+/// Write the archive, one document per box, verbatim as the verifier rendered
+/// it: what is archived is what was verified. Returns the paths written.
 ///
-/// `inputs/harvest/<node>.json` (pretty JSON, trailing newline) carries the
-/// evidence exactly as the holder served it plus the nonce it binds, so the
-/// archived quote stays re-verifiable, and the verification report (every
-/// quoted PCR) as measurement provenance.
-/// `inputs/harvest/dcap-collateral/<node>.json` carries the verifier's own
-/// bytes verbatim: what is archived is what was verified.
-///
-/// Written only after every box passed, so a burned harvest leaves neither
-/// tree behind.
+/// Written only after every box passed, so a burned harvest leaves nothing
+/// behind.
 pub fn save_harvest(
     dir: &NetworkDir,
-    records: &BTreeMap<String, Value>,
-    collateral: &BTreeMap<String, String>,
+    archives: &BTreeMap<String, String>,
 ) -> anyhow::Result<Vec<PathBuf>> {
-    std::fs::create_dir_all(dir.collateral())
-        .with_context(|| format!("creating {}", dir.collateral().display()))?;
-    let mut written = Vec::with_capacity(2 * records.len());
-    for (name, record) in records {
-        let record_path = dir.harvest_record(name);
-        let mut bytes =
-            serde_json::to_vec_pretty(record).context("rendering the harvest record")?;
-        bytes.push(b'\n');
-        std::fs::write(&record_path, bytes)
-            .with_context(|| format!("writing {}", record_path.display()))?;
-        let collateral_path = dir.collateral_record(name);
-        std::fs::write(&collateral_path, &collateral[name])
-            .with_context(|| format!("writing {}", collateral_path.display()))?;
-        written.push(record_path);
-        written.push(collateral_path);
+    std::fs::create_dir_all(dir.harvest())
+        .with_context(|| format!("creating {}", dir.harvest().display()))?;
+    let mut written = Vec::with_capacity(archives.len());
+    for (name, document) in archives {
+        let path = dir.harvest_record(name);
+        std::fs::write(&path, document).with_context(|| format!("writing {}", path.display()))?;
+        written.push(path);
     }
     Ok(written)
-}
-
-/// Now, as `YYYY-MM-DDTHH:MM:SS+00:00`: the instant the harvest ran, kept in
-/// each record as provenance (not read back by anything).
-pub fn utc_timestamp(now: SystemTime) -> String {
-    let secs = now.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs()) as i64;
-    let days = secs.div_euclid(86_400);
-    let rem = secs.rem_euclid(86_400);
-    let (hh, mm, ss) = (rem / 3600, (rem % 3600) / 60, rem % 60);
-    // Civil-from-days (Howard Hinnant), for the proleptic Gregorian calendar.
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}+00:00")
 }
 
 /// The cohort as harvest targets, one per descriptor, in node-name order.
@@ -521,31 +477,24 @@ pub async fn run(args: HarvestArgs) -> anyhow::Result<ExitCode> {
     // Collateral fetches go over TLS; see `node verify` for why the provider
     // is chosen here.
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-    let harvested_at = utc_timestamp(SystemTime::now());
-    let mut records = BTreeMap::new();
-    let mut collateral = BTreeMap::new();
+    let mut archives = BTreeMap::new();
     for target in &targets {
         let record = build_record(target, &quotes[&target.name]);
-        let (report, snapshot) =
+        let document =
             verify_record(&target.name, &record, &policy, args.pccs_url.as_deref()).await?;
         println!(
             "  ✓ {}: quote DCAP-verified against the policy",
             target.name
         );
-        let mut archived = record;
-        let object = archived.as_object_mut().expect("a record is an object");
-        object.insert("harvested_at".to_string(), json!(harvested_at));
-        object.insert("verification".to_string(), report);
-        records.insert(target.name.clone(), archived);
-        collateral.insert(target.name.clone(), snapshot);
+        archives.insert(target.name.clone(), document);
     }
 
-    for path in save_harvest(&dir, &records, &collateral)? {
+    for path in save_harvest(&dir, &archives)? {
         println!("wrote {}", path.display());
     }
     println!(
         "Harvest complete: {} founding box(es) verified and archived under {}",
-        records.len(),
+        archives.len(),
         dir.harvest().display()
     );
     Ok(ExitCode::SUCCESS)
@@ -556,6 +505,7 @@ mod tests {
     use seismic_tee_common::test_support::{FakeServer, refused_url};
 
     use super::*;
+    use crate::founding::tests::{azure_evidence, no_attestation_evidence};
 
     const NODE_KEY: &str = "abababababababababababababababababababababababababababababababab";
 
@@ -567,7 +517,7 @@ mod tests {
         json!({
             "node_public_key": node_key,
             "consensus_public_key": consensus_key,
-            "evidence": {"attestation_type": "azure-tdx", "attestation": [1, 2, 3]},
+            "evidence": azure_evidence(),
         })
         .to_string()
     }
@@ -584,7 +534,7 @@ mod tests {
         Quote {
             node_public_key: NODE_KEY.to_string(),
             consensus_public_key: consensus_key(),
-            evidence: json!({"attestation_type": "azure-tdx", "attestation": [1, 2, 3]}),
+            evidence: azure_evidence(),
         }
     }
 
@@ -761,7 +711,7 @@ mod tests {
                 "harvest_nonce": "11".repeat(32),
                 "node_public_key": NODE_KEY,
                 "consensus_public_key": consensus_key(),
-                "evidence": {"attestation_type": "azure-tdx", "attestation": [1, 2, 3]},
+                "evidence": azure_evidence(),
             })
         );
         let parsed: HarvestRecord = serde_json::from_value(record).unwrap();
@@ -777,7 +727,7 @@ mod tests {
         let record = build_record(
             &target("node-1", "http://h:7879"),
             &Quote {
-                evidence: json!({"attestation_type": "none", "attestation": []}),
+                evidence: no_attestation_evidence(),
                 ..quote()
             },
         );
@@ -794,51 +744,33 @@ mod tests {
         assert!(err.contains("burned"), "{err}");
     }
 
-    /// Both trees are written, per box, in the frozen layout; the record is
-    /// pretty JSON with a trailing newline, the collateral verbatim.
+    /// One document per box, in the frozen layout, verbatim.
     #[test]
-    fn save_writes_the_record_and_its_collateral_per_box() {
+    fn save_writes_one_document_per_box() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = NetworkDir::new(tmp.path());
-        let mut records = BTreeMap::new();
-        records.insert(
-            "node-1".to_string(),
-            json!({"harvest_nonce": "11", "verification": {}}),
-        );
-        let mut collateral = BTreeMap::new();
-        collateral.insert("node-1".to_string(), "{\n  \"version\": 1\n}\n".to_string());
+        let mut archives = BTreeMap::new();
+        archives.insert("node-1".to_string(), "{\n  \"version\": 1\n}\n".to_string());
 
-        let written = save_harvest(&dir, &records, &collateral).unwrap();
+        let written = save_harvest(&dir, &archives).unwrap();
+        assert_eq!(written, [dir.harvest_record("node-1")]);
         assert_eq!(
-            written,
-            [
-                dir.harvest_record("node-1"),
-                dir.collateral_record("node-1")
-            ]
-        );
-        let record = std::fs::read_to_string(dir.harvest_record("node-1")).unwrap();
-        assert!(record.ends_with("}\n"), "{record:?}");
-        assert_eq!(
-            serde_json::from_str::<Value>(&record).unwrap(),
-            records["node-1"]
-        );
-        assert_eq!(
-            std::fs::read_to_string(dir.collateral_record("node-1")).unwrap(),
-            collateral["node-1"]
+            std::fs::read_to_string(dir.harvest_record("node-1")).unwrap(),
+            archives["node-1"]
         );
     }
 
-    /// An existing record, or a stray collateral file, refuses without
-    /// --force; fresh dirs and --force pass.
+    /// An existing archive refuses without --force; fresh dirs and --force
+    /// pass.
     #[test]
-    fn check_overwrite_guards_both_trees() {
+    fn check_overwrite_guards_the_archive() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = NetworkDir::new(tmp.path());
         let names = vec!["node-1".to_string(), "node-2".to_string()];
         check_overwrite(&dir, &names, false).unwrap();
 
-        std::fs::create_dir_all(dir.collateral()).unwrap();
-        std::fs::write(dir.collateral_record("node-2"), "{}").unwrap();
+        std::fs::create_dir_all(dir.harvest()).unwrap();
+        std::fs::write(dir.harvest_record("node-2"), "{}").unwrap();
         let err = check_overwrite(&dir, &names, false)
             .unwrap_err()
             .to_string();
@@ -899,19 +831,6 @@ mod tests {
         assert!(
             err.contains("2 withdrawal credential(s) but the cohort has 1 box(es) (a)"),
             "{err}"
-        );
-    }
-
-    #[test]
-    fn timestamps_are_utc_iso8601() {
-        assert_eq!(utc_timestamp(UNIX_EPOCH), "1970-01-01T00:00:00+00:00");
-        assert_eq!(
-            utc_timestamp(UNIX_EPOCH + Duration::from_secs(1_772_064_000)),
-            "2026-02-26T00:00:00+00:00"
-        );
-        assert_eq!(
-            utc_timestamp(UNIX_EPOCH + Duration::from_secs(951_782_400 + 3_661)),
-            "2000-02-29T01:01:01+00:00"
         );
     }
 }

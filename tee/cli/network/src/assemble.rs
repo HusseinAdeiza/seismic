@@ -6,8 +6,8 @@
 //!
 //! The step that pins the founding validator set into `network_id`. It reads
 //! the authored inputs and the harvest under `inputs/`, re-verifies every
-//! archived founding quote offline against the collateral snapshot filed
-//! beside it, compiles the measurement policy and injects the registry storage
+//! archived founding quote offline from its own archive, compiles the
+//! measurement policy and injects the registry storage
 //! into its copy of the reth genesis, completes the summit genesis with the
 //! derived `eth_genesis_hash` and the founding validator set through summit's
 //! own emitter, renders the manifest through the enclave's renderer, runs
@@ -35,10 +35,7 @@ use seismic_manifest::{
 use seismic_measurement_admission::promote_measurements;
 use seismic_tee_common::network_dir::INPUTS_DIRNAME;
 use seismic_tee_common::{Artifact, Manifest, NetworkDir};
-use seismic_verify_quote::{
-    ArchivedSnapshot, HarvestCollateral, HarvestRecord, SeismicMeasurementPolicy, collateral,
-    verify_harvest,
-};
+use seismic_verify_quote::{SeismicMeasurementPolicy, archive, verify_archived_harvest};
 use sha2::{Digest as _, Sha256};
 
 use crate::founding::{FoundingRecords, Validator, load_founding_set};
@@ -299,7 +296,7 @@ pub fn write_artifact_set(
 }
 
 /// Re-verify every archived founding record against `policy`, offline, at
-/// the instant its own collateral snapshot was held to.
+/// the instant its own verification was held to.
 ///
 /// The harvest verified these records when it collected them, but nothing
 /// downstream trusts that run's verdict: assemble is the step that pins the
@@ -309,18 +306,21 @@ pub fn write_artifact_set(
 /// records are plain files that may have been copied, committed, and edited
 /// since the harvest).
 ///
-/// Each record is checked against the snapshot archived beside it, so this
-/// gate behaves the same on the founding day and four hundred days later. A
-/// record with no snapshot fails: Intel's live collateral would answer for it
-/// today and stop answering in about a month, which would make the verdict
-/// depend on when it ran. Fails on the first record that does not verify,
-/// naming it; one line per verified record on stderr.
-pub async fn verify_harvest_records(
+/// Each record is a whole founding archive — the quote, the DCAP bundle it
+/// verified against, the instant, and the anchors, in one document — and is
+/// replayed from that, so this gate behaves the same on the founding day and
+/// four hundred days later. A record that is not a whole archive fails:
+/// Intel's live collateral would answer for it today and stop answering in
+/// about a month, which would make the verdict depend on when it ran. A
+/// record that re-verifies under trust anchors other than the founding's
+/// passes with a warning naming the difference. Fails on the first record
+/// that does not verify, naming it; one line per verified record on stderr.
+pub fn verify_harvest_records(
     dir: &NetworkDir,
     records: &FoundingRecords,
     policy: &[u8],
 ) -> anyhow::Result<()> {
-    // Replaying a snapshot parses Intel's material, whose TLS-bearing types
+    // Replaying an archive parses Intel's material, whose TLS-bearing types
     // want a rustls process default; see `node verify` for why one has to
     // be chosen. Idempotent: a second install is a no-op error.
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -330,41 +330,29 @@ pub async fn verify_harvest_records(
     let policy = SeismicMeasurementPolicy::from_json_bytes(policy)
         .context("loading the measurement policy")?;
     for (name, record) in records {
-        let collateral_path = dir.collateral_record(name);
-        if !collateral_path.is_file() {
-            bail!(
-                "{name}: no DCAP collateral archived at {} — the founding quote can only be \
-                 re-verified against the collateral its own harvest used, so this cohort has to be \
-                 re-harvested (or re-founded) rather than assembled around",
-                collateral_path.display()
-            );
-        }
-        let verdict = async {
-            let document = std::fs::read_to_string(&collateral_path)
-                .with_context(|| format!("reading {}", collateral_path.display()))?;
-            let archived: ArchivedSnapshot = collateral::parse(&document).with_context(|| {
-                format!("{} is not an archived snapshot", collateral_path.display())
-            })?;
-            let record: HarvestRecord = serde_json::from_value(record.document.clone())
-                .with_context(|| {
-                    format!(
-                        "{} is not a harvest record",
-                        dir.harvest_record(name).display()
-                    )
-                })?;
-            verify_harvest(
-                record,
-                policy.clone(),
-                HarvestCollateral::Archived(Box::new(archived)),
-            )
-            .await
-        }
-        .await;
-        if let Err(error) = verdict {
-            bail!(
+        let path = dir.harvest_record(name);
+        let verdict = archive::parse(&record.document.to_string())
+            .with_context(|| {
+                format!(
+                    "{} is not a founding archive — the founding quote can only be re-verified \
+                     against the bundle its own harvest archived with it, so this cohort has to \
+                     be re-harvested (or re-founded) rather than assembled around",
+                    path.display()
+                )
+            })
+            .and_then(|archive| verify_archived_harvest(archive, policy.clone()));
+        let verified = match verdict {
+            Ok(verified) => verified,
+            Err(error) => bail!(
                 "{name}: {error:?}\nA founding key whose archived quote does not verify must not \
                  be pinned — re-found (or re-harvest an unchanged cohort) rather than assembling \
                  around it"
+            ),
+        };
+        if let Some(drift) = &verified.anchor_drift {
+            eprintln!(
+                "warning: {name}: re-verified under trust anchors other than the founding's \
+                 ({drift}); the verdict is this build's, not the founding's own"
             );
         }
         eprintln!("{name}: archived founding quote verified");
@@ -438,7 +426,7 @@ pub async fn run(args: AssembleArgs) -> anyhow::Result<ExitCode> {
 
     // The offline replay gate — the same function `verify-founding` runs over
     // the committed directory afterwards.
-    verify_harvest_records(&dir, &founding.records, &policy).await?;
+    verify_harvest_records(&dir, &founding.records, &policy)?;
 
     let assembled = assemble(
         &AssembleInputs {
@@ -873,11 +861,11 @@ pub(crate) mod tests {
         assert_ne!(net.reth_genesis(), net.input_reth_genesis());
     }
 
-    /// Re-verification is offline and per record: a record with no snapshot
-    /// beside it fails closed, before any verifier runs; a snapshot that is
-    /// not one is named.
-    #[tokio::test]
-    async fn harvest_records_need_their_archived_collateral() {
+    /// Re-verification is offline and per record: a record that is not a
+    /// whole founding archive fails closed, by file, before any verifier
+    /// runs.
+    #[test]
+    fn harvest_records_must_be_whole_archives() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = NetworkDir::new(tmp.path());
         let mut records = FoundingRecords::new();
@@ -890,30 +878,23 @@ pub(crate) mod tests {
                     "harvest_nonce": "11".repeat(32),
                     "node_public_key": "ab".repeat(32),
                     "consensus_public_key": "cd".repeat(48),
-                    "evidence": {"attestation_type": "none", "attestation": []},
+                    "evidence": crate::founding::tests::no_attestation_evidence(),
                 }),
             },
         );
         let err = verify_harvest_records(&dir, &records, EXAMPLE_POLICY)
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("node-1: no DCAP collateral archived"), "{err}");
-        assert!(err.contains("re-harvested"), "{err}");
-
-        std::fs::create_dir_all(dir.collateral()).unwrap();
-        std::fs::write(dir.collateral_record("node-1"), "{ not a snapshot").unwrap();
-        let err = verify_harvest_records(&dir, &records, EXAMPLE_POLICY)
-            .await
             .unwrap_err()
             .to_string();
         assert!(err.contains("node-1:"), "{err}");
-        assert!(err.contains("is not an archived snapshot"), "{err}");
+        assert!(
+            err.contains("node-1.json is not a founding archive"),
+            "{err}"
+        );
+        assert!(err.contains("re-harvested"), "{err}");
         assert!(err.contains("must not be pinned"), "{err}");
 
         // Fail closed on the policy, before any record is looked at.
         let err = verify_harvest_records(&dir, &records, b"{ not a policy")
-            .await
             .unwrap_err()
             .to_string();
         assert!(err.contains("measurement policy"), "{err}");
