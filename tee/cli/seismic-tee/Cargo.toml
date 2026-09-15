@@ -19,6 +19,9 @@ seismic-tee-node.workspace = true
 clap.workspace = true
 tokio.workspace = true
 
+[dev-dependencies]
+tempfile.workspace = true
+
 [[bin]]
 name = "seismic-tee"
 path = "src/main.rs"

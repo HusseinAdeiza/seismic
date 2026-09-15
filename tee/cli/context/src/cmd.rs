@@ -1,9 +1,11 @@
 //! `ctx`: name networks, and select which one — and which of its nodes — the
 //! other commands act on.
 //!
-//! Six verbs: [`CtxCommand::Use`] selects a context and refuses one that
+//! Eight verbs. [`CtxCommand::Use`] selects a context and refuses one that
 //! points at nothing; [`CtxCommand::List`] and [`CtxCommand::Show`] read the
-//! file back; [`CtxCommand::SetNetwork`] registers or updates a network's
+//! file back; [`CtxCommand::Env`] and [`CtxCommand::Exec`] hand the selection
+//! to a shell or a child process (their own modules, [`crate::env`] and
+//! [`crate::exec`]); [`CtxCommand::SetNetwork`] registers or updates a network's
 //! pointers; [`CtxCommand::SetNodes`] imports a network's cohort from stdin,
 //! the way `aws eks update-kubeconfig` merges a cluster the cloud reported;
 //! [`CtxCommand::Unset`] clears the selection. Nothing outside this module
@@ -19,6 +21,8 @@ use seismic_tee_common::descriptor::parse_descriptors;
 use seismic_tee_common::load_descriptors;
 
 use crate::config::{Network, Shape};
+use crate::env::{self, EnvArgs};
+use crate::exec::{self, ExecArgs};
 use crate::{Context, Selected, Selection, path, write};
 
 /// The `ctx` command group: name networks, and select which one — and which
@@ -32,6 +36,10 @@ pub enum CtxCommand {
     List(ListArgs),
     /// Show the current selection and the paths and RPC URL it resolves to.
     Show(ListArgs),
+    /// Print export lines for the selected node: eval "$(seismic-tee ctx env)".
+    Env(EnvArgs),
+    /// Run a command with the selected node's ETH_RPC_URL set.
+    Exec(ExecArgs),
     /// Register a network by name, or update it: where its artifact set is
     /// (--dir, or --manifest, or --source with --network-id), and optionally
     /// its nodes from a file. Nodes can also be set separately, in either
@@ -51,6 +59,8 @@ pub fn run(command: CtxCommand) -> anyhow::Result<ExitCode> {
         CtxCommand::Use(args) => run_use(args),
         CtxCommand::List(args) => run_list(args),
         CtxCommand::Show(args) => run_show(args),
+        CtxCommand::Env(args) => env::run(args),
+        CtxCommand::Exec(args) => exec::run(args),
         CtxCommand::SetNetwork(args) => run_set_network(args),
         CtxCommand::SetNodes(args) => run_set_nodes(args),
         CtxCommand::Unset(args) => run_unset(args),
@@ -386,7 +396,16 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            ["use", "list", "show", "set-network", "set-nodes", "unset"]
+            [
+                "use",
+                "list",
+                "show",
+                "env",
+                "exec",
+                "set-network",
+                "set-nodes",
+                "unset"
+            ]
         );
     }
 

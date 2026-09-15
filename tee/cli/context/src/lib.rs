@@ -23,6 +23,8 @@
 pub mod args;
 pub mod cmd;
 pub mod config;
+pub mod env;
+pub mod exec;
 pub mod path;
 pub mod write;
 
@@ -236,7 +238,7 @@ impl Selected<'_> {
 }
 
 /// What a context-resolved command is acting on, on stderr — never stdout,
-/// so `eval "$(seismic-tee env)"` stays evaluable.
+/// so `eval "$(seismic-tee ctx env)"` stays evaluable.
 pub fn echo(selection: &Selection, resolved: &dyn std::fmt::Display) {
     eprintln!("context {selection} → {resolved}");
 }

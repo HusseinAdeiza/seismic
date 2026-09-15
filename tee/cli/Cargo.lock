@@ -4344,6 +4344,7 @@ dependencies = [
  "seismic-tee-context",
  "seismic-tee-network",
  "seismic-tee-node",
+ "tempfile",
  "tokio",
 ]
 

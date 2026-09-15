@@ -69,7 +69,8 @@ struct Cli {
 /// party it is for, so the listing doubles as a who-runs-what.
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Anyone: select the network and node the other commands act on.
+    /// Anyone: select the network and node the other commands act on, and
+    /// reach the selected node from a shell.
     Ctx {
         #[command(subcommand)]
         command: CtxCommand,
@@ -196,7 +197,16 @@ mod tests {
         let group = |name: &str| subcommand_names(cli.find_subcommand(name).unwrap());
         assert_eq!(
             group("ctx"),
-            ["use", "list", "show", "set-network", "set-nodes", "unset"]
+            [
+                "use",
+                "list",
+                "show",
+                "env",
+                "exec",
+                "set-network",
+                "set-nodes",
+                "unset"
+            ]
         );
         assert_eq!(
             group("network"),
