@@ -11,12 +11,12 @@
 //! check to run after a merge, before a founding, or whenever an artifact set
 //! is suspected of having drifted from its inputs.
 
-use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Args;
 use seismic_tee_common::NetworkDir;
 
+use crate::args::DirArgs;
 use crate::gates::{ArtifactSet, run_validation_gates};
 use crate::init::absolute;
 use crate::shell_outs::DerivationArgs;
@@ -24,16 +24,17 @@ use crate::shell_outs::DerivationArgs;
 #[derive(Debug, Args)]
 pub struct ValidateArgs {
     /// Network directory: audits the artifact set `assemble` wrote there
-    /// (manifest, summit genesis, policy) against its reth genesis.
-    #[arg(value_name = "DIR")]
-    pub dir: PathBuf,
+    /// (manifest, summit genesis, policy) against its reth genesis. Omit it
+    /// to use the current context's network.
+    #[command(flatten)]
+    pub dir: DirArgs,
 
     #[command(flatten)]
     pub derivations: DerivationArgs,
 }
 
 pub async fn run(args: ValidateArgs) -> anyhow::Result<ExitCode> {
-    let dir = NetworkDir::new(absolute(&args.dir)?);
+    let dir = NetworkDir::new(absolute(&args.dir.load()?)?);
     let set = ArtifactSet::load(&dir)?;
     let warnings = run_validation_gates(&set, &args.derivations.shell_outs()).await?;
     for warning in &warnings {

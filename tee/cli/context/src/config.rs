@@ -67,6 +67,16 @@ pub enum Shape<'a> {
 }
 
 impl Network {
+    /// A network entry naming a directory, with no manifest, source or
+    /// nodes — what `network init` registers for the directory it just
+    /// scaffolded.
+    pub fn of_dir(dir: &Path) -> Self {
+        Self {
+            dir: Some(dir.to_path_buf()),
+            ..Default::default()
+        }
+    }
+
     /// Validate this entry's shape, naming `name` and `config_path` in every
     /// failure.
     pub fn validate(&self, name: &str, config_path: &Path) -> anyhow::Result<()> {
@@ -175,6 +185,14 @@ fqdn = "alpha.example.com""#
                     if source == "https://example.com/bundle" && network_id == HEX32
             ));
         }
+    }
+
+    #[test]
+    fn of_dir_names_a_dir_shaped_entry() {
+        let n = Network::of_dir(Path::new("/nets/devnet-1"));
+        n.validate("devnet-1", Path::new("config.toml")).unwrap();
+        assert!(matches!(n.shape(), Shape::Dir(p) if p == Path::new("/nets/devnet-1")));
+        assert!(n.nodes.is_empty());
     }
 
     #[test]

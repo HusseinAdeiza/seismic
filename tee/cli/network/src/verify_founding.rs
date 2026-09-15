@@ -51,14 +51,16 @@
 //! swapped under its manifest is `validate`'s catch.
 
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::ExitCode;
 
 use anyhow::{Context as _, bail};
 use clap::Args;
 use seismic_tee_common::network_dir::{HARVEST_DIRNAME, INPUTS_DIRNAME};
 use seismic_tee_common::{Manifest, NetworkDir};
+use seismic_tee_context::{Context, ContextArgs};
 
+use crate::args::DirArgs;
 use crate::assemble::verify_harvest_records;
 use crate::founding::{FoundingRecords, is_bare_hex, load_harvest_records};
 use crate::init::absolute;
@@ -68,8 +70,9 @@ pub struct VerifyFoundingArgs {
     /// Committed network directory: the artifact set `assemble` wrote at its
     /// top level (network-manifest.json, measurement-policy-bootstrap.json,
     /// summit-genesis.toml) and the founding archive under inputs/harvest/.
-    #[arg(value_name = "DIR")]
-    pub dir: PathBuf,
+    /// Omit it to use the current context's network.
+    #[command(flatten)]
+    pub dir: DirArgs,
 
     /// Audit one archived record — its node name, the file stem under
     /// inputs/harvest/ — for a partial archive. The seated set is then only
@@ -262,11 +265,49 @@ pub fn audit_founding(dir: &NetworkDir, record: Option<&str>) -> anyhow::Result<
     })
 }
 
+/// The context's pinned `network_id` for this invocation's network, when it
+/// has one.
+///
+/// Best-effort: a failed selection — no context configured, or `--context`
+/// naming a network the file doesn't hold — means there is nothing to pin
+/// against, not a hard error. `verify-founding` is the auditor's command, and
+/// an auditor need not have run `ctx set-network` at all; a malformed
+/// `--config` file still fails loudly, since that is a broken flag rather
+/// than an absent one.
+fn pinned_network_id(context_args: &ContextArgs) -> anyhow::Result<Option<String>> {
+    let context = Context::load(context_args.config.as_deref())?;
+    Ok(context
+        .select(context_args.context.as_deref())
+        .ok()
+        .and_then(|selected| selected.network_id().map(str::to_string)))
+}
+
 pub async fn run(args: VerifyFoundingArgs) -> anyhow::Result<ExitCode> {
-    if !args.dir.is_dir() {
-        bail!("network directory not found: {}", args.dir.display());
+    let root = args.dir.load()?;
+    if !root.is_dir() {
+        bail!("network directory not found: {}", root.display());
     }
-    let dir = NetworkDir::new(absolute(&args.dir)?);
+    let dir = NetworkDir::new(absolute(&root)?);
+
+    // Compared before any record is replayed: an artifact set whose
+    // network_id disagrees with the context's pin is refused outright,
+    // rather than after minutes of quote re-verification.
+    if let Some(pinned) = pinned_network_id(&args.dir.context)? {
+        let manifest_path = dir.manifest();
+        let manifest = Manifest::load(&manifest_path)
+            .with_context(|| format!("{}: invalid manifest", manifest_path.display()))?;
+        let derived = manifest.network_id();
+        let derived_hex = derived.to_string();
+        let derived_bare = derived_hex.strip_prefix("0x").unwrap_or(&derived_hex);
+        if derived_bare != pinned {
+            bail!(
+                "network_id mismatch: {} hashes to {derived}, but the context pins 0x{pinned} — \
+                 the artifact set is not the network it claims to be",
+                manifest_path.display(),
+            );
+        }
+    }
+
     let audit = audit_founding(&dir, args.record.as_deref())?;
     println!("network_id: {}", audit.manifest.network_id());
     println!(
@@ -280,7 +321,7 @@ pub async fn run(args: VerifyFoundingArgs) -> anyhow::Result<ExitCode> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     use clap::Parser;
     use seismic_tee_common::network_dir::{
@@ -382,7 +423,10 @@ mod tests {
     #[test]
     fn the_directory_is_positional_and_record_narrows() {
         let args = parse(&["tee/networks/devnet-3"]);
-        assert_eq!(args.dir, Path::new("tee/networks/devnet-3"));
+        assert_eq!(
+            args.dir.dir.as_deref(),
+            Some(Path::new("tee/networks/devnet-3"))
+        );
         assert_eq!(args.record, None);
 
         let args = parse(&["n", "--record", "n-2"]);
@@ -587,5 +631,96 @@ mod tests {
         );
         assert!(err.contains("network directory not found"), "{err}");
         assert!(err.contains("/absent/network-dir"), "{err}");
+    }
+
+    /// A context pointed at by `--config`, pinning `devnet-3` to
+    /// `network_id`. Every case below passes `--config` explicitly, so none
+    /// of them ever reads a developer's real `~/.config/seismic/config.toml`.
+    fn context_pinning(dir: &Path, network_id: &str) -> ContextArgs {
+        let config_path = dir.join("config.toml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "current = \"devnet-3\"\n\n[networks.devnet-3]\ndir = \"/x\"\nnetwork_id = \
+                 {network_id:?}\n"
+            ),
+        )
+        .unwrap();
+        ContextArgs {
+            context: None,
+            config: Some(config_path),
+        }
+    }
+
+    fn args_with_context(root: PathBuf, context: ContextArgs) -> VerifyFoundingArgs {
+        VerifyFoundingArgs {
+            dir: DirArgs {
+                dir: Some(root),
+                context,
+            },
+            record: None,
+        }
+    }
+
+    /// A matching pin passes the check and reaches the replay — this
+    /// directory's records are bare harvest records rather than whole
+    /// archives (see `committed_dir`), so the replay itself fails, but never
+    /// on a "network_id mismatch": the pin agreed.
+    #[tokio::test]
+    async fn a_matching_pin_passes() {
+        let (tmp, dir) = committed_dir();
+        let derived = Manifest::load(&dir.manifest())
+            .unwrap()
+            .network_id()
+            .to_string();
+        let hex = derived.strip_prefix("0x").unwrap();
+        let context = context_pinning(tmp.path(), hex);
+        let err = format!(
+            "{:?}",
+            run(args_with_context(dir.root().to_path_buf(), context))
+                .await
+                .unwrap_err()
+        );
+        assert!(!err.contains("network_id mismatch"), "{err}");
+        assert!(err.contains("is not a founding archive"), "{err}");
+    }
+
+    /// A mismatched pin fails before the archive is ever replayed: this
+    /// directory's records are bare harvest records rather than whole
+    /// archives, so a failure that reached the replay would say so instead.
+    #[tokio::test]
+    async fn a_mismatched_pin_fails_before_any_record_is_replayed() {
+        let (tmp, dir) = committed_dir();
+        let context = context_pinning(tmp.path(), &"11".repeat(32));
+        let err = format!(
+            "{:?}",
+            run(args_with_context(dir.root().to_path_buf(), context))
+                .await
+                .unwrap_err()
+        );
+        assert!(err.contains("network_id mismatch"), "{err}");
+        assert!(err.contains(&format!("0x{}", "11".repeat(32))), "{err}");
+        assert!(!err.contains("is not a founding archive"), "{err}");
+    }
+
+    /// No context selected at all: the audit proceeds exactly as it does
+    /// with no pin configured.
+    #[tokio::test]
+    async fn no_pin_behaves_exactly_as_today() {
+        let (tmp, dir) = committed_dir();
+        let args = VerifyFoundingArgs {
+            dir: DirArgs {
+                dir: Some(dir.root().to_path_buf()),
+                // Names no file: Context::load treats an absent file as an
+                // empty config, with no `current` to select.
+                context: ContextArgs {
+                    context: None,
+                    config: Some(tmp.path().join("absent-config.toml")),
+                },
+            },
+            record: None,
+        };
+        let err = format!("{:?}", run(args).await.unwrap_err());
+        assert!(err.contains("is not a founding archive"), "{err}");
     }
 }

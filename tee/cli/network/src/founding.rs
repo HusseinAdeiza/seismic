@@ -1,22 +1,24 @@
 //! The founding inputs a network directory holds before `assemble` runs.
 //!
-//! Three files, read by three commands: the authored withdrawal credentials
+//! Two files plus the cohort's node table, read by three commands: the
+//! authored withdrawal credentials
 //! (`inputs/founder-withdrawal-credentials.json`), the harvested founding
-//! records (`inputs/harvest/<node>.json`), and the cohort's descriptor map
-//! (`nodes/nodes.json`). `harvest` reads the first and the last to size the
-//! cohort before it fetches anything; `assemble` pairs all three into the
-//! founding validator set it pins; `configure` joins the records with the map
-//! for the IPs it delivers and the keys it asserts the launch against. Each
-//! reader validates everything it reads even when an earlier command already
-//! did: these are plain committed files that may have been copied, committed
-//! and edited between commands.
+//! records (`inputs/harvest/<node>.json`), and the cohort's node table —
+//! the context file's `[networks.<name>.nodes]`, imported by `ctx set-nodes`,
+//! or `--nodes FILE` for a script's complete record. `harvest` reads the
+//! credentials and the table to size the cohort before it fetches anything;
+//! `assemble` pairs all three into the founding validator set it pins;
+//! `configure` joins the records with the table for the IPs it delivers and
+//! the keys it asserts the launch against. Each reader validates everything
+//! it reads even when an earlier command already did: these are plain
+//! committed files (or a re-imported cohort) that may have changed between
+//! commands.
 
 use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::{Context as _, bail};
-use seismic_tee_common::network_dir::{NODES_DIRNAME, NODES_FILENAME};
-use seismic_tee_common::{Descriptors, NetworkDir, load_descriptors};
+use seismic_tee_common::{Descriptors, NetworkDir};
 use serde::Serialize;
 
 /// Summit's consensus (BLS) port: each validator entry in the completed summit
@@ -208,24 +210,6 @@ pub fn load_harvest_records(dir: &NetworkDir) -> anyhow::Result<FoundingRecords>
     Ok(records)
 }
 
-/// Load the network's descriptor map, `nodes/nodes.json`, as a gate.
-///
-/// Every failure — no file, not JSON, an entry the CLIs can't act on — names
-/// the file and says where the map comes from, since the fix is always the
-/// same one command (save the stack's `nodes` output there again).
-pub fn load_descriptor_map(dir: &NetworkDir) -> anyhow::Result<Descriptors> {
-    let path = dir.nodes_file();
-    if !path.is_file() {
-        bail!(
-            "{} not found — save the cohort's descriptor map there: `pulumi stack output nodes \
-             --json > {NODES_DIRNAME}/{NODES_FILENAME}` (a bring-your-own-infra operator \
-             hand-writes the same shape: {{<name>: {{public_ip, fqdn}}, …}})",
-            path.display()
-        );
-    }
-    Ok(load_descriptors(&path)?)
-}
-
 /// One founding validator as `summit genesis set-validators` takes it:
 /// harvested keys in summit's bare-lowercase-hex keystore spelling, the
 /// authored credentials, and the descriptor IP with the consensus port.
@@ -254,10 +238,14 @@ pub struct FoundingSet {
 /// isn't the cohort the founders authored for, and either way assembling would
 /// pin a set other than the intended one. The pairing is printed and lands
 /// visibly in the emitted genesis, since nothing downstream can tell a swapped
-/// pair from an intended one. IPs come from the cohort's descriptor map:
-/// delivered in the genesis file but excluded from its config digest, so the
-/// committed file is a founding-era snapshot and IP churn never re-founds.
-pub fn load_founding_set(dir: &NetworkDir) -> anyhow::Result<FoundingSet> {
+/// pair from an intended one. IPs come from `descriptors` (the cohort's node
+/// table, resolved by the caller from the context or `--nodes`): delivered in
+/// the genesis file but excluded from its config digest, so the committed
+/// file is a founding-era snapshot and IP churn never re-founds.
+pub fn load_founding_set(
+    dir: &NetworkDir,
+    descriptors: &Descriptors,
+) -> anyhow::Result<FoundingSet> {
     let founders = load_founder_credentials(&dir.founders())?;
     let records = load_harvest_records(dir)?;
     if founders.len() != records.len() {
@@ -271,15 +259,13 @@ pub fn load_founding_set(dir: &NetworkDir) -> anyhow::Result<FoundingSet> {
             records.keys().cloned().collect::<Vec<_>>().join(", "),
         );
     }
-    let descriptors = load_descriptor_map(dir)?;
     let mut validators = Vec::with_capacity(records.len());
     for ((name, record), credentials) in records.iter().zip(&founders) {
         let Some(descriptor) = descriptors.get(name) else {
             bail!(
-                "{} has no node {name:?} — the descriptor map (the Pulumi stack's `nodes` output) \
-                 supplies each founding validator's IP. A harvested box that is gone from the map \
-                 means the cohort changed under the harvest: re-found rather than assembling",
-                dir.nodes_file().display()
+                "the cohort has no node {name:?} — the cohort's node table supplies each \
+                 founding validator's IP. A harvested box that is gone from the cohort means it \
+                 changed under the harvest: re-found rather than assembling",
             );
         };
         eprintln!("founding validator {name}: withdrawals to {credentials}");
@@ -298,6 +284,7 @@ pub fn load_founding_set(dir: &NetworkDir) -> anyhow::Result<FoundingSet> {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use seismic_tee_common::NodeDescriptor;
     use serde_json::json;
 
     use super::*;
@@ -460,19 +447,22 @@ pub(crate) mod tests {
         assert!(err.contains("consensus_public_key"), "{err}");
     }
 
-    #[test]
-    fn the_descriptor_map_is_a_gate_naming_the_command_that_makes_it() {
-        let (_tmp, dir) = network_dir();
-        let err = load_descriptor_map(&dir).unwrap_err().to_string();
-        assert!(err.contains("nodes/nodes.json"), "{err}");
-        assert!(err.contains("pulumi stack output nodes --json"), "{err}");
-
-        write(
-            &dir,
-            Path::new("nodes/nodes.json"),
-            r#"{"node-1": {"public_ip": "203.0.113.7", "fqdn": "n1.example.com"}}"#,
-        );
-        assert_eq!(load_descriptor_map(&dir).unwrap().len(), 1);
+    /// A cohort's node table, built in memory: `load_founding_set`'s caller
+    /// resolves this from the context or `--nodes` before calling it, so the
+    /// tests here build it directly rather than through a file.
+    pub(crate) fn descriptors_of(nodes: &[(&str, &str, &str)]) -> Descriptors {
+        nodes
+            .iter()
+            .map(|(name, ip, fqdn)| {
+                (
+                    name.to_string(),
+                    NodeDescriptor {
+                        public_ip: ip.to_string(),
+                        fqdn: fqdn.to_string(),
+                    },
+                )
+            })
+            .collect()
     }
 
     #[test]
@@ -485,14 +475,12 @@ pub(crate) mod tests {
             Path::new("inputs/founder-withdrawal-credentials.json"),
             &format!(r#"["0x{}", "0x{}"]"#, "01".repeat(20), "02".repeat(20)),
         );
-        write(
-            &dir,
-            Path::new("nodes/nodes.json"),
-            r#"{"node-1": {"public_ip": "203.0.113.7", "fqdn": "n1.example.com"},
-                "node-2": {"public_ip": "203.0.113.8", "fqdn": "n2.example.com"}}"#,
-        );
+        let descriptors = descriptors_of(&[
+            ("node-1", "203.0.113.7", "n1.example.com"),
+            ("node-2", "203.0.113.8", "n2.example.com"),
+        ]);
 
-        let set = load_founding_set(&dir).unwrap();
+        let set = load_founding_set(&dir, &descriptors).unwrap();
         assert_eq!(set.validators.len(), 2);
         assert_eq!(set.validators[0].node_public_key, NODE_KEY_1);
         assert_eq!(set.validators[0].ip_address, "203.0.113.7:18551");
@@ -506,7 +494,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_count_mismatch_and_a_box_gone_from_the_map_are_cohort_changes() {
+    fn a_count_mismatch_and_a_box_gone_from_the_cohort_are_cohort_changes() {
         let (_tmp, dir) = network_dir();
         write_harvest(&dir, "node-1", &record(NODE_KEY_1, "cc"));
         write_harvest(&dir, "node-2", &record(NODE_KEY_2, "dd"));
@@ -515,7 +503,9 @@ pub(crate) mod tests {
             Path::new("inputs/founder-withdrawal-credentials.json"),
             &format!(r#"["0x{}"]"#, "01".repeat(20)),
         );
-        let err = load_founding_set(&dir).unwrap_err().to_string();
+        let err = load_founding_set(&dir, &Descriptors::new())
+            .unwrap_err()
+            .to_string();
         assert!(
             err.contains("1 withdrawal credential(s) but 2 box(es)"),
             "{err}"
@@ -527,12 +517,10 @@ pub(crate) mod tests {
             Path::new("inputs/founder-withdrawal-credentials.json"),
             &format!(r#"["0x{}", "0x{}"]"#, "01".repeat(20), "02".repeat(20)),
         );
-        write(
-            &dir,
-            Path::new("nodes/nodes.json"),
-            r#"{"node-1": {"public_ip": "203.0.113.7", "fqdn": "n1.example.com"}}"#,
-        );
-        let err = load_founding_set(&dir).unwrap_err().to_string();
+        let descriptors = descriptors_of(&[("node-1", "203.0.113.7", "n1.example.com")]);
+        let err = load_founding_set(&dir, &descriptors)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("has no node \"node-2\""), "{err}");
         assert!(err.contains("re-found"), "{err}");
     }

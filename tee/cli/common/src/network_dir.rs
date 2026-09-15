@@ -2,8 +2,12 @@
 //!
 //! A network directory holds the authored inputs under `inputs/` and the
 //! derived artifact set at the top level. Everything top-level is hash-pinned
-//! by the manifest; everything under `inputs/` is provenance; `nodes/` is
-//! mutable infra state, regenerated per deploy and gitignored:
+//! by the manifest; everything under `inputs/` is provenance; `nodes/` holds
+//! the records `configure` writes as it runs, regenerated per deploy and
+//! gitignored. The cohort's node table itself is not one of these files: it
+//! lives in the context file's `[networks.<name>.nodes]`
+//! ([`crate::descriptor`]), imported by `ctx set-nodes` or passed as
+//! `--nodes FILE`.
 //!
 //! ```text
 //! inputs/reth-genesis.json                     policy-free genesis
@@ -19,8 +23,6 @@
 //! summit-genesis.toml                          the completed summit genesis
 //! measurement-policy-bootstrap.json            the founding accepted measurement set
 //!
-//! nodes/nodes.json                             the cohort's descriptor map
-//!                                              (the stack's `nodes` output)
 //! nodes/bootnodes.json                         the founding enode set
 //! nodes/<node>.init-config.toml                the config `configure` POSTed
 //!                                              to that node, byte-exact
@@ -48,14 +50,11 @@ pub const FOUNDERS_FILENAME: &str = "founder-withdrawal-credentials.json";
 pub const INPUTS_DIRNAME: &str = "inputs";
 pub const HARVEST_DIRNAME: &str = "harvest";
 pub const NODES_DIRNAME: &str = "nodes";
-/// The descriptor map, exactly as `pulumi stack output nodes --json` prints
-/// it; see [`crate::descriptor`].
-pub const NODES_FILENAME: &str = "nodes.json";
 pub const BOOTNODES_FILENAME: &str = "bootnodes.json";
 /// `<node>` + this: the tdx-init config as it was POSTed to that node, kept
 /// as the record of what the node booted with and as a body `curl` can
-/// replay. Under `nodes/` because it is per-deploy output like the
-/// descriptor map — it carries live IPs and the bootnode set of the moment.
+/// replay. Under `nodes/` because it is per-deploy output — it carries live
+/// IPs and the bootnode set of the moment.
 pub const INIT_CONFIG_SUFFIX: &str = ".init-config.toml";
 
 /// One network directory, addressed by the layout above.
@@ -148,10 +147,6 @@ impl NetworkDir {
         self.root.join(NODES_DIRNAME)
     }
 
-    pub fn nodes_file(&self) -> PathBuf {
-        self.nodes().join(NODES_FILENAME)
-    }
-
     pub fn bootnodes(&self) -> PathBuf {
         self.nodes().join(BOOTNODES_FILENAME)
     }
@@ -183,10 +178,6 @@ mod tests {
         assert_eq!(
             dir.harvest_record("dev-bootstrap-node-1"),
             Path::new("tee/networks/devnet-3/inputs/harvest/dev-bootstrap-node-1.json")
-        );
-        assert_eq!(
-            dir.nodes_file(),
-            Path::new("tee/networks/devnet-3/nodes/nodes.json")
         );
         assert_eq!(
             dir.bootnodes(),

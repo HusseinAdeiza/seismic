@@ -47,6 +47,7 @@
 //! workspace is headed for a public repo, since an auditor who can read
 //! `assemble` can see what `verify-founding` re-runs.
 
+pub mod args;
 pub mod assemble;
 pub mod bootnodes;
 pub mod configure;

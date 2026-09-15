@@ -22,9 +22,9 @@
 //!   enode]`.
 //!
 //! Then every node's enode is collected and the founding set is persisted to
-//! `nodes/bootnodes.json` beside the descriptors. On a later configure run
-//! (reboot or re-provision) that file exists, so the two-stage dance is
-//! skipped and the full founding set goes to every node in one parallel pass.
+//! `nodes/bootnodes.json`. On a later configure run (reboot or re-provision)
+//! that file exists, so the two-stage dance is skipped and the full founding
+//! set goes to every node in one parallel pass.
 //!
 //! Root-key bootstrap rides the same list: tdx-init derives each node's
 //! root-key fetch peers from its POSTed bootnodes (`http://<host>:7878`, the
@@ -58,7 +58,7 @@
 //! only `[node].genesis_node` and the bootnode set differ.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
@@ -67,6 +67,7 @@ use anyhow::{Context as _, bail};
 use clap::Args;
 use seismic_tee_common::http::TDX_INIT_PORT;
 use seismic_tee_common::{Artifact, Descriptors, Manifest, NetworkDir, NodeDescriptor, http, rpc};
+use seismic_tee_context::{ContextArgs, load_nodes};
 use seismic_tee_node::configure::{
     ConfigInputs, DEFAULT_EMAIL, TDX_INIT_LISTENER_TIMEOUT, TDX_INIT_RETRY_INTERVAL, build_config,
     post_config_within, render_config, resolve_reth_genesis, resolve_summit_genesis, write_record,
@@ -76,14 +77,13 @@ use seismic_tee_node::verify::{
     PolicySourceArgs, VerifierArgs, challenge_node, check_policy_source_files, resolve_policy,
     retry_flags,
 };
+use seismic_tee_node::{load_manifest, resolve_manifest};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
 use crate::bootnodes::{self, Bootnode};
 use crate::dashboard::CohortDashboard;
-use crate::founding::{
-    FoundingRecords, SUMMIT_CONSENSUS_PORT, load_descriptor_map, load_harvest_records,
-};
+use crate::founding::{FoundingRecords, SUMMIT_CONSENSUS_PORT, load_harvest_records};
 use crate::gates::hex_0x;
 use crate::launch::{self, LaunchTarget};
 
@@ -203,9 +203,9 @@ pub fn build_cohort(
 
 /// Load the founding facts the delivery needs from the network directory: the
 /// current-IP splice map (pinned node pubkey → `<ip>:<consensus port>`, from
-/// `inputs/harvest/` joined with the live descriptor map) and the harvest
-/// records themselves (each configured box's pinned keys, for the launch
-/// assertions).
+/// `inputs/harvest/` joined with `descriptors`, the cohort's live node table)
+/// and the harvest records themselves (each configured box's pinned keys, for
+/// the launch assertions).
 pub fn load_founding_facts(
     dir: &NetworkDir,
     descriptors: &Descriptors,
@@ -215,11 +215,9 @@ pub fn load_founding_facts(
     for (name, record) in &records {
         let Some(descriptor) = descriptors.get(name) else {
             bail!(
-                "{} has no node {name:?} — the descriptor map (the Pulumi stack's `nodes` output) \
-                 supplies each founding validator's current IP. A harvested box that is gone from \
-                 the map means the cohort changed under the founding: re-found rather than \
-                 configuring",
-                dir.nodes_file().display()
+                "the cohort has no node {name:?} — the cohort's node table supplies each \
+                 founding validator's current IP. A harvested box that is gone from the cohort \
+                 means it changed under the founding: re-found rather than configuring",
             );
         };
         ip_by_node_pubkey.insert(
@@ -283,8 +281,8 @@ pub fn splice_validator_ips(
     if pinned_set != harvested_set {
         bail!(
             "the summit genesis's pinned validator set and the founding inputs (inputs/harvest/ + \
-             nodes/nodes.json) disagree — the cohort changed under the founding; re-found rather \
-             than delivering a genesis that strands a pinned peer:\n    pinned node keys:    \
+             the cohort's node table) disagree — the cohort changed under the founding; re-found \
+             rather than delivering a genesis that strands a pinned peer:\n    pinned node keys:    \
              {}\n    harvested node keys: {}",
             pinned_set.iter().copied().collect::<Vec<_>>().join(", "),
             harvested_set.iter().copied().collect::<Vec<_>>().join(", ")
@@ -728,7 +726,7 @@ fn report(
     nodes: &[Node],
     results: &BTreeMap<String, bool>,
     args: &ConfigureArgs,
-    dir: &NetworkDir,
+    manifest_path: &Path,
 ) -> anyhow::Result<()> {
     let rule = "=".repeat(80);
     println!("\n{rule}\nCOHORT CONFIGURED\n{rule}");
@@ -764,13 +762,14 @@ fn report(
     if !args.no_verify {
         // tdx-init takes one config POST per boot, so a node that took its
         // config and then failed its appraisal is re-appraised, not
-        // re-configured. Its full verifier reason was printed above.
+        // re-configured. Its full verifier reason was printed above. No
+        // --node here: the context (already in force for this run) supplies
+        // the node table to `node verify` too.
         println!(
             "A node that took its config but did not pass the appraisal is retried with `verify`, \
              not with a second `configure` (tdx-init takes one config POST per boot):\n    \
-             seismic-tee node verify --node {} --name <node> --manifest {}{}\n",
-            dir.nodes_file().display(),
-            args.manifest.display(),
+             seismic-tee node verify --name <node> --manifest {}{}\n",
+            manifest_path.display(),
             retry_flags(&args.policy_source, &args.verifier),
         );
     }
@@ -785,23 +784,30 @@ fn report(
 #[derive(Debug, Args)]
 pub struct ConfigureArgs {
     /// Name of the one genesis node (mints root_key locally), as keyed in the
-    /// descriptor map nodes/nodes.json beside --manifest. Exactly one node per
-    /// network is genesis; assigning it here (not a per-node flag) makes a
-    /// double-genesis split impossible.
+    /// cohort's node table. Exactly one node per network is genesis;
+    /// assigning it here (not a per-node flag) makes a double-genesis split
+    /// impossible.
     #[arg(long, value_name = "NAME")]
     pub genesis: String,
 
     /// Name of a joining node (fetches root_key from genesis via
     /// getWrappedRootKey). Repeatable. Default: every other node in the
-    /// descriptor map; name a subset to configure only those.
+    /// cohort's node table; name a subset to configure only those.
     #[arg(long, value_name = "NAME")]
     pub join: Option<Vec<String>>,
 
     /// Network manifest JSON (from `assemble`); → [network]. The network
-    /// directory is the one it sits in: the descriptor map, the harvest and
-    /// the genesis files it pins are read from there.
+    /// directory is the one it sits in: the harvest and the genesis files it
+    /// pins are read from there. Omit it to use the current context's
+    /// network.
     #[arg(long, value_name = "FILE")]
-    pub manifest: PathBuf,
+    pub manifest: Option<PathBuf>,
+
+    /// Cohort's node table: `pulumi stack output nodes --json`, i.e.
+    /// {<name>: {public_ip, fqdn}, …}. Omit it to use the current context's
+    /// network.
+    #[arg(long, value_name = "FILE")]
+    pub nodes: Option<PathBuf>,
 
     /// reth genesis JSON POSTed to every node; → [network].reth_genesis_base64.
     /// Default: reth-genesis.json beside --manifest (the artifact-set layout).
@@ -830,23 +836,27 @@ pub struct ConfigureArgs {
 
     #[command(flatten)]
     pub verifier: VerifierArgs,
+
+    #[command(flatten)]
+    pub context: ContextArgs,
 }
 
 pub async fn run(args: ConfigureArgs) -> anyhow::Result<ExitCode> {
     check_policy_source_files(&args.policy_source, args.no_verify)?;
     // Validate the shared network artifacts once, so a bad one fails fast
     // here rather than as N identical per-node errors mid-dashboard.
-    let manifest = seismic_tee_node::load_manifest(&args.manifest)?;
+    let manifest_path = resolve_manifest(args.manifest.as_deref(), &args.context)?;
+    let manifest = load_manifest(&manifest_path)?;
     let reth_genesis = Artifact::read(&resolve_reth_genesis(
         args.reth_genesis.as_deref(),
-        &args.manifest,
+        &manifest_path,
     )?)?;
     manifest
         .check_reth_genesis(reth_genesis.bytes())
         .with_context(|| format!("--reth-genesis {}", reth_genesis.path().display()))?;
     let committed = Artifact::read(&resolve_summit_genesis(
         args.summit_genesis.as_deref(),
-        &args.manifest,
+        &manifest_path,
     )?)?;
     manifest
         .check_summit_genesis(committed.bytes())
@@ -863,7 +873,7 @@ pub async fn run(args: ConfigureArgs) -> anyhow::Result<ExitCode> {
         );
         None
     } else {
-        let policy = resolve_policy(&args.policy_source, &args.manifest, &manifest, true)?;
+        let policy = resolve_policy(&args.policy_source, &manifest_path, &manifest, true)?;
         eprintln!("Appraising against {}", policy.source);
         Some(Appraisal {
             policy: policy.bytes,
@@ -872,10 +882,10 @@ pub async fn run(args: ConfigureArgs) -> anyhow::Result<ExitCode> {
     };
 
     // The founding inputs live beside the manifest (the network-directory
-    // layout): the harvest supplies each box's pinned keys, the descriptor map
-    // its current IP.
-    let dir = NetworkDir::of_manifest(&args.manifest);
-    let descriptors = load_descriptor_map(&dir)?;
+    // layout): the harvest supplies each box's pinned keys; the cohort's node
+    // table (the context's, or --nodes) supplies its current IP.
+    let dir = NetworkDir::of_manifest(&manifest_path);
+    let descriptors = load_nodes(args.nodes.as_deref(), &args.context, "--nodes")?;
     let (ip_by_node_pubkey, harvest_records) = load_founding_facts(&dir, &descriptors)?;
     let spliced = splice_validator_ips(committed.bytes(), &ip_by_node_pubkey)?;
     if spliced != committed.bytes() {
@@ -934,8 +944,8 @@ pub async fn run(args: ConfigureArgs) -> anyhow::Result<ExitCode> {
         client: http::client()?,
     });
 
-    // bootnodes.json lives beside the descriptor map — the founding enode set
-    // from a prior run.
+    // bootnodes.json lives under the network directory's nodes/ — the
+    // founding enode set from a prior run.
     let bootnodes_path = dir.bootnodes();
     let outcome = if bootnodes_path.exists() {
         // Re-configure: hand the full founding set to every node (a node
@@ -964,7 +974,7 @@ pub async fn run(args: ConfigureArgs) -> anyhow::Result<ExitCode> {
 
     // Refresh the founding set from every node's live enode (fresh each run).
     persist_founding_bootnodes(&nodes, &results, &bootnodes_path).await;
-    report(&nodes, &results, &args, &dir)?;
+    report(&nodes, &results, &args, &manifest_path)?;
 
     // Every node accepted its config — now assert the launch against what the
     // manifest pins (see `launch` for why both are load-bearing).

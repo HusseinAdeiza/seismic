@@ -4405,6 +4405,7 @@ dependencies = [
  "seismic-manifest",
  "seismic-measurement-admission",
  "seismic-tee-common",
+ "seismic-tee-context",
  "seismic-tee-node",
  "seismic-verify-quote",
  "serde",

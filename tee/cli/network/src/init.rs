@@ -21,6 +21,14 @@
 //! harvests the cohort before `assemble` derives the artifact set into the
 //! directory's top level — inputs and the committed artifacts live together,
 //! so the directory is the whole network.
+//!
+//! Creating a network selects it: once the scaffold is written, `init`
+//! registers `[networks.<name>] dir` in the context file and sets `current`
+//! to it, the way `kind create cluster` and `gcloud container clusters
+//! create` both set the current context on creation. Every founding command
+//! after this one can drop its `DIR` — the context supplies it — and
+//! `--name <node>` works against the cohort the moment `ctx set-nodes`
+//! imports it.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -32,6 +40,8 @@ use seismic_tee_common::NetworkDir;
 use seismic_tee_common::network_dir::{
     FOUNDERS_FILENAME, MEASUREMENTS_FILENAME, RETH_GENESIS_FILENAME, SUMMIT_GENESIS_FILENAME,
 };
+use seismic_tee_context::config::Network;
+use seismic_tee_context::{Context, ContextArgs, Selection, write};
 
 /// How long one input fetch may take.
 pub const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
@@ -295,6 +305,9 @@ pub struct InitArgs {
     /// is a new network identity).
     #[arg(long)]
     pub force: bool,
+
+    #[command(flatten)]
+    pub context: ContextArgs,
 }
 
 /// The directory as an absolute path, so every path a command prints is
@@ -336,6 +349,27 @@ pub async fn run(args: InitArgs) -> anyhow::Result<ExitCode> {
     for path in &written {
         eprintln!("wrote {}", path.display());
     }
+
+    // Creating a network selects it: the commands after this one can drop
+    // their DIR, and `node --name <x>` works against the cohort the moment
+    // its nodes are imported. A failed write is an error, not a warning —
+    // "wrote" and "registered" already printed above it would be false, and a
+    // half-done registration is worse than a loud one.
+    let context = Context::load(args.context.config.as_deref())?;
+    let config_path = context.path().to_path_buf();
+    write::set_network(&config_path, &name, &Network::of_dir(&root))?;
+    write::set_current(
+        &config_path,
+        &Selection {
+            network: name.clone(),
+            node: None,
+        },
+    )?;
+    eprintln!(
+        "registered and selected network {name} in {}",
+        config_path.display()
+    );
+
     let founders_hint = if args.founders > 0 {
         "update the placeholder addresses in"
     } else {
@@ -348,15 +382,13 @@ pub async fn run(args: InitArgs) -> anyhow::Result<ExitCode> {
          cohort with the Pulumi program in\n     tee/pulumi/seismic_node (in the deploy repo)\n     \
          (one stack per environment; author one `nodes` entry per\n      founding node and point \
          measurements_path at\n      {}\n      so a stale image pin is refused at preview — see\n      \
-         tee/docs/runbook-devnet.md),\n     then save its `nodes` output: pulumi stack output nodes \
-         --json\n     > {}\n  4. seismic-tee network harvest {}\n  5. seismic-tee network assemble {}",
+         tee/docs/runbook-devnet.md),\n     then import its `nodes` output:\n     pulumi stack \
+         output nodes --json | seismic-tee ctx set-nodes {name}\n  4. seismic-tee network \
+         harvest\n  5. seismic-tee network assemble",
         root.display(),
         dir.input_summit_genesis().display(),
         dir.founders().display(),
         dir.input_measurements().display(),
-        dir.nodes_file().display(),
-        root.display(),
-        root.display(),
     );
     Ok(ExitCode::SUCCESS)
 }
@@ -583,5 +615,100 @@ mod tests {
         );
         assert_eq!(network_name(Path::new("devnet-3")).unwrap(), "devnet-3");
         assert!(network_name(Path::new("/")).is_err());
+    }
+
+    fn init_args(loose: &Loose, name: Option<&str>, force: bool, config_path: PathBuf) -> InitArgs {
+        InitArgs {
+            dir: loose.out.root().to_path_buf(),
+            name: name.map(String::from),
+            reth_genesis: s(&loose.reth_genesis).to_string(),
+            measurements: s(&loose.measurements).to_string(),
+            summit_genesis: s(&loose.starter).to_string(),
+            founders: 0,
+            force,
+            context: ContextArgs {
+                context: None,
+                config: Some(config_path),
+            },
+        }
+    }
+
+    fn read_config(path: &Path) -> seismic_tee_context::config::Config {
+        toml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_run_registers_and_selects_the_network_and_a_forced_rerun_rewrites_it() {
+        let loose = loose();
+        let config_dir = tempfile::tempdir().unwrap();
+        let config_path = config_dir.path().join("config.toml");
+        let expected_dir = absolute(loose.out.root()).unwrap();
+
+        run(init_args(&loose, None, false, config_path.clone()))
+            .await
+            .unwrap();
+        let config = read_config(&config_path);
+        assert_eq!(config.current.as_deref(), Some("testnet-1"));
+        assert_eq!(
+            config.networks["testnet-1"].dir.as_deref(),
+            Some(expected_dir.as_path())
+        );
+
+        // A second run needs --force for the scaffold step, and rewrites the
+        // same registration.
+        run(init_args(&loose, None, true, config_path.clone()))
+            .await
+            .unwrap();
+        let config = read_config(&config_path);
+        assert_eq!(config.current.as_deref(), Some("testnet-1"));
+        assert_eq!(config.networks.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn name_registers_under_the_given_name_not_the_basename() {
+        let loose = loose();
+        let config_dir = tempfile::tempdir().unwrap();
+        let config_path = config_dir.path().join("config.toml");
+
+        run(init_args(
+            &loose,
+            Some("custom-name"),
+            false,
+            config_path.clone(),
+        ))
+        .await
+        .unwrap();
+        let config = read_config(&config_path);
+        assert_eq!(config.current.as_deref(), Some("custom-name"));
+        assert!(config.networks.contains_key("custom-name"));
+        assert!(!config.networks.contains_key("testnet-1"));
+    }
+
+    /// A registration failure is a hard error, not a warning: `init` already
+    /// printed that it wrote the scaffold, and a half-done registration would
+    /// be worse than a loud one.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn a_read_only_config_directory_fails_the_run() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let loose = loose();
+        let config_dir = tempfile::tempdir().unwrap();
+        let readonly = config_dir.path().join("ro");
+        std::fs::create_dir_all(&readonly).unwrap();
+        std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let config_path = readonly.join("config.toml");
+
+        let result = run(init_args(&loose, None, false, config_path)).await;
+
+        // Restore write permission so the tempdir can clean itself up,
+        // regardless of the assertion outcome.
+        std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        assert!(result.is_err());
+        assert!(
+            loose.out.input_reth_genesis().is_file(),
+            "the scaffold itself still wrote, even though registration failed"
+        );
     }
 }

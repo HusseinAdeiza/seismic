@@ -53,11 +53,13 @@ use clap::Args;
 use seismic_measurement_admission::promote_measurements;
 use seismic_tee_common::network_dir::INPUTS_DIRNAME;
 use seismic_tee_common::{Descriptors, NetworkDir, NodeDescriptor, http};
+use seismic_tee_context::load_nodes;
 use seismic_verify_quote::{HarvestRecord, SeismicMeasurementPolicy, verify_harvest};
 use serde_json::{Value, json};
 
+use crate::args::DirArgs;
 use crate::assemble::DEFAULT_ATTESTATION_TYPE;
-use crate::founding::{is_bare_hex, load_descriptor_map, load_founder_credentials};
+use crate::founding::{is_bare_hex, load_founder_credentials};
 use crate::init::absolute;
 
 /// Holder-readiness polling. The holder starts at network-online — well
@@ -409,13 +411,18 @@ pub fn check_founders(dir: &NetworkDir, cohort: &[String]) -> anyhow::Result<()>
 
 #[derive(Debug, Args)]
 pub struct HarvestArgs {
-    /// Network directory (from `init`): reads the cohort's descriptor map
-    /// nodes/nodes.json (the Pulumi stack's `nodes` output — every node in it
-    /// is harvested), the authored inputs/founder-withdrawal-credentials.json
-    /// and inputs/measurements.json, and writes the harvested facts to
-    /// inputs/harvest/.
-    #[arg(value_name = "DIR")]
-    pub dir: PathBuf,
+    /// Network directory (from `init`): reads the authored
+    /// inputs/founder-withdrawal-credentials.json and
+    /// inputs/measurements.json, and writes the harvested facts to
+    /// inputs/harvest/. Omit it to use the current context's network.
+    #[command(flatten)]
+    pub dir: DirArgs,
+
+    /// Cohort's node table: `pulumi stack output nodes --json`, i.e.
+    /// {<name>: {public_ip, fqdn}, …} — every node in it is harvested. Omit
+    /// it to use the current context's network.
+    #[arg(long, value_name = "FILE")]
+    pub nodes: Option<PathBuf>,
 
     /// Platform the policy promoted from inputs/measurements.json pins.
     #[arg(long, value_name = "TYPE", default_value = DEFAULT_ATTESTATION_TYPE)]
@@ -433,10 +440,11 @@ pub struct HarvestArgs {
 }
 
 pub async fn run(args: HarvestArgs) -> anyhow::Result<ExitCode> {
-    if !args.dir.is_dir() {
-        bail!("network directory not found: {}", args.dir.display());
+    let root = args.dir.load()?;
+    if !root.is_dir() {
+        bail!("network directory not found: {}", root.display());
     }
-    let dir = NetworkDir::new(absolute(&args.dir)?);
+    let dir = NetworkDir::new(absolute(&root)?);
     let measurements = dir.input_measurements();
     if !measurements.is_file() {
         bail!(
@@ -451,10 +459,10 @@ pub async fn run(args: HarvestArgs) -> anyhow::Result<ExitCode> {
             dir.founders().display()
         );
     }
-    // The cohort is the descriptor map, whole: its keys are the harvest's node
+    // The cohort is the node table, whole: its keys are the harvest's node
     // names (the inputs/harvest/ filenames, and the order the authored
     // withdrawal credentials pair against), unique by construction.
-    let descriptors = load_descriptor_map(&dir)?;
+    let descriptors = load_nodes(args.nodes.as_deref(), &args.dir.context, "--nodes")?;
     let targets = targets(&descriptors);
     let names: Vec<String> = targets.iter().map(|t| t.name.clone()).collect();
     check_founders(&dir, &names)?;

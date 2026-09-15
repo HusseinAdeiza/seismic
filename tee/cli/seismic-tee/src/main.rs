@@ -277,6 +277,8 @@ mod tests {
                 "--force",
             ],
             vec!["network", "harvest", "tee/networks/devnet-3"],
+            // resolved from the context
+            vec!["network", "harvest"],
             vec![
                 "network",
                 "harvest",
@@ -288,6 +290,8 @@ mod tests {
                 "--force",
             ],
             vec!["network", "assemble", "tee/networks/devnet-3"],
+            // resolved from the context
+            vec!["network", "assemble", "--force"],
             vec![
                 "network",
                 "assemble",
@@ -345,6 +349,8 @@ mod tests {
                 "--pccs-url",
                 "http://pccs",
             ],
+            // resolved from the context
+            vec!["network", "configure", "--genesis", "a"],
             // node
             vec![
                 "node",
@@ -445,6 +451,9 @@ mod tests {
             // the audit
             vec!["verify-founding", "tee/networks/devnet-3"],
             vec!["verify-founding", "n", "--record", "n-2"],
+            // resolved from the context
+            vec!["verify-founding"],
+            vec!["verify-founding", "--record", "n-2"],
         ] {
             let full: Vec<&str> = std::iter::once(BIN_NAME)
                 .chain(argv.iter().copied())

@@ -20,12 +20,12 @@
 //! with no per-node bookkeeping, so re-running it after any map edit (add,
 //! remove, re-image) cannot leave the file drifted from the stack.
 //!
-//! A network directory keeps it at `nodes/nodes.json` ([`NetworkDir::nodes_file`]);
-//! a bring-your-own-infra operator (Terraform, manual console, …) hand-writes
-//! a one-key map in the same shape: only `public_ip`/`fqdn` are read, and any
-//! extra keys are ignored.
-//!
-//! [`NetworkDir::nodes_file`]: crate::NetworkDir::nodes_file
+//! Each network's cohort lives in the context file's `[networks.<name>.nodes]`
+//! table, imported from this same JSON shape by `ctx set-nodes`; `--node
+//! FILE`/`--nodes FILE` still read one from disk directly, the way a script's
+//! complete record should. A bring-your-own-infra operator (Terraform, manual
+//! console, …) hand-writes a one-key map in the same shape: only
+//! `public_ip`/`fqdn` are read, and any extra keys are ignored.
 
 use std::collections::BTreeMap;
 use std::fmt::Display;

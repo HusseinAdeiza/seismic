@@ -13,6 +13,7 @@ authors.workspace = true
 # only a founder does. Declared ahead of their first callers because the edges
 # are the deliverable — see ../node/Cargo.toml.
 seismic-tee-common.workspace = true
+seismic-tee-context.workspace = true
 seismic-tee-node.workspace = true
 
 seismic-manifest.workspace = true

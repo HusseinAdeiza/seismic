@@ -35,9 +35,11 @@ use seismic_manifest::{
 use seismic_measurement_admission::promote_measurements;
 use seismic_tee_common::network_dir::INPUTS_DIRNAME;
 use seismic_tee_common::{Artifact, Manifest, NetworkDir};
+use seismic_tee_context::load_nodes;
 use seismic_verify_quote::{SeismicMeasurementPolicy, archive, verify_archived_harvest};
 use sha2::{Digest as _, Sha256};
 
+use crate::args::DirArgs;
 use crate::founding::{FoundingRecords, Validator, load_founding_set};
 use crate::gates::{
     ArtifactSet, compile, hex_0x, inject_registry_genesis_storage, run_validation_gates,
@@ -365,9 +367,16 @@ pub struct AssembleArgs {
     /// Network directory from `init`: reads its inputs/ (reth-genesis.json,
     /// summit-genesis.toml, measurements.json, the founder credentials and
     /// the harvest), takes the network name from its basename, and writes the
-    /// artifact set at the top level.
-    #[arg(value_name = "DIR")]
-    pub dir: PathBuf,
+    /// artifact set at the top level. Omit it to use the current context's
+    /// network.
+    #[command(flatten)]
+    pub dir: DirArgs,
+
+    /// Cohort's node table: `pulumi stack output nodes --json`, i.e.
+    /// {<name>: {public_ip, fqdn}, …} — supplies each founding validator's
+    /// IP. Omit it to use the current context's network.
+    #[arg(long, value_name = "FILE")]
+    pub nodes: Option<PathBuf>,
 
     /// Platform the policy promoted from inputs/measurements.json pins.
     #[arg(long, value_name = "TYPE", default_value = DEFAULT_ATTESTATION_TYPE)]
@@ -390,7 +399,7 @@ pub struct AssembleArgs {
 }
 
 pub async fn run(args: AssembleArgs) -> anyhow::Result<ExitCode> {
-    let root = absolute(&args.dir)?;
+    let root = absolute(&args.dir.load()?)?;
     let name = network_name(&root)?;
     let dir = NetworkDir::new(&root);
 
@@ -413,7 +422,8 @@ pub async fn run(args: AssembleArgs) -> anyhow::Result<ExitCode> {
     }
     let [reth_genesis, summit_genesis, measurements] = inputs;
 
-    let founding = load_founding_set(&dir)?;
+    let descriptors = load_nodes(args.nodes.as_deref(), &args.dir.context, "--nodes")?;
+    let founding = load_founding_set(&dir, &descriptors)?;
     eprintln!(
         "founding set: {} validator(s) from {}",
         founding.validators.len(),
@@ -908,7 +918,7 @@ pub(crate) mod tests {
         assert_eq!(args.attestation_type, DEFAULT_ATTESTATION_TYPE);
         assert!(!args.force);
         assert_eq!(args.derivations.reth_bin, "seismic-reth");
-        assert_eq!(args.dir, Path::new("/nets/x"));
+        assert_eq!(args.dir.dir.as_deref(), Some(Path::new("/nets/x")));
     }
 
     impl AssembleArgs {

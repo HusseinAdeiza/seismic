@@ -31,7 +31,9 @@ pub mod write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, bail};
-use seismic_tee_common::{Descriptors, NetworkDir, NodeDescriptor, select_descriptor};
+use seismic_tee_common::{
+    Descriptors, NetworkDir, NodeDescriptor, load_descriptors, select_descriptor,
+};
 
 pub use args::ContextArgs;
 use config::{Config, Network, Shape};
@@ -243,6 +245,37 @@ pub fn echo(selection: &Selection, resolved: &dyn std::fmt::Display) {
     eprintln!("context {selection} → {resolved}");
 }
 
+/// A cohort's node table: `flag` when given, else the selected network's.
+///
+/// The shared resolution behind every founder command that needs a whole
+/// cohort rather than one node — `harvest`, `network configure` — each with
+/// its own escape-hatch flag (`--nodes FILE`, the `pulumi stack output nodes
+/// --json` shape); `flag_name` is spelled into the "no context selected"
+/// error, naming the one flag this particular caller actually has.
+pub fn load_nodes(
+    flag: Option<&Path>,
+    args: &ContextArgs,
+    flag_name: &str,
+) -> anyhow::Result<Descriptors> {
+    if let Some(path) = flag {
+        if !path.is_file() {
+            bail!("{flag_name} descriptor file not found: {}", path.display());
+        }
+        return Ok(load_descriptors(path)?);
+    }
+    let context = Context::load(args.config.as_deref())?;
+    if args.context.is_none() && context.config().current.is_none() {
+        bail!(
+            "no context selected — pass {flag_name}, or run `seismic-tee ctx use \
+             <network>/<node>`"
+        );
+    }
+    let selected = context.select(args.context.as_deref())?;
+    let nodes = selected.nodes()?;
+    echo(&selected.selection, &format!("{} node(s)", nodes.len()));
+    Ok(nodes.clone())
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -447,5 +480,84 @@ mod tests {
         let err = selected.manifest().unwrap_err().to_string();
         assert!(err.contains("has no manifest"), "{err}");
         assert!(err.contains("--manifest"), "{err}");
+    }
+
+    const TWO_NODE_CONFIG: &str = r#"
+current = "devnet-1"
+
+[networks.devnet-1]
+dir = "/x"
+
+[networks.devnet-1.nodes]
+alpha = { public_ip = "203.0.113.7", fqdn = "alpha.example.com" }
+beta = { public_ip = "203.0.113.8", fqdn = "beta.example.com" }
+"#;
+
+    #[test]
+    fn load_nodes_the_flag_wins_and_the_context_is_not_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let nodes_path = dir.path().join("nodes.json");
+        std::fs::write(
+            &nodes_path,
+            r#"{"solo": {"public_ip": "203.0.113.9", "fqdn": "solo.example.com"}}"#,
+        )
+        .unwrap();
+        // A config path that would resolve a different cohort if read.
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(&config_path, TWO_NODE_CONFIG).unwrap();
+
+        let args = ContextArgs {
+            context: None,
+            config: Some(config_path),
+        };
+        let nodes = load_nodes(Some(&nodes_path), &args, "--nodes").unwrap();
+        assert_eq!(nodes.keys().collect::<Vec<_>>(), ["solo"]);
+    }
+
+    #[test]
+    fn load_nodes_with_no_flag_reads_the_selected_networks_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(&config_path, TWO_NODE_CONFIG).unwrap();
+
+        let args = ContextArgs {
+            context: None,
+            config: Some(config_path),
+        };
+        let nodes = load_nodes(None, &args, "--nodes").unwrap();
+        assert_eq!(nodes.keys().collect::<Vec<_>>(), ["alpha", "beta"]);
+    }
+
+    #[test]
+    fn load_nodes_on_an_empty_table_names_ctx_set_nodes() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            "current = \"devnet-1\"\n\n[networks.devnet-1]\ndir = \"/x\"\n",
+        )
+        .unwrap();
+
+        let args = ContextArgs {
+            context: None,
+            config: Some(config_path),
+        };
+        let err = load_nodes(None, &args, "--nodes").unwrap_err().to_string();
+        assert!(err.contains("ctx set-nodes devnet-1"), "{err}");
+    }
+
+    #[test]
+    fn load_nodes_with_no_context_names_the_flag_it_was_given() {
+        let dir = tempfile::tempdir().unwrap();
+        // A config path that names no file: an empty config, no `current`.
+        let config_path = dir.path().join("config.toml");
+
+        let args = ContextArgs {
+            context: None,
+            config: Some(config_path),
+        };
+        let err = load_nodes(None, &args, "--nodes").unwrap_err().to_string();
+        assert!(err.contains("--nodes"), "{err}");
+        assert!(err.contains("ctx use"), "{err}");
     }
 }

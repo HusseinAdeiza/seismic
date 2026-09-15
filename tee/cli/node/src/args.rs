@@ -18,10 +18,9 @@ use seismic_tee_context::{Context, ContextArgs, Selection, echo};
 #[derive(Debug, Clone, Args)]
 pub struct NodeArgs {
     /// Descriptor map JSON: `pulumi stack output nodes --json`, i.e.
-    /// {<name>: {public_ip, fqdn}, …} (a network directory keeps it at
-    /// nodes/nodes.json). Provides the node's public_ip/fqdn. With one entry
-    /// it is the node; with several, --name says which. Omit it to use the
-    /// current context (`seismic-tee ctx use`).
+    /// {<name>: {public_ip, fqdn}, …}. Provides the node's public_ip/fqdn.
+    /// With one entry it is the node; with several, --name says which. Omit
+    /// it to use the current context (`seismic-tee ctx use`).
     #[arg(long, value_name = "FILE")]
     pub node: Option<PathBuf>,
 
