@@ -217,8 +217,7 @@ pub fn render_config(config: &InitConfig) -> anyhow::Result<String> {
 
 /// Where the rendered config is recorded: `--dump-config`, or the network
 /// directory's `nodes/<name>.init-config.toml` beside `--manifest` — the tier
-/// that already holds the descriptor map and bootnode set, per-deploy output
-/// like this.
+/// that holds the bootnode set, per-deploy output like this.
 pub fn resolve_record_path(flag: Option<&Path>, manifest_path: &Path, name: &str) -> PathBuf {
     flag.map_or_else(
         || NetworkDir::of_manifest(manifest_path).init_config(name),

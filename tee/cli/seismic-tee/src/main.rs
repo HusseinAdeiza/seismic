@@ -248,6 +248,21 @@ mod tests {
     #[test]
     fn the_documented_invocations_parse() {
         for argv in [
+            // ctx
+            vec!["ctx", "list"],
+            vec!["ctx", "unset"],
+            vec!["ctx", "set-nodes", "devnet-1"],
+            vec!["ctx", "use", "devnet-1/alpha"],
+            vec!["ctx", "env"],
+            vec!["ctx", "env", "--unset"],
+            vec!["ctx", "exec", "--", "scast", "block-number"],
+            vec![
+                "ctx",
+                "set-network",
+                "my-node",
+                "--manifest",
+                "./network-manifest.json",
+            ],
             // network
             vec![
                 "network",
@@ -291,6 +306,7 @@ mod tests {
             ],
             vec!["network", "assemble", "tee/networks/devnet-3"],
             // resolved from the context
+            vec!["network", "assemble"],
             vec!["network", "assemble", "--force"],
             vec![
                 "network",
@@ -307,6 +323,8 @@ mod tests {
                 "/x/summit",
             ],
             vec!["network", "validate", "tee/networks/devnet-3"],
+            // resolved from the context
+            vec!["network", "validate"],
             vec![
                 "network",
                 "validate",
@@ -427,6 +445,20 @@ mod tests {
                 "enode://ab@1.2.3.4:30303",
                 "--yes",
                 "alpha",
+            ],
+            vec![
+                "node",
+                "configure",
+                "--bootnode",
+                "enode://ab@1.2.3.4:30303",
+            ],
+            vec![
+                "node",
+                "configure",
+                "--name",
+                "dev-2",
+                "--bootnode",
+                "enode://ab@1.2.3.4:30303",
             ],
             // admission
             vec![

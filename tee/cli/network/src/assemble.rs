@@ -357,7 +357,7 @@ pub fn verify_harvest_records(
                  ({drift}); the verdict is this build's, not the founding's own"
             );
         }
-        eprintln!("{name}: archived founding quote verified");
+        eprintln!("{name}: founding quote re-verified from its archive");
     }
     Ok(())
 }

@@ -34,11 +34,11 @@ tee/networks/<name>/
 │                                   trust anchors it judged with — so the
 │                                   quote stays verifiable once Intel's live
 │                                   collateral ages past it
-├── nodes/                        runtime infra state (gitignored)
-│   ├── nodes.json                  the cohort's descriptor map: the Pulumi
-│   │                               stack's `nodes` output, saved as-is
-│   │                               (node name → live IP + fqdn)
-│   └── bootnodes.json              founding enode set from `configure`
+├── nodes/                        the records `configure` writes as it runs
+│   │                               (gitignored: per-deploy output, not identity)
+│   ├── bootnodes.json              founding enode set from `configure`
+│   └── <node>.init-config.toml     the config `configure` POSTed to that
+│                                   node, byte-exact
 │
 │                                 artifact set: derived by `assemble`, every
 │                                 file below hash-pinned by the manifest
@@ -68,8 +68,12 @@ manifest, and how the boot chain is sequenced to allow it — is
 Directories are committed because the directory is everything needed to
 (re)configure, join, or debug that network later, and its manifest is the
 network's immutable identity — a founded network's `network_id` must
-never drift. The `nodes/` map is runtime output (live IPs) and stays
-gitignored.
+never drift. The cohort's addresses (live IPs) are not part of that
+identity, so they don't live in the directory at all: `seismic-tee ctx
+set-nodes <network>` imports them straight from the Pulumi stack's
+`nodes` output into the context file (see the tee README's "The context
+file"). `nodes/` keeps only the records `configure` writes as it runs,
+which is why it stays gitignored.
 
 Throwaway foundings go in a `tmp-*` directory instead — those are
 gitignored wholesale, so a scratch cohort can be founded, torn down, and

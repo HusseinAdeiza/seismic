@@ -9,7 +9,10 @@
 //!
 //! This crate depends on neither side, so nothing founder-only belongs in it:
 //! the node crate must stay buildable without a single founder-only
-//! dependency, whichever binary mounts it.
+//! dependency, whichever binary mounts it. `seismic-tee-context` is a peer
+//! rather than a dependent here: it depends on this crate (for the
+//! descriptor type and the network-directory layout it resolves a selection
+//! to), but nothing in this crate depends on it.
 
 pub mod artifact;
 pub mod descriptor;
