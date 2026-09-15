@@ -4341,6 +4341,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "seismic-tee-admission",
+ "seismic-tee-context",
  "seismic-tee-network",
  "seismic-tee-node",
  "tokio",

@@ -11,7 +11,7 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use anyhow::bail;
+use anyhow::{Context as _, bail};
 
 pub const CONFIG_DIRNAME: &str = "seismic";
 pub const CONFIG_FILENAME: &str = "config.toml";
@@ -37,6 +37,33 @@ fn resolve(xdg: Option<OsString>, home: Option<OsString>) -> anyhow::Result<Path
         },
     };
     Ok(base.join(CONFIG_DIRNAME).join(CONFIG_FILENAME))
+}
+
+/// `path` made absolute against the current directory, with `.` and `..`
+/// collapsed lexically.
+///
+/// For a path that is about to be stored in the context file: the file is
+/// read from whatever directory the next command runs in, so a relative path
+/// would point nowhere, and `cli/../networks/x` is nobody's idea of a name.
+/// Lexical, not [`std::fs::canonicalize`]: the target need not exist yet
+/// and a symlink stays a symlink, so the stored path is the one the operator
+/// typed, just spelled from the root.
+pub fn absolute(path: &Path) -> anyhow::Result<PathBuf> {
+    use std::path::Component;
+
+    let path = std::path::absolute(path)
+        .with_context(|| format!("resolving {} against the current directory", path.display()))?;
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    Ok(out)
 }
 
 /// Expand a leading `~` against `HOME`.
@@ -65,6 +92,18 @@ fn expand(path: &Path, home: Option<OsString>) -> anyhow::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn absolute_collapses_dot_and_dotdot() {
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(
+            absolute(Path::new("/a/b/../c/./d")).unwrap(),
+            Path::new("/a/c/d")
+        );
+        assert_eq!(absolute(Path::new("/..")).unwrap(), Path::new("/"));
+        assert_eq!(absolute(Path::new("./x/../y")).unwrap(), cwd.join("y"),);
+        assert!(absolute(Path::new("x")).unwrap().is_absolute());
+    }
 
     fn os(s: &str) -> OsString {
         OsString::from(s)

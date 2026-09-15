@@ -21,6 +21,7 @@
 //! operator or founder side — may read it.
 
 pub mod args;
+pub mod cmd;
 pub mod config;
 pub mod path;
 pub mod write;

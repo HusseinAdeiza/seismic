@@ -6,6 +6,8 @@
 //! whose table names who takes each trust-sensitive action in a network's
 //! life:
 //!
+//! - `ctx` — anyone: name a network and select which one — and which of its
+//!   nodes — is current ([`seismic_tee_context::cmd`]).
 //! - `network` — the genesis deployer: found a network. The party's anchor is
 //!   its own verification at assemble, which is what these commands
 //!   implement ([`seismic_tee_network`]).
@@ -36,6 +38,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use seismic_tee_admission::AdmissionCommand;
+use seismic_tee_context::cmd::CtxCommand;
 use seismic_tee_network::NetworkCommand;
 use seismic_tee_network::verify_founding::VerifyFoundingArgs;
 use seismic_tee_node::NodeCommand;
@@ -66,6 +69,11 @@ struct Cli {
 /// party it is for, so the listing doubles as a who-runs-what.
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Anyone: select the network and node the other commands act on.
+    Ctx {
+        #[command(subcommand)]
+        command: CtxCommand,
+    },
     /// Network founder: scaffold a network's inputs, harvest a cohort's
     /// founding keys, assemble its identity, configure the cohort.
     #[command(
@@ -130,6 +138,7 @@ fn main() -> ExitCode {
     };
     let result = runtime.block_on(async {
         match cli.command {
+            Command::Ctx { command } => seismic_tee_context::cmd::run(command),
             Command::Network { command } => seismic_tee_network::run(command).await,
             Command::Node { command } => seismic_tee_node::run(command).await,
             Command::Admission { command } => seismic_tee_admission::run(command),
@@ -182,9 +191,13 @@ mod tests {
         let cli = Cli::command();
         assert_eq!(
             subcommand_names(&cli),
-            ["network", "node", "admission", "verify-founding"]
+            ["ctx", "network", "node", "admission", "verify-founding"]
         );
         let group = |name: &str| subcommand_names(cli.find_subcommand(name).unwrap());
+        assert_eq!(
+            group("ctx"),
+            ["use", "list", "show", "set-network", "set-nodes", "unset"]
+        );
         assert_eq!(
             group("network"),
             ["init", "harvest", "assemble", "validate", "configure"]

@@ -12,6 +12,7 @@ authors.workspace = true
 # groups' code lives in the libraries, whose one-way dependency rule
 # (../Cargo.toml) a binary that links them all leaves untouched.
 seismic-tee-admission.workspace = true
+seismic-tee-context.workspace = true
 seismic-tee-network.workspace = true
 seismic-tee-node.workspace = true
 
