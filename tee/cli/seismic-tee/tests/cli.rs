@@ -1,5 +1,6 @@
 #![cfg(unix)]
-//! Black-box tests of the targeting verbs.
+//! Black-box tests of the targeting verbs, and of a `node` command's echo
+//! when it resolves its target from the context.
 //!
 //! `env` and `exec` are defined by what crosses the process boundary — the
 //! bytes on stdout, the variables a child sees, the exit code that comes
@@ -9,11 +10,19 @@
 //! carrying its own `config.toml`, and a scratch `PATH` holding one
 //! executable stand-in: a `scast` shell script that appends its argv and
 //! `$ETH_RPC_URL` and `$SEISMIC_CONTEXT` to `$SEISMIC_TEST_LOG` and exits 7.
+//!
+//! The same reasoning makes `node status`'s echo a subprocess test too: the
+//! echo goes to the real stderr and the status to the real stdout, and only
+//! a spawned child separates the two streams the way `Command::output` does.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::PathBuf;
 use std::process::Command;
+
+use seismic_tee_common::http::ATTESTATION_RPC_PORT;
+use seismic_tee_common::test_support::{FakeServer, rpc_result};
+use serde_json::json;
 
 /// `devnet-1/alpha` current, a two-node table.
 const TWO_NODE_CONFIG: &str = r#"
@@ -38,6 +47,33 @@ dir = "/x"
 [networks.devnet-1.nodes]
 alpha = { public_ip = "203.0.113.7", fqdn = "alpha.example.com" }
 beta = { public_ip = "203.0.113.8", fqdn = "beta.example.com" }
+"#;
+
+/// A network-only selection over a two-node cohort: `--name` supplies the
+/// key the selection lacks, so the echo has a node to name that `current`
+/// alone does not give it.
+const NETWORK_ONLY_LOOPBACK_CONFIG: &str = r#"
+current = "devnet-1"
+
+[networks.devnet-1]
+dir = "/x"
+
+[networks.devnet-1.nodes]
+alpha = { public_ip = "127.0.0.1", fqdn = "alpha.example.com" }
+beta = { public_ip = "203.0.113.8", fqdn = "beta.example.com" }
+"#;
+
+/// `devnet-1/alpha` current, one node whose `public_ip` is loopback — so a
+/// command that reaches it (rather than one that only prints its URL, like
+/// `ctx env`) has something real on the other end.
+const LOOPBACK_NODE_CONFIG: &str = r#"
+current = "devnet-1/alpha"
+
+[networks.devnet-1]
+dir = "/x"
+
+[networks.devnet-1.nodes]
+alpha = { public_ip = "127.0.0.1", fqdn = "alpha.example.com" }
 "#;
 
 /// A tempdir standing in for the operator's whole environment: its own
@@ -233,5 +269,64 @@ fn a_network_only_context_needs_name() {
     assert!(
         stdout.contains("export SEISMIC_CONTEXT='devnet-1/alpha'"),
         "{stdout}"
+    );
+}
+
+/// `node status`, resolved from the context with no `--node`: the target is
+/// echoed to stderr before the node is reached, and the status the node
+/// reports lands on stdout — the same separation `ctx env` depends on, now
+/// checked for a `node` command.
+///
+/// Both selection shapes are exercised here rather than in a test apiece:
+/// `NodeDescriptor::attestation_rpc_url` fixes the port at `:7878` — it is
+/// not a parameter the way `FakeServer::serve`'s is — so a second test
+/// reaching a node would race this one's server across nextest's parallel
+/// processes. One server, one process, two queued responses is deterministic
+/// instead.
+#[test]
+fn node_status_echoes_the_resolved_node_on_stderr_and_the_status_on_stdout() {
+    let _server = FakeServer::serve_at(
+        ATTESTATION_RPC_PORT,
+        vec![
+            (200, rpc_result(json!({"state": "idle"}))),
+            (200, rpc_result(json!({"state": "idle"}))),
+        ],
+    );
+
+    // A selection that already names its node.
+    let sandbox = Sandbox::new(LOOPBACK_NODE_CONFIG);
+    let output = sandbox
+        .command()
+        .args(["node", "status", "--once"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("\"state\":\"idle\""), "{stdout}");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    // NodeArgs::load echoes the node's public RPC URL — the same value every
+    // context-resolved `node` command echoes, regardless of which endpoint
+    // that particular command goes on to call.
+    assert!(
+        stderr.contains("context devnet-1/alpha → https://alpha.example.com/rpc"),
+        "{stderr}"
+    );
+
+    // A network-only selection, with --name supplying the node: the echo
+    // names the node it resolved to, not merely the network the selection
+    // spelled, so what the command acts on is what it says it acts on.
+    let sandbox = Sandbox::new(NETWORK_ONLY_LOOPBACK_CONFIG);
+    let output = sandbox
+        .command()
+        .args(["node", "status", "--once", "--name", "alpha"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{output:?}");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("context devnet-1/alpha → https://alpha.example.com/rpc"),
+        "{stderr}"
     );
 }

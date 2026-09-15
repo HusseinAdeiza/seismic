@@ -13,6 +13,7 @@ authors.workspace = true
 # workspace. Where the seam runs is this file's decision, not that of whichever
 # command first needs it.
 seismic-tee-common.workspace = true
+seismic-tee-context.workspace = true
 
 # The enclave libraries an operator's commands are built on. `configure`
 # constructs the config POST as the type tdx-init deserializes it; `verify`

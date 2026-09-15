@@ -20,6 +20,10 @@ clap.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
+# The fake server this crate's black-box tests bind a node's attestation RPC
+# to, so a status command reaching a real port has something real to reach.
+seismic-tee-common = { workspace = true, features = ["test-support"] }
+serde_json.workspace = true
 tempfile.workspace = true
 
 [[bin]]

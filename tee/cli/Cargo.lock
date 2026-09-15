@@ -4341,9 +4341,11 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "seismic-tee-admission",
+ "seismic-tee-common",
  "seismic-tee-context",
  "seismic-tee-network",
  "seismic-tee-node",
+ "serde_json",
  "tempfile",
  "tokio",
 ]
@@ -4427,6 +4429,7 @@ dependencies = [
  "rustls",
  "seismic-measurement-admission",
  "seismic-tee-common",
+ "seismic-tee-context",
  "seismic-verify-quote",
  "serde",
  "serde_json",

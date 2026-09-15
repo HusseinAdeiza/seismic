@@ -303,9 +303,10 @@ pub struct VerifyArgs {
     /// Network manifest JSON the node is expected to have booted with (the one
     /// delivered by `configure`). Its exact bytes are the network identity
     /// the quote's binding commits to, and it pins the measurement policy the
-    /// quote is checked against.
+    /// quote is checked against. Omit it to use the current context's
+    /// network.
     #[arg(long, value_name = "FILE")]
-    pub manifest: PathBuf,
+    pub manifest: Option<PathBuf>,
 
     #[command(flatten)]
     pub policy_source: PolicySourceArgs,
@@ -317,9 +318,10 @@ pub struct VerifyArgs {
 pub async fn run(args: VerifyArgs) -> anyhow::Result<ExitCode> {
     let (_, descriptor) = args.node.load()?;
     check_policy_source_files(&args.policy_source, false)?;
-    let manifest = crate::load_manifest(&args.manifest)?;
+    let manifest_path = crate::resolve_manifest(args.manifest.as_deref(), &args.node.context)?;
+    let manifest = crate::load_manifest(&manifest_path)?;
 
-    let policy = resolve_policy(&args.policy_source, &args.manifest, &manifest, false)?;
+    let policy = resolve_policy(&args.policy_source, &manifest_path, &manifest, false)?;
     eprintln!("Appraising against {}", policy.source);
     verify_deployment(
         &descriptor,

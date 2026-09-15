@@ -338,22 +338,31 @@ pub fn render_preview(preview: &Preview<'_>) -> String {
     out
 }
 
-/// The gate before the one irreversible step. `yes` is `--yes` and sends
-/// without asking; otherwise a terminal is asked and anything but `y`/`yes`
-/// declines, and no terminal is an error — a script that means it says so
-/// with the flag, rather than a redirected stdin deciding silently.
+/// The gate before the one irreversible step. `yes` is `--yes <NAME>`, and
+/// sends without asking only when `NAME` names the node this run resolved to
+/// — a mismatch is refused rather than silently redirected at the wrong box,
+/// which is what makes `--yes` safe to leave in a script alongside an
+/// implicit (context-resolved) target. Otherwise a terminal is asked and
+/// anything but `y`/`yes` declines, and no terminal is an error — a script
+/// that means it says so with the flag, rather than a redirected stdin
+/// deciding silently.
 pub fn confirm_post(
-    yes: bool,
+    yes: Option<&str>,
+    node: &str,
     interactive: bool,
     input: &mut impl BufRead,
 ) -> anyhow::Result<bool> {
-    if yes {
-        return Ok(true);
+    match yes {
+        Some(named) if named == node => return Ok(true),
+        Some(named) => bail!(
+            "--yes {named} does not name the node this resolved to ({node}); nothing was sent"
+        ),
+        None => {}
     }
     if !interactive {
         bail!(
-            "stdin is not a terminal, so nobody is here to confirm the POST; pass --yes to send \
-             it unattended"
+            "stdin is not a terminal, so nobody is here to confirm the POST; pass --yes <NAME> \
+             naming the node to send it unattended"
         );
     }
     eprint!("POST this config? [y/N] ");
@@ -468,9 +477,10 @@ pub struct ConfigureArgs {
 
     /// Network manifest JSON (from `seismic-tee network assemble`). Merged
     /// into the POSTed config as [network].manifest_base64; shared across
-    /// every node, so it lives outside the per-node flags.
+    /// every node, so it lives outside the per-node flags. Omit it to use
+    /// the current context's network.
     #[arg(long, value_name = "FILE")]
-    pub manifest: PathBuf,
+    pub manifest: Option<PathBuf>,
 
     /// reth genesis JSON POSTed to the node as [network].reth_genesis_base64;
     /// tdx-init writes it to /run/seismic/conf/reth-genesis.json for reth's
@@ -510,11 +520,13 @@ pub struct ConfigureArgs {
     #[arg(long)]
     pub no_verify: bool,
 
-    /// Send the config without asking. Without it, configure shows what it is
-    /// about to POST and waits for a `y` on the terminal; with no terminal (a
-    /// script, CI) it refuses to send unless this is passed.
-    #[arg(long, short = 'y')]
-    pub yes: bool,
+    /// Send the config without asking. Takes the node's name: you name the
+    /// box you meant, so a stale context fails loudly instead of configuring
+    /// the wrong one. Without it, configure shows what it is about to POST
+    /// and waits for a `y` on the terminal; with no terminal (a script, CI)
+    /// it refuses to send unless this is passed.
+    #[arg(long, short = 'y', value_name = "NAME")]
+    pub yes: Option<String>,
 
     /// Where to write the rendered TOML, byte-exact as POSTed. Default:
     /// nodes/<name>.init-config.toml beside --manifest (the network
@@ -533,7 +545,8 @@ pub struct ConfigureArgs {
 pub async fn run(args: ConfigureArgs) -> anyhow::Result<ExitCode> {
     let (name, descriptor) = args.node.load()?;
     verify::check_policy_source_files(&args.policy_source, args.no_verify)?;
-    let manifest = crate::load_manifest(&args.manifest)?;
+    let manifest_path = crate::resolve_manifest(args.manifest.as_deref(), &args.node.context)?;
+    let manifest = crate::load_manifest(&manifest_path)?;
     let NodeDescriptor { fqdn, public_ip } = &descriptor;
 
     // Resolve the policy before the node is touched: a policy the manifest
@@ -548,7 +561,7 @@ pub async fn run(args: ConfigureArgs) -> anyhow::Result<ExitCode> {
     } else {
         Some(verify::resolve_policy(
             &args.policy_source,
-            &args.manifest,
+            &manifest_path,
             &manifest,
             true,
         )?)
@@ -558,11 +571,11 @@ pub async fn run(args: ConfigureArgs) -> anyhow::Result<ExitCode> {
     // (a genesis that isn't the manifest's, a missing bootnode) fails fast.
     let reth_genesis = Artifact::read(&resolve_reth_genesis(
         args.reth_genesis.as_deref(),
-        &args.manifest,
+        &manifest_path,
     )?)?;
     let summit_genesis = Artifact::read(&resolve_summit_genesis(
         args.summit_genesis.as_deref(),
-        &args.manifest,
+        &manifest_path,
     )?)?;
     let inputs = ConfigInputs {
         manifest: &manifest,
@@ -579,7 +592,7 @@ pub async fn run(args: ConfigureArgs) -> anyhow::Result<ExitCode> {
     // The record first: what is about to be sent exists on disk before
     // anything is sent, and the preview names it so it can be opened while
     // deciding.
-    let record = resolve_record_path(args.dump_config.as_deref(), &args.manifest, &name);
+    let record = resolve_record_path(args.dump_config.as_deref(), &manifest_path, &name);
     write_record(&record, &render_config(&config)?)?;
 
     let post_url = descriptor.tdx_init_url();
@@ -587,7 +600,7 @@ pub async fn run(args: ConfigureArgs) -> anyhow::Result<ExitCode> {
         "{}",
         render_preview(&Preview {
             name: &name,
-            manifest_path: &args.manifest,
+            manifest_path: &manifest_path,
             inputs: &inputs,
             policy: policy.as_ref().map(|p| p.source.as_str()),
             record: &record,
@@ -597,7 +610,12 @@ pub async fn run(args: ConfigureArgs) -> anyhow::Result<ExitCode> {
     // Blocking read on the runtime's main task: nothing else is in flight
     // until the operator answers.
     let stdin = std::io::stdin();
-    if !confirm_post(args.yes, stdin.is_terminal(), &mut stdin.lock())? {
+    if !confirm_post(
+        args.yes.as_deref(),
+        &name,
+        stdin.is_terminal(),
+        &mut stdin.lock(),
+    )? {
         eprintln!(
             "Nothing was sent. The rendered config is at {}.",
             record.display()
@@ -636,7 +654,7 @@ pub async fn run(args: ConfigureArgs) -> anyhow::Result<ExitCode> {
             "deploy verification skipped: the node was not confirmed ready. Once it is up, \
              run:\n    seismic-tee node verify{} --manifest {}{}",
             args.node.as_flags(),
-            args.manifest.display(),
+            manifest_path.display(),
             verify::retry_flags(&args.policy_source, &args.verifier),
         );
     };
@@ -675,7 +693,7 @@ pub async fn run(args: ConfigureArgs) -> anyhow::Result<ExitCode> {
                     "\nInterrupted during deploy verification — the config is delivered. \
                      Appraise the node with:\n    seismic-tee node verify{} --manifest {}{}",
                     args.node.as_flags(),
-                    args.manifest.display(),
+                    manifest_path.display(),
                     verify::retry_flags(&args.policy_source, &args.verifier),
                 );
                 return Ok(ExitCode::from(130));
@@ -1021,7 +1039,7 @@ mod tests {
         assert_eq!(probe.bootnode.len(), 2);
         assert_eq!(probe.email, DEFAULT_EMAIL);
         assert!(!probe.no_verify);
-        assert!(!probe.yes, "the gate is on unless asked off");
+        assert_eq!(probe.yes, None, "the gate is on unless asked off");
         assert_eq!(probe.dump_config, None);
         assert_eq!(probe.reth_genesis, None);
         assert_eq!(
@@ -1093,18 +1111,26 @@ mod tests {
         assert!(unappraised.contains("--no-verify"), "{unappraised}");
     }
 
-    /// `--yes` sends without reading; a terminal is asked and only y/yes
-    /// sends; no terminal and no `--yes` is a refusal that names the flag.
+    /// A `--yes` naming the resolved node sends without reading; one naming
+    /// something else is refused, naming both; a terminal is asked and only
+    /// y/yes sends; no terminal and no `--yes` is a refusal that names the
+    /// flag's new shape.
     #[test]
     fn confirm_post_gates_the_post() {
         let mut empty = std::io::Cursor::new(b"".to_vec());
-        assert!(confirm_post(true, false, &mut empty).unwrap());
-        assert!(confirm_post(true, true, &mut empty).unwrap());
+        assert!(confirm_post(Some("dev-2"), "dev-2", false, &mut empty).unwrap());
+        assert!(confirm_post(Some("dev-2"), "dev-2", true, &mut empty).unwrap());
 
-        let error = confirm_post(false, false, &mut empty)
+        let error = confirm_post(Some("wrong-name"), "dev-2", false, &mut empty)
             .unwrap_err()
             .to_string();
-        assert!(error.contains("--yes"), "{error}");
+        assert!(error.contains("--yes wrong-name"), "{error}");
+        assert!(error.contains("dev-2"), "{error}");
+
+        let error = confirm_post(None, "dev-2", false, &mut empty)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("--yes <NAME>"), "{error}");
         assert!(error.contains("not a terminal"), "{error}");
 
         for (answer, sends) in [
@@ -1119,7 +1145,7 @@ mod tests {
         ] {
             let mut input = std::io::Cursor::new(answer.as_bytes().to_vec());
             assert_eq!(
-                confirm_post(false, true, &mut input).unwrap(),
+                confirm_post(None, "dev-2", true, &mut input).unwrap(),
                 sends,
                 "{answer:?}"
             );

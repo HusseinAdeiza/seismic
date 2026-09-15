@@ -86,6 +86,15 @@ impl FakeServer {
         Self::on(addr, move || listener, responses)
     }
 
+    /// [`Self::serve`], bound to a caller-chosen loopback port rather than an
+    /// ephemeral one — for a client whose URL is not a parameter, like
+    /// [`crate::NodeDescriptor::attestation_rpc_url`]'s fixed `:7878`.
+    pub fn serve_at(port: u16, responses: Vec<(u16, String)>) -> Self {
+        let addr: SocketAddr = ([127, 0, 0, 1], port).into();
+        let listener = TcpListener::bind(addr).expect("bind the requested loopback port");
+        Self::on(addr, move || listener, responses)
+    }
+
     /// A server whose port is known now but that only starts listening after
     /// `delay` — a tdx-init still behind its LUKS setup. Connections before
     /// then are refused.

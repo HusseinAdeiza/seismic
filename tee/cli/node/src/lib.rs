@@ -31,12 +31,13 @@ pub mod verify;
 #[cfg(test)]
 pub(crate) use seismic_tee_common::test_support;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{Context as _, bail};
 use clap::Subcommand;
 use seismic_tee_common::Manifest;
+use seismic_tee_context::{Context, ContextArgs};
 
 /// The `node` command group, declared in workflow order — the order `--help`
 /// lists them in.
@@ -69,6 +70,20 @@ pub fn load_manifest(path: &Path) -> anyhow::Result<Manifest> {
         bail!("--manifest file not found: {}", path.display());
     }
     Manifest::load(path).with_context(|| format!("--manifest {}: invalid manifest", path.display()))
+}
+
+/// Resolve `--manifest`: the flag when given, else the selected context's
+/// network — `<dir>/network-manifest.json` for one registered with `dir`, or
+/// the `manifest` path for one registered loose. Shared by `configure` and
+/// `verify`, so both agree on where the manifest comes from when neither
+/// names one.
+pub fn resolve_manifest(flag: Option<&Path>, context: &ContextArgs) -> anyhow::Result<PathBuf> {
+    if let Some(path) = flag {
+        return Ok(path.to_path_buf());
+    }
+    let loaded = Context::load(context.config.as_deref())?;
+    let selected = loaded.select(context.context.as_deref())?;
+    selected.manifest()
 }
 
 #[cfg(test)]
@@ -116,5 +131,37 @@ mod tests {
 
         let good = write_file(&dir, "network-manifest.json", FIXTURE_MANIFEST);
         assert_eq!(load_manifest(&good).unwrap().eth.chain_id, 5124);
+    }
+
+    /// The flag wins outright; absent, the selected context's network
+    /// supplies the manifest.
+    #[test]
+    fn resolve_manifest_falls_back_to_the_context() {
+        let flag = Path::new("/explicit/network-manifest.json");
+        assert_eq!(
+            resolve_manifest(Some(flag), &ContextArgs::default()).unwrap(),
+            flag
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+current = "devnet-1"
+
+[networks.devnet-1]
+dir = "/nets/devnet-1"
+"#,
+        )
+        .unwrap();
+        let context = ContextArgs {
+            context: None,
+            config: Some(config_path),
+        };
+        assert_eq!(
+            resolve_manifest(None, &context).unwrap(),
+            PathBuf::from("/nets/devnet-1/network-manifest.json")
+        );
     }
 }

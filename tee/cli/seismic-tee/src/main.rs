@@ -369,11 +369,13 @@ mod tests {
                 "network-manifest.json",
                 "--no-verify",
                 "--yes",
+                "tmp-devnet-1-2",
             ],
             vec![
                 "node",
                 "configure",
                 "-y",
+                "dev-2",
                 "--node",
                 "n.json",
                 "--bootnode",
@@ -408,6 +410,18 @@ mod tests {
             vec!["node", "status", "--node", "n.json", "--name", "dev-2"],
             vec!["node", "status", "--node", "n.json", "--once"],
             vec!["node", "status", "--node", "n.json", "--interval", "10"],
+            // resolved from the context
+            vec!["node", "status"],
+            vec!["node", "status", "--name", "alpha"],
+            vec!["node", "verify", "--context", "devnet-1/alpha"],
+            vec![
+                "node",
+                "configure",
+                "--bootnode",
+                "enode://ab@1.2.3.4:30303",
+                "--yes",
+                "alpha",
+            ],
             // admission
             vec![
                 "admission",
