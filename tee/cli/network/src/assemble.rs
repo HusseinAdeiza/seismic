@@ -467,7 +467,7 @@ pub(crate) mod tests {
     use seismic_tee_common::test_support::write_file;
 
     use super::*;
-    use crate::gates::tests::{EXAMPLE_POLICY, EXAMPLE_RETH_GENESIS, REGISTRY, other_policy};
+    use crate::gates::tests::{FIXTURE_POLICY, FIXTURE_RETH_GENESIS, REGISTRY, other_policy};
 
     pub(crate) const AUTHORITY: Address =
         alloy_primitives::address!("0x1000000000000000000000000000000000000002");
@@ -549,7 +549,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// An authored artifact set in a temp dir: the example network's reth
+    /// An authored artifact set in a temp dir: the fixture network's reth
     /// genesis (its registry predeploy is the canonical runtime) and a
     /// minimal summit genesis with no eth_genesis_hash (assemble fills it).
     pub(crate) struct Authored {
@@ -560,7 +560,7 @@ pub(crate) mod tests {
 
     pub(crate) fn authored() -> Authored {
         let dir = tempfile::tempdir().unwrap();
-        let reth_genesis = write_file(&dir, "reth-genesis.json", EXAMPLE_RETH_GENESIS);
+        let reth_genesis = write_file(&dir, "reth-genesis.json", FIXTURE_RETH_GENESIS);
         let summit_genesis =
             write_file(&dir, "summit-genesis.toml", b"namespace = \"testnet-1\"\n");
         Authored {
@@ -593,10 +593,10 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn assemble_passes_its_own_gates_and_is_deterministic() {
         let authored = authored();
-        let first = assemble_with(&authored, EXAMPLE_POLICY, &Fake::default())
+        let first = assemble_with(&authored, FIXTURE_POLICY, &Fake::default())
             .await
             .unwrap();
-        let second = assemble_with(&authored, EXAMPLE_POLICY, &Fake::default())
+        let second = assemble_with(&authored, FIXTURE_POLICY, &Fake::default())
             .await
             .unwrap();
         assert_eq!(first.manifest.bytes(), second.manifest.bytes());
@@ -610,13 +610,13 @@ pub(crate) mod tests {
         assert_eq!(first.manifest.summit.namespace, "testnet-1");
         assert_eq!(
             first.manifest.measurements.bootstrap_policy_hash,
-            <[u8; 32]>::from(Sha256::digest(EXAMPLE_POLICY))
+            <[u8; 32]>::from(Sha256::digest(FIXTURE_POLICY))
         );
         assert_eq!(
             first.manifest.measurements.contracts.registry,
             REGISTRY.into_array()
         );
-        assert_eq!(first.policy, EXAMPLE_POLICY);
+        assert_eq!(first.policy, FIXTURE_POLICY);
     }
 
     /// The registry storage is injected into assemble's genesis copy from the
@@ -637,7 +637,7 @@ pub(crate) mod tests {
         assert_eq!(storage.len(), report.registry_genesis_storage.len());
         // The example's committed storage was compiled from another policy,
         // and was replaced wholesale.
-        let example: serde_json::Value = serde_json::from_slice(EXAMPLE_RETH_GENESIS).unwrap();
+        let example: serde_json::Value = serde_json::from_slice(FIXTURE_RETH_GENESIS).unwrap();
         assert_ne!(
             genesis["alloc"][&hex_0x(REGISTRY.as_slice())]["storage"],
             example["alloc"][&hex_0x(REGISTRY.as_slice())]["storage"]
@@ -657,7 +657,7 @@ pub(crate) mod tests {
             ),
         )
         .unwrap();
-        let assembled = assemble_with(&authored, EXAMPLE_POLICY, &Fake::default())
+        let assembled = assemble_with(&authored, FIXTURE_POLICY, &Fake::default())
             .await
             .unwrap();
         let text = String::from_utf8(assembled.summit_genesis.clone()).unwrap();
@@ -689,7 +689,7 @@ pub(crate) mod tests {
                 name: "testnet-1",
                 reth_genesis: &Artifact::read(&authored.reth_genesis).unwrap(),
                 summit_genesis: &Artifact::read(&authored.summit_genesis).unwrap(),
-                policy: EXAMPLE_POLICY,
+                policy: FIXTURE_POLICY,
                 validators: &[],
                 registry: REGISTRY,
                 authority: AUTHORITY,
@@ -706,7 +706,7 @@ pub(crate) mod tests {
     async fn assemble_warns_on_the_default_summit_namespace() {
         let authored = authored();
         std::fs::write(&authored.summit_genesis, "namespace = \"_SUMMIT\"\n").unwrap();
-        let assembled = assemble_with(&authored, EXAMPLE_POLICY, &Fake::default())
+        let assembled = assemble_with(&authored, FIXTURE_POLICY, &Fake::default())
             .await
             .unwrap();
         assert!(
@@ -724,7 +724,7 @@ pub(crate) mod tests {
             r#"{"config": {"chainId": "5124"}, "alloc": {}}"#,
         )
         .unwrap();
-        let err = assemble_with(&string_chain_id, EXAMPLE_POLICY, &Fake::default())
+        let err = assemble_with(&string_chain_id, FIXTURE_POLICY, &Fake::default())
             .await
             .unwrap_err()
             .to_string();
@@ -732,7 +732,7 @@ pub(crate) mod tests {
 
         let no_namespace = authored();
         std::fs::write(&no_namespace.summit_genesis, "leader_timeout_ms = 2000\n").unwrap();
-        let err = assemble_with(&no_namespace, EXAMPLE_POLICY, &Fake::default())
+        let err = assemble_with(&no_namespace, FIXTURE_POLICY, &Fake::default())
             .await
             .unwrap_err()
             .to_string();
@@ -770,7 +770,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn write_artifact_set_refuses_to_overwrite_a_manifest() {
         let authored = authored();
-        let assembled = assemble_with(&authored, EXAMPLE_POLICY, &Fake::default())
+        let assembled = assemble_with(&authored, FIXTURE_POLICY, &Fake::default())
             .await
             .unwrap();
         let out = NetworkDir::new(authored.dir.path().join("out"));
@@ -841,7 +841,7 @@ pub(crate) mod tests {
                 name: "testnet-1",
                 reth_genesis: &Artifact::read(&net.input_reth_genesis()).unwrap(),
                 summit_genesis: &Artifact::read(&net.input_summit_genesis()).unwrap(),
-                policy: EXAMPLE_POLICY,
+                policy: FIXTURE_POLICY,
                 validators: &[validator()],
                 registry: REGISTRY,
                 authority: AUTHORITY,
@@ -858,7 +858,7 @@ pub(crate) mod tests {
         );
         assert_eq!(
             std::fs::read(net.input_reth_genesis()).unwrap(),
-            EXAMPLE_RETH_GENESIS
+            FIXTURE_RETH_GENESIS
         );
         assert_eq!(
             std::fs::read(net.summit_genesis()).unwrap(),
@@ -892,7 +892,7 @@ pub(crate) mod tests {
                 }),
             },
         );
-        let err = verify_harvest_records(&dir, &records, EXAMPLE_POLICY)
+        let err = verify_harvest_records(&dir, &records, FIXTURE_POLICY)
             .unwrap_err()
             .to_string();
         assert!(err.contains("node-1:"), "{err}");

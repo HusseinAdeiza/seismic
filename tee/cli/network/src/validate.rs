@@ -54,12 +54,12 @@ mod tests {
     use crate::assemble::tests::{Fake, assemble_with, authored};
     use crate::assemble::write_artifact_set;
     use crate::gates::hex_0x;
-    use crate::gates::tests::{EXAMPLE_POLICY, REGISTRY, other_policy};
+    use crate::gates::tests::{FIXTURE_POLICY, REGISTRY, other_policy};
 
     /// An assembled network directory on disk, ready to be tampered with.
     async fn assembled_dir() -> (tempfile::TempDir, NetworkDir) {
         let authored = authored();
-        let assembled = assemble_with(&authored, EXAMPLE_POLICY, &Fake::default())
+        let assembled = assemble_with(&authored, FIXTURE_POLICY, &Fake::default())
             .await
             .unwrap();
         let dir = NetworkDir::new(authored.dir.path().join("net"));

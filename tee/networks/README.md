@@ -85,25 +85,33 @@ manifest keeps the `tmp-*` name it was assembled under (the name is part
 of those bytes), so a network you already suspect will matter deserves a
 real directory name from the start.
 
-## example-devnet
+## fixture-devnet
 
-[example-devnet/](example-devnet/) is a committed example of the shape (minus the
-gitignored `nodes/` and, having never been founded from a live cohort,
-`inputs/harvest/` and the founder credentials — see below).
+[fixture-devnet/](fixture-devnet/) is the one committed directory: a real
+founding — a four-node Azure TDX cohort's archive, each box's founding
+quote with the collateral and trust anchors it was verified against, and
+the artifact set assembled from it — committed whole (minus the
+gitignored `nodes/`). It is two things at once.
 
-A **schema example, not a runnable founding** — no cohort runs under this
-identity, and none can be brought up from it: `assemble` pins the
-founding validator set from a live harvest, so producing an artifact set
-takes a provisioned cohort, and this directory's committed artifacts
-carry an empty validator set no founding produces. It exists to document
-the directory shape — the artifacts are internally consistent (every
-manifest pin matches its file), so schema-level tooling can be exercised
-against it.
+The documented shape: every file the tree above names, as `init`,
+`harvest` and `assemble` actually wrote them. The unit tests embed a few
+of them (the manifest, its policy, the reth genesis) as the real thing
+to parse and pin against.
 
-That consistency is enforced, not just claimed: `make test-drift` re-runs
-the deploy gates over every committed network directory, so an example
-that falls behind the admission compiler or the genesis-header encoding
-fails CI instead of misleading a reader.
+The replay fixture: `make -C tee/cli test` runs `verify-founding` over
+every committed directory that carries an archive
+(`tee/cli/network/tests/replay.rs`), so a change to the verifier, the
+record schema, or the policy or manifest schema in the pinned enclave
+crates goes red on the PR that bumps the pin, against quotes a real TDX
+cohort produced, rather than at the next founding. `make test-drift`
+adds the gates that need `seismic-reth` and the sibling repos' current
+state.
+
+**Not a network anyone runs.** The cohort was torn down the day it was
+founded, and nothing can be brought up from its identity: the keys the
+archive vouches for existed only in those boxes' RAM. Its
+[README](fixture-devnet/README.md) records the image it booted and how
+to refresh it from a fresh founding.
 
 To found any network, throwaway or real, don't reuse or copy this
 directory: run `init <new-dir>`, author fresh inputs, and follow

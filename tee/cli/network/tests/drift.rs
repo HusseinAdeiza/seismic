@@ -22,31 +22,23 @@
 //! The enclave crates under test — the admission compiler, the manifest
 //! renderer and schema — are linked at the rev the workspace pins, so moving
 //! them is a deploy PR that bumps the pin, not something CI discovers.
+//!
+//! The committed network directories get one more check that is *not* here:
+//! replaying their founding archives through the pinned verifier reaches
+//! nothing outside the workspace, so it runs in the hermetic suite
+//! (`replay.rs`). Both walk the list `support::committed_network_dirs` yields.
+
+mod support;
 
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
 
 use alloy_primitives::keccak256;
 use seismic_manifest::render;
 use seismic_measurement_admission::genesis::REGISTRY_RUNTIME_CODE_HASH;
-use seismic_tee_common::NetworkDir;
-use seismic_tee_common::network_dir::MANIFEST_FILENAME;
 use seismic_tee_network::founding::Validator;
 use seismic_tee_network::gates::{ArtifactSet, run_validation_gates};
 use seismic_tee_network::shell_outs::{Derivations, ShellOuts};
-
-/// The deploy repo root: this file is `tee/cli/network/tests/drift.rs`.
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(3)
-        .expect("network/ sits three levels under the repo root")
-        .to_path_buf()
-}
-
-fn networks_dir() -> PathBuf {
-    repo_root().join("tee").join("networks")
-}
+use support::{committed_network_dirs, networks_dir};
 
 /// Fetch a cross-repo artifact, failing the calling test if it can't.
 ///
@@ -74,32 +66,6 @@ async fn fetch_live(url: &str) -> Vec<u8> {
         }
     }
     panic!("cross-repo artifact unreachable after retry: {last:?}");
-}
-
-/// Network directories git tracks.
-///
-/// A real deployment writes its network directory here too, so enumerating
-/// the filesystem would validate whichever devnet the developer last founded.
-/// Only the committed ones are this repo's to keep passing.
-fn committed_network_dirs() -> Vec<NetworkDir> {
-    let listed = std::process::Command::new("git")
-        .args(["ls-files", "-z", "--"])
-        .arg(networks_dir())
-        .current_dir(repo_root())
-        .output()
-        .expect("git ls-files");
-    assert!(listed.status.success(), "git ls-files failed");
-    let dirs: BTreeSet<PathBuf> = String::from_utf8_lossy(&listed.stdout)
-        .split('\0')
-        .filter(|path| path.ends_with(&format!("/{MANIFEST_FILENAME}")))
-        .map(|path| repo_root().join(path).parent().unwrap().to_path_buf())
-        .collect();
-    assert!(
-        !dirs.is_empty(),
-        "no committed network directory under {}",
-        networks_dir().display()
-    );
-    dirs.into_iter().map(NetworkDir::new).collect()
 }
 
 /// The registry runtime-code pin. The admission crate pins keccak256 of the
@@ -196,12 +162,12 @@ impl Derivations for RethOnly {
 
 /// Committed network directories still pass their own gates.
 ///
-/// `tee/networks/example-devnet/` is the documented example of the
-/// network-directory shape, and the hermetic suite builds its own artifacts,
-/// so nothing else reads it. Re-running the real gates over it keeps the
-/// example honest, and turns a semantic change in the admission compiler or in
-/// reth's genesis-header encoding into a failure here rather than a surprise
-/// at the next `assemble`.
+/// `tee/networks/fixture-devnet/` is a real founding's artifact set, committed
+/// as the documented shape and the hermetic suite's replay fixture; the unit
+/// tests embed a few of its files, but nothing recomputes its gates. Re-running
+/// the real ones over it keeps the fixture honest, and turns a semantic change
+/// in the admission compiler or in reth's genesis-header encoding into a
+/// failure here rather than a surprise at the next `assemble`.
 ///
 /// One gate does not recompute here: `summit genesis digest` needs a summit
 /// build, and summit publishes no release binary, so this test feeds the

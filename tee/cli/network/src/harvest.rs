@@ -731,7 +731,7 @@ mod tests {
     #[tokio::test]
     async fn a_failed_verification_burns_by_name() {
         let policy =
-            SeismicMeasurementPolicy::from_json_bytes(crate::gates::tests::EXAMPLE_POLICY).unwrap();
+            SeismicMeasurementPolicy::from_json_bytes(crate::gates::tests::FIXTURE_POLICY).unwrap();
         let record = build_record(
             &target("node-1", "http://h:7879"),
             &Quote {

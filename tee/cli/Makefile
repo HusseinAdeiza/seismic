@@ -12,7 +12,7 @@ help:
 	@echo "  fmt         cargo +nightly fmt (writes changes)"
 	@echo "  fmt-check   cargo +nightly fmt --check"
 	@echo "  lint        cargo clippy, warnings denied"
-	@echo "  test        cargo nextest run (hermetic)"
+	@echo "  test        cargo nextest run (hermetic; replays the committed founding archive)"
 	@echo "  drift       cross-repo drift guards (network + seismic-reth on PATH; own CI job)"
 	@echo "  locked      assert Cargo.lock needs no re-resolve (run before check)"
 
@@ -34,7 +34,9 @@ test:
 
 # Cross-repo drift guards: network/tests/drift.rs, every test `#[ignore]`d so
 # `test` stays hermetic with nothing to skip. Needs raw.githubusercontent.com
-# and `seismic-reth` on PATH; see the file's module doc.
+# and `seismic-reth` on PATH; see the file's module doc. The other check over
+# the committed network directories — replaying their founding archives — is
+# offline and runs in `test` (network/tests/replay.rs).
 drift:
 	cargo nextest run -p seismic-tee-network --test drift --run-ignored only
 

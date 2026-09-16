@@ -152,17 +152,20 @@ impl Deref for Manifest {
 mod tests {
     use super::*;
 
-    /// Verbatim `tee/networks/example-devnet/network-manifest.json`.
-    const EXAMPLE_DEVNET: &[u8] =
-        include_bytes!("../../../networks/example-devnet/network-manifest.json");
+    /// Verbatim `tee/networks/fixture-devnet/network-manifest.json`. The
+    /// fixture is a real founding, assembled under the throwaway name its
+    /// cohort was founded as; the name is part of the hashed bytes, so it
+    /// stays (see the fixture's README).
+    const FIXTURE_DEVNET: &[u8] =
+        include_bytes!("../../../networks/fixture-devnet/network-manifest.json");
 
     #[test]
-    fn parses_the_committed_example_network() {
-        let manifest = Manifest::from_json_bytes(EXAMPLE_DEVNET).unwrap();
+    fn parses_the_committed_fixture_network() {
+        let manifest = Manifest::from_json_bytes(FIXTURE_DEVNET).unwrap();
 
-        assert_eq!(manifest.name, "example-devnet");
+        assert_eq!(manifest.name, "tmp-devnet-1");
         assert_eq!(manifest.eth.chain_id, 5124);
-        assert_eq!(manifest.summit.namespace, "example-devnet");
+        assert_eq!(manifest.summit.namespace, "tmp-devnet-1");
     }
 
     /// The digest is pinned rather than recomputed the way the constructor
@@ -170,15 +173,15 @@ mod tests {
     /// derived — the one drift that would silently rename every network.
     ///
     /// Recompute with:
-    /// `sha256sum tee/networks/example-devnet/network-manifest.json`
+    /// `sha256sum tee/networks/fixture-devnet/network-manifest.json`
     #[test]
     fn the_id_is_the_hash_of_the_file_bytes() {
-        let manifest = Manifest::from_json_bytes(EXAMPLE_DEVNET).unwrap();
+        let manifest = Manifest::from_json_bytes(FIXTURE_DEVNET).unwrap();
 
-        assert_eq!(manifest.bytes(), EXAMPLE_DEVNET);
+        assert_eq!(manifest.bytes(), FIXTURE_DEVNET);
         assert_eq!(
             manifest.network_id().to_string(),
-            "0xb0951428c4ddcdc7b7b4701c97bc356ba5a82528c3a4ed35d8cd6a876a5a7e8e"
+            "0x6dc6adff3fe0aa9278dfbb3a1236af1ff855e32f6ceb754b8be8390879e06595"
         );
     }
 
@@ -186,10 +189,10 @@ mod tests {
     /// deliver-verbatim rule exists to protect.
     #[test]
     fn a_reformat_is_a_different_network() {
-        let reformatted = [EXAMPLE_DEVNET, b"\n"].concat();
+        let reformatted = [FIXTURE_DEVNET, b"\n"].concat();
 
         assert_ne!(
-            Manifest::from_json_bytes(EXAMPLE_DEVNET)
+            Manifest::from_json_bytes(FIXTURE_DEVNET)
                 .unwrap()
                 .network_id(),
             Manifest::from_json_bytes(reformatted).unwrap().network_id(),
@@ -200,7 +203,7 @@ mod tests {
     /// commitment is `assemble`'s to enforce, and tdx-init checks this field.
     #[test]
     fn the_reth_genesis_must_carry_the_manifests_chain_id() {
-        let manifest = Manifest::from_json_bytes(EXAMPLE_DEVNET).unwrap();
+        let manifest = Manifest::from_json_bytes(FIXTURE_DEVNET).unwrap();
 
         manifest
             .check_reth_genesis(br#"{"config": {"chainId": 5124}, "alloc": {}}"#)
@@ -227,10 +230,10 @@ mod tests {
     /// with current validator IPs spliced in still passes.
     #[test]
     fn the_summit_genesis_must_carry_the_manifests_namespace() {
-        let manifest = Manifest::from_json_bytes(EXAMPLE_DEVNET).unwrap();
+        let manifest = Manifest::from_json_bytes(FIXTURE_DEVNET).unwrap();
 
         manifest
-            .check_summit_genesis(b"namespace = \"example-devnet\"\nvalidators = []\n")
+            .check_summit_genesis(b"namespace = \"tmp-devnet-1\"\nvalidators = []\n")
             .unwrap();
 
         let err = manifest
@@ -238,7 +241,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("\"other-net\""), "{err}");
-        assert!(err.contains("summit.namespace \"example-devnet\""), "{err}");
+        assert!(err.contains("summit.namespace \"tmp-devnet-1\""), "{err}");
 
         let err = manifest
             .check_summit_genesis(b"validators = []\n")
@@ -253,13 +256,13 @@ mod tests {
         assert!(err.contains("not valid TOML"), "{err}");
     }
 
-    /// The policy check is a byte hash: the committed example's policy passes
+    /// The policy check is a byte hash: the committed fixture's policy passes
     /// as it is on disk, and one trailing newline fails it.
     #[test]
     fn the_policy_must_hash_to_the_manifests_bootstrap_policy_hash() {
-        let manifest = Manifest::from_json_bytes(EXAMPLE_DEVNET).unwrap();
+        let manifest = Manifest::from_json_bytes(FIXTURE_DEVNET).unwrap();
         let policy =
-            include_bytes!("../../../networks/example-devnet/measurement-policy-bootstrap.json");
+            include_bytes!("../../../networks/fixture-devnet/measurement-policy-bootstrap.json");
 
         manifest.check_policy(policy).unwrap();
 

@@ -356,19 +356,19 @@ pub(crate) mod tests {
 
     use super::*;
 
-    /// The committed example network's reth genesis: the registry predeploy
+    /// The committed fixture network's reth genesis: the registry predeploy
     /// carries the canonical MeasurementRegistry runtime, so it is the one
     /// genesis these tests can hold to the real compiler's code-hash pin.
-    pub(crate) const EXAMPLE_RETH_GENESIS: &[u8] =
-        include_bytes!("../../../networks/example-devnet/reth-genesis.json");
-    /// The policy that example's registry storage was compiled from.
-    pub(crate) const EXAMPLE_POLICY: &[u8] =
-        include_bytes!("../../../networks/example-devnet/measurement-policy-bootstrap.json");
+    pub(crate) const FIXTURE_RETH_GENESIS: &[u8] =
+        include_bytes!("../../../networks/fixture-devnet/reth-genesis.json");
+    /// The policy that fixture's registry storage was compiled from.
+    pub(crate) const FIXTURE_POLICY: &[u8] =
+        include_bytes!("../../../networks/fixture-devnet/measurement-policy-bootstrap.json");
 
     pub(crate) const REGISTRY: Address =
         alloy_primitives::address!("0x1000000000000000000000000000000000000001");
 
-    /// A promoted policy other than the example's: same registers, another
+    /// A promoted policy other than the fixture's: same registers, another
     /// image, so it compiles to a different admission ID and policy hash.
     pub(crate) fn other_policy() -> Vec<u8> {
         let records = json!([{
@@ -397,7 +397,7 @@ pub(crate) mod tests {
     fn injection_replaces_the_registry_storage_and_nothing_else() {
         let report = compile(&other_policy()).unwrap();
         let injected =
-            inject_registry_genesis_storage(EXAMPLE_RETH_GENESIS, REGISTRY, &report).unwrap();
+            inject_registry_genesis_storage(FIXTURE_RETH_GENESIS, REGISTRY, &report).unwrap();
 
         let account = registry_account(&injected);
         let storage = account["storage"].as_object().unwrap();
@@ -405,14 +405,14 @@ pub(crate) mod tests {
         for (slot, word) in &report.registry_genesis_storage {
             assert_eq!(storage[&hex_0x(slot.as_slice())], hex_0x(word.as_slice()));
         }
-        // The example's own storage (compiled from its policy) is gone.
+        // The fixture's own storage (compiled from its policy) is gone.
         assert_ne!(
             account["storage"],
-            registry_account(EXAMPLE_RETH_GENESIS)["storage"]
+            registry_account(FIXTURE_RETH_GENESIS)["storage"]
         );
 
         // Everything else survives, in the authored order.
-        let mut before: Value = serde_json::from_slice(EXAMPLE_RETH_GENESIS).unwrap();
+        let mut before: Value = serde_json::from_slice(FIXTURE_RETH_GENESIS).unwrap();
         let mut after: Value = serde_json::from_slice(&injected).unwrap();
         for genesis in [&mut before, &mut after] {
             genesis["alloc"][&hex_0x(REGISTRY.as_slice())]
@@ -425,20 +425,20 @@ pub(crate) mod tests {
         assert_eq!(keys(&before), keys(&after));
         assert!(injected.ends_with(b"}\n"));
 
-        // Re-injecting the example's own policy reproduces its committed
+        // Re-injecting the fixture's own policy reproduces its committed
         // registry storage.
-        let report = compile(EXAMPLE_POLICY).unwrap();
+        let report = compile(FIXTURE_POLICY).unwrap();
         let reinjected =
-            inject_registry_genesis_storage(EXAMPLE_RETH_GENESIS, REGISTRY, &report).unwrap();
+            inject_registry_genesis_storage(FIXTURE_RETH_GENESIS, REGISTRY, &report).unwrap();
         assert_eq!(
             registry_account(&reinjected)["storage"],
-            registry_account(EXAMPLE_RETH_GENESIS)["storage"]
+            registry_account(FIXTURE_RETH_GENESIS)["storage"]
         );
     }
 
     #[test]
     fn injection_needs_the_registry_account_once_in_the_alloc() {
-        let report = compile(EXAMPLE_POLICY).unwrap();
+        let report = compile(FIXTURE_POLICY).unwrap();
         let err = inject_registry_genesis_storage(
             br#"{"config": {"chainId": 1}, "alloc": {}}"#,
             REGISTRY,
@@ -470,9 +470,9 @@ pub(crate) mod tests {
     /// can disagree is named slot by slot.
     #[test]
     fn the_registry_gate_is_exact_over_normalized_words() {
-        let report = compile(EXAMPLE_POLICY).unwrap();
+        let report = compile(FIXTURE_POLICY).unwrap();
         let address = hex_0x(REGISTRY.as_slice());
-        let canonical = registry_account(EXAMPLE_RETH_GENESIS);
+        let canonical = registry_account(FIXTURE_RETH_GENESIS);
         validate_registry_account(&canonical, &address, &report).unwrap();
 
         // Respelled: uppercase digits, `0x0` shorthand for a zero-padded word.

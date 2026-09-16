@@ -161,7 +161,7 @@ impl NetworkDir {
 mod tests {
     use super::*;
 
-    /// The committed `tee/networks/example-devnet/` is the shape these paths
+    /// The committed `tee/networks/fixture-devnet/` is the shape these paths
     /// describe; spot-check one path per tier against it.
     #[test]
     fn paths_hang_off_the_root() {
