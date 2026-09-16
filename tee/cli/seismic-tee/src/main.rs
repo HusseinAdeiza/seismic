@@ -244,7 +244,8 @@ mod tests {
         }
     }
 
-    /// The argv the README and runbook spell, exactly.
+    /// The argv the README, the runbook and the founding workflow spell,
+    /// exactly.
     #[test]
     fn the_documented_invocations_parse() {
         for argv in [
@@ -273,7 +274,7 @@ mod tests {
                 "--summit-genesis",
                 "tee/networks/summit-genesis-starter.toml",
                 "--measurements",
-                "../seismic-images/build/measurements.json",
+                "https://github.com/SeismicSystems/seismic-images/releases/download/seismic_2026-09-16.ee92ac/measurements.azure-tdx.json",
                 "--founders",
                 "2",
             ],
@@ -290,6 +291,20 @@ mod tests {
                 "--name",
                 "x",
                 "--force",
+            ],
+            // .github/workflows/found-devnet.yml
+            vec![
+                "network",
+                "init",
+                "tee/networks/tmp-ci-1-1",
+                "--reth-genesis",
+                "https://raw.githubusercontent.com/SeismicSystems/seismic-reth/seismic/crates/seismic/chainspec/res/genesis/dev.json",
+                "--summit-genesis",
+                "tee/networks/summit-genesis-starter.toml",
+                "--measurements",
+                "https://github.com/SeismicSystems/seismic-images/releases/download/seismic_2026-09-16.ee92ac/measurements.azure-tdx.json",
+                "--founders",
+                "4",
             ],
             vec!["network", "harvest", "tee/networks/devnet-3"],
             // resolved from the context
@@ -469,7 +484,7 @@ mod tests {
             vec![
                 "admission",
                 "promote",
-                "../seismic-images/build/measurements.json",
+                "../seismic-images/build/measurements.azure-tdx.json",
                 "--attestation-type",
                 "azure-tdx",
             ],

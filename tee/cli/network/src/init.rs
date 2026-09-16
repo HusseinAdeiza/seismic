@@ -7,7 +7,7 @@
 //! seismic-tee network init tee/networks/devnet-3 \
 //!     --reth-genesis https://raw.githubusercontent.com/.../dev.json \
 //!     --summit-genesis tee/networks/summit-genesis-starter.toml \
-//!     --measurements ../seismic-images/build/measurements.json \
+//!     --measurements https://github.com/SeismicSystems/seismic-images/releases/download/<image>/measurements.azure-tdx.json \
 //!     --founders 4
 //! ```
 //!
@@ -280,9 +280,11 @@ pub struct InitArgs {
     #[arg(long, value_name = "PATH_OR_URL")]
     pub reth_genesis: String,
 
-    /// seismic-images make-measure output (or promoted policy; local path or
-    /// https:// URL), copied in as inputs/measurements.json. Required: the
-    /// PCRs of a real published image, never generated.
+    /// The image's measurements (or a promoted policy; local path or https://
+    /// URL) — for a CI-published image, the measurements.azure-tdx.json asset
+    /// of the seismic-images release named after it. Copied in as
+    /// inputs/measurements.json. Required: the PCRs of a real published
+    /// image, never generated.
     #[arg(long, value_name = "PATH_OR_URL")]
     pub measurements: String,
 
