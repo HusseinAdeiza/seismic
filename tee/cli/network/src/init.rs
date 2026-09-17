@@ -36,15 +36,19 @@ use std::time::Duration;
 
 use anyhow::{Context as _, bail};
 use clap::Args;
-use seismic_tee_common::NetworkDir;
 use seismic_tee_common::network_dir::{
     FOUNDERS_FILENAME, MEASUREMENTS_FILENAME, RETH_GENESIS_FILENAME, SUMMIT_GENESIS_FILENAME,
 };
+use seismic_tee_common::{NetworkDir, next_step};
 use seismic_tee_context::config::Network;
 use seismic_tee_context::{Context, ContextArgs, Selection, write};
 
 /// How long one input fetch may take.
 pub const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The runbook's provisioning section, by URL: the CLI may be installed where
+/// the repo is not.
+pub const RUNBOOK_PROVISION_URL: &str = "https://github.com/SeismicSystems/deploy/blob/main/tee/docs/runbook-devnet.md#2-provision-the-cohort";
 
 /// Suffix for parse-gate errors on fetched content: the classic mistake is
 /// pasting a GitHub HTML page URL, which fetches fine but isn't the file.
@@ -202,8 +206,28 @@ pub struct InitInputs<'a> {
     pub founders: usize,
 }
 
+/// Everything the layout owns under `dir` that exists: the authored inputs
+/// and the harvest (`inputs/`), the derived artifact set, and the infra
+/// state (`nodes/`). This is what `--force` starts over — and nothing else
+/// in the directory, so a `--force` aimed at the wrong directory removes no
+/// file that is not a network directory's.
+fn network_state(dir: &NetworkDir) -> Vec<PathBuf> {
+    [
+        dir.inputs(),
+        dir.manifest(),
+        dir.policy(),
+        dir.reth_genesis(),
+        dir.summit_genesis(),
+        dir.nodes(),
+    ]
+    .into_iter()
+    .filter(|path| path.exists())
+    .collect()
+}
+
 /// Scaffold a network directory's four authored inputs under `inputs/`.
-/// Returns the paths written.
+/// Returns the paths written. With `force`, the directory is a network
+/// started over: whatever [`network_state`] finds is removed first.
 pub async fn init_network_dir(
     client: &reqwest::Client,
     dir: &NetworkDir,
@@ -237,20 +261,40 @@ pub async fn init_network_dir(
         (SUMMIT_GENESIS_FILENAME, summit_genesis),
         (FOUNDERS_FILENAME, founders),
     ];
-    let inputs_dir = dir.inputs();
-    let existing: Vec<&str> = contents
-        .iter()
-        .map(|(name, _)| *name)
-        .filter(|name| inputs_dir.join(name).exists())
-        .collect();
-    if !existing.is_empty() && !force {
-        bail!(
-            "refusing to overwrite existing input(s) in {}: {} — pass --force to re-author them \
-             (re-assembling from changed inputs is a new network identity)",
-            inputs_dir.display(),
-            existing.join(", ")
-        );
+    let existing = network_state(dir);
+    if !existing.is_empty() {
+        if !force {
+            bail!(
+                "refusing to overwrite the network directory {}: it holds {} — pass --force to \
+                 start it over (the authored inputs and harvest, the artifact set and nodes/ are \
+                 removed first; re-authoring the inputs and re-assembling is a new network \
+                 identity)",
+                dir.root().display(),
+                existing
+                    .iter()
+                    .map(|p| p
+                        .strip_prefix(dir.root())
+                        .unwrap_or(p)
+                        .display()
+                        .to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        // Whole, not just the four inputs: a harvest or artifact set left
+        // from an earlier cohort would describe boxes these inputs never
+        // met, and `harvest` would refuse the stale records by name later.
+        for path in &existing {
+            if path.is_dir() {
+                std::fs::remove_dir_all(path)
+            } else {
+                std::fs::remove_file(path)
+            }
+            .with_context(|| format!("removing {}", path.display()))?;
+            eprintln!("removed {}", path.display());
+        }
     }
+    let inputs_dir = dir.inputs();
     std::fs::create_dir_all(&inputs_dir)
         .with_context(|| format!("creating {}", inputs_dir.display()))?;
     let mut written = Vec::with_capacity(contents.len());
@@ -303,8 +347,9 @@ pub struct InitArgs {
     #[arg(long, value_name = "N", default_value_t = 0)]
     pub founders: usize,
 
-    /// Overwrite existing authored inputs (re-authoring them and re-assembling
-    /// is a new network identity).
+    /// Start the network over: remove what the directory holds for it — the
+    /// authored inputs and harvest, the artifact set, nodes/ — then scaffold.
+    /// Re-authoring the inputs and re-assembling is a new network identity.
     #[arg(long)]
     pub force: bool,
 
@@ -367,10 +412,6 @@ pub async fn run(args: InitArgs) -> anyhow::Result<ExitCode> {
             node: None,
         },
     )?;
-    eprintln!(
-        "registered and selected network {name} in {}",
-        config_path.display()
-    );
 
     let founders_hint = if args.founders > 0 {
         "update the placeholder addresses in"
@@ -378,19 +419,36 @@ pub async fn run(args: InitArgs) -> anyhow::Result<ExitCode> {
         "fill in one address per founding node in"
     };
     // The authored credentials size the cohort: harvest and assemble both
-    // refuse a cohort whose node count disagrees with them.
-    println!(
-        "Scaffolded {}. Next:\n  1. review {}\n  2. {founders_hint}\n     {}\n  3. provision the \
-         cohort with the Pulumi program in\n     tee/pulumi/seismic_node (in the deploy repo)\n     \
-         (one stack per environment; author one `nodes` entry per\n      founding node and point \
-         measurements_path at\n      {}\n      so a stale image pin is refused at preview — see\n      \
-         tee/docs/runbook-devnet.md),\n     then import its `nodes` output:\n     pulumi stack \
-         output nodes --json | seismic-tee ctx set-nodes {name}\n  4. seismic-tee network \
-         harvest\n  5. seismic-tee network assemble",
-        root.display(),
-        dir.input_summit_genesis().display(),
-        dir.founders().display(),
-        dir.input_measurements().display(),
+    // refuse a cohort whose node count disagrees with them. Provisioning is
+    // the runbook's (it spans Pulumi), linked by URL because the CLI may be
+    // installed where the repo is not; the step after it is spelled here to
+    // bring the founder back to this CLI.
+    next_step::print_steps(&[
+        format!(
+            "review every file under {} — {founders_hint} {}",
+            dir.inputs().display(),
+            dir.founders()
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        ),
+        format!("provision the cohort: {RUNBOOK_PROVISION_URL}"),
+        "harvest its founding keys from the node table the provisioner prints (pulumi stack \
+         output nodes --json > nodes.json):\nseismic-tee network harvest --nodes nodes.json"
+            .to_string(),
+    ]);
+    // What the registration above bought, and what importing the cohort adds
+    // to it: both are the context's, so they are told together.
+    next_step::print_ctx(
+        &format!(
+            "{name} is registered and selected in {},\nso harvest and every command after it find \
+             the network directory without DIR.\nImport the node table too, and they find the \
+             cohort without --nodes:",
+            config_path.display()
+        ),
+        &[format!(
+            "pulumi stack output nodes --json | seismic-tee ctx set-nodes {name}"
+        )],
     );
     Ok(ExitCode::SUCCESS)
 }
@@ -554,20 +612,47 @@ mod tests {
         assert!(err.contains("raw content URL"), "{err}");
     }
 
+    /// A second `init` refuses whatever the layout already holds, naming it;
+    /// `--force` starts the network over — inputs, harvest, artifact set and
+    /// nodes/ all gone, so no record of an earlier cohort survives to be
+    /// refused by `harvest` later — and touches nothing else in the
+    /// directory.
     #[tokio::test]
-    async fn refuses_to_overwrite_unless_forced() {
+    async fn refuses_to_overwrite_unless_forced_and_then_starts_over() {
         let loose = loose();
         init(&loose, 0, false).await.unwrap();
+        let out = &loose.out;
+        let plant = |relative: &str| {
+            let path = out.root().join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"{}").unwrap();
+            path
+        };
+        let stale_record = plant("inputs/harvest/old-1.json");
+        plant("network-manifest.json");
+        plant("nodes/bootnodes.json");
+        let unrelated = plant("NOTES.md");
+
         let err = init(&loose, 0, false).await.unwrap_err().to_string();
         assert!(err.contains("refusing to overwrite"), "{err}");
         assert!(err.contains("--force"), "{err}");
+        for held in ["inputs", "network-manifest.json", "nodes"] {
+            assert!(err.contains(held), "{err}");
+        }
+        assert!(stale_record.exists());
+
         init(&loose, 2, true).await.unwrap();
         assert_eq!(
-            serde_json::from_slice::<Vec<String>>(&std::fs::read(loose.out.founders()).unwrap())
+            serde_json::from_slice::<Vec<String>>(&std::fs::read(out.founders()).unwrap())
                 .unwrap()
                 .len(),
             2
         );
+        assert!(!stale_record.exists());
+        assert!(!out.harvest().exists());
+        assert!(!out.manifest().exists());
+        assert!(!out.nodes().exists());
+        assert!(unrelated.exists());
     }
 
     #[tokio::test]

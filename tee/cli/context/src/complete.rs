@@ -39,7 +39,7 @@ pub fn networks() -> Vec<CompletionCandidate> {
         .unwrap_or_default()
 }
 
-/// The node names a `--name` (or `--genesis`, `--join`) may pick: the
+/// The node names a `--name` (or `--genesis-node`, `--join`) may pick: the
 /// selected network's, else every network's when nothing is selected.
 pub fn nodes() -> Vec<CompletionCandidate> {
     let requested = std::env::var("SEISMIC_CONTEXT").ok();

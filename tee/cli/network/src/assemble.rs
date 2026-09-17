@@ -34,12 +34,13 @@ use seismic_manifest::{
 };
 use seismic_measurement_admission::promote_measurements;
 use seismic_tee_common::network_dir::INPUTS_DIRNAME;
-use seismic_tee_common::{Artifact, Manifest, NetworkDir};
+use seismic_tee_common::{Artifact, Manifest, NetworkDir, next_step};
 use seismic_tee_context::load_nodes;
 use seismic_verify_quote::{SeismicMeasurementPolicy, archive, verify_archived_harvest};
 use sha2::{Digest as _, Sha256};
 
 use crate::args::DirArgs;
+use crate::configure;
 use crate::founding::{FoundingRecords, Validator, load_founding_set};
 use crate::gates::{
     ArtifactSet, compile, hex_0x, inject_registry_genesis_storage, run_validation_gates,
@@ -456,6 +457,17 @@ pub async fn run(args: AssembleArgs) -> anyhow::Result<ExitCode> {
     }
     write_artifact_set(&dir, &assembled, args.force)?;
     println!("network_id: {}", assembled.manifest.network_id());
+    // Straight to the founding: the gates `validate` runs and the replay
+    // `verify-founding` runs both already ran above, over this very set.
+    // Genesis is named from the founding set just pinned, so the line
+    // cannot name a node this artifact set does not seat.
+    let genesis = founding
+        .records
+        .keys()
+        .next()
+        .cloned()
+        .unwrap_or_else(|| "<genesis-node>".to_string());
+    next_step::print("", &[configure::invocation(&genesis, &args.dir, &dir)]);
     Ok(ExitCode::SUCCESS)
 }
 

@@ -37,6 +37,22 @@ impl DirArgs {
         echo(&selected.selection, &dir.display());
         Ok(dir)
     }
+
+    /// `DIR` as it was given, for a suggested follow-up command that must act
+    /// on the same network. Empty when the context supplied it — the
+    /// persisted selection is still in force for the next command, so
+    /// nothing needs repeating; an explicit `--context` is not persisted
+    /// anywhere, so it is repeated like `DIR` is. Leading space included, so
+    /// it splices into a command line.
+    pub fn as_args(&self) -> String {
+        if let Some(dir) = &self.dir {
+            return format!(" {}", dir.display());
+        }
+        match &self.context.context {
+            Some(context) => format!(" --context {context}"),
+            None => String::new(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -107,5 +123,21 @@ dir = "/nets/devnet-1"
         let err = args(None, config_path).load().unwrap_err().to_string();
         assert!(err.contains("DIR"), "{err}");
         assert!(err.contains("ctx use"), "{err}");
+    }
+
+    #[test]
+    fn an_explicit_dir_is_repeated_and_a_persisted_selection_is_not() {
+        let explicit = args(Some("/nets/devnet-1"), PathBuf::from("/nowhere.toml"));
+        assert_eq!(explicit.as_args(), " /nets/devnet-1");
+        let from_selection = args(None, PathBuf::from("/nowhere.toml"));
+        assert_eq!(from_selection.as_args(), "");
+        let from_flag = DirArgs {
+            dir: None,
+            context: ContextArgs {
+                context: Some("devnet-1".to_string()),
+                config: None,
+            },
+        };
+        assert_eq!(from_flag.as_args(), " --context devnet-1");
     }
 }

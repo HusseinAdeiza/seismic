@@ -20,6 +20,7 @@ pub mod error;
 pub mod http;
 pub mod manifest;
 pub mod network_dir;
+pub mod next_step;
 pub mod rpc;
 #[cfg(feature = "test-support")]
 pub mod test_support;

@@ -19,10 +19,10 @@ use anyhow::{Context as _, bail};
 use clap::{Args, Subcommand};
 use clap_complete::ArgValueCandidates;
 use seismic_tee_common::descriptor::parse_descriptors;
-use seismic_tee_common::load_descriptors;
+use seismic_tee_common::{NetworkDir, load_descriptors, next_step};
 
 use crate::complete;
-use crate::config::{Network, Shape};
+use crate::config::{Config, Network, Shape};
 use crate::env::{self, EnvArgs};
 use crate::exec::{self, ExecArgs};
 use crate::{Context, Selected, Selection, path, write};
@@ -323,6 +323,8 @@ fn run_set_network(args: SetNetworkArgs) -> anyhow::Result<ExitCode> {
             context.path().display()
         ),
     }
+    let context = Context::load(args.config.as_deref())?;
+    next_step::print("", &next_after_registration(context.config(), &args.name));
     Ok(ExitCode::SUCCESS)
 }
 
@@ -337,7 +339,47 @@ fn run_set_nodes(args: SetNodesArgs) -> anyhow::Result<ExitCode> {
     }
     let message = import_nodes(&args, &mut stdin.lock())?;
     println!("{message}");
+    let context = Context::load(args.config.as_deref())?;
+    next_step::print("", &next_after_registration(context.config(), &args.name));
     Ok(ExitCode::SUCCESS)
+}
+
+/// What follows registering network `name`, or importing its nodes, given
+/// the file as it now stands.
+///
+/// A network directory whose harvest has not happened yet is a founding in
+/// progress, and the cohort just imported is the one to harvest — so the next
+/// command is `harvest`, after selecting the network if `init` did not
+/// already. Anything else is a network to use: select it, naming a node when
+/// the table has one to name, unless the selection already does. Nothing
+/// when nothing is left to suggest.
+fn next_after_registration(config: &Config, name: &str) -> Vec<String> {
+    let Some(network) = config.networks.get(name) else {
+        return Vec::new();
+    };
+    let current = config
+        .current
+        .as_deref()
+        .and_then(|raw| raw.parse::<Selection>().ok())
+        .filter(|selection| selection.network == name);
+    let founding_unharvested = network
+        .dir
+        .as_deref()
+        .is_some_and(|dir| !network.nodes.is_empty() && !NetworkDir::new(dir).harvest().exists());
+    if founding_unharvested {
+        let mut next = Vec::new();
+        if current.is_none() {
+            next.push(format!("seismic-tee ctx use {name}"));
+        }
+        next.push("seismic-tee network harvest".to_string());
+        return next;
+    }
+    match (network.nodes.keys().next(), current) {
+        (Some(_), Some(selection)) if selection.node.is_some() => Vec::new(),
+        (Some(node), _) => vec![format!("seismic-tee ctx use {name}/{node}")],
+        (None, Some(_)) => Vec::new(),
+        (None, None) => vec![format!("seismic-tee ctx use {name}")],
+    }
 }
 
 /// [`run_set_nodes`]'s body: read the whole of `input`, parse it as a
@@ -867,5 +909,88 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["alpha"]
         );
+    }
+
+    fn config(toml: &str) -> Config {
+        toml::from_str(toml).unwrap()
+    }
+
+    const NODES: &str = r#"
+[networks.devnet-1.nodes.beta]
+public_ip = "10.0.0.2"
+fqdn = "beta.example"
+[networks.devnet-1.nodes.alpha]
+public_ip = "10.0.0.1"
+fqdn = "alpha.example"
+"#;
+
+    #[test]
+    fn an_unharvested_founding_directory_is_next_harvested() {
+        let dir = tempfile::tempdir().unwrap();
+        let registered = format!(
+            "[networks.devnet-1]\ndir = {:?}\n{NODES}",
+            dir.path().to_str().unwrap()
+        );
+        // Selected by `init`: nothing to select again.
+        assert_eq!(
+            next_after_registration(
+                &config(&format!("current = \"devnet-1\"\n{registered}")),
+                "devnet-1"
+            ),
+            ["seismic-tee network harvest"]
+        );
+        // Not selected: select it first.
+        assert_eq!(
+            next_after_registration(&config(&registered), "devnet-1"),
+            [
+                "seismic-tee ctx use devnet-1",
+                "seismic-tee network harvest"
+            ]
+        );
+        // Harvested: the founding is under way or done, so this is a network
+        // to use like any other.
+        std::fs::create_dir_all(dir.path().join("inputs/harvest")).unwrap();
+        assert_eq!(
+            next_after_registration(&config(&registered), "devnet-1"),
+            ["seismic-tee ctx use devnet-1/alpha"]
+        );
+    }
+
+    #[test]
+    fn a_network_to_use_is_next_selected_with_a_node_when_it_has_one() {
+        let with_nodes = format!("[networks.devnet-1]\nmanifest = \"/m.json\"\n{NODES}");
+        assert_eq!(
+            next_after_registration(&config(&with_nodes), "devnet-1"),
+            ["seismic-tee ctx use devnet-1/alpha"]
+        );
+        // The network is selected but no node is: still worth naming one.
+        assert_eq!(
+            next_after_registration(
+                &config(&format!("current = \"devnet-1\"\n{with_nodes}")),
+                "devnet-1"
+            ),
+            ["seismic-tee ctx use devnet-1/alpha"]
+        );
+        // A node is selected: nothing left to suggest.
+        assert!(
+            next_after_registration(
+                &config(&format!("current = \"devnet-1/beta\"\n{with_nodes}")),
+                "devnet-1"
+            )
+            .is_empty()
+        );
+        let without_nodes = "[networks.partner]\nmanifest = \"/m.json\"\n";
+        assert_eq!(
+            next_after_registration(&config(without_nodes), "partner"),
+            ["seismic-tee ctx use partner"]
+        );
+        assert!(
+            next_after_registration(
+                &config(&format!("current = \"partner\"\n{without_nodes}")),
+                "partner"
+            )
+            .is_empty()
+        );
+        assert!(next_after_registration(&config(without_nodes), "unregistered").is_empty());
     }
 }

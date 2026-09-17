@@ -56,7 +56,7 @@ use anyhow::{Context as _, bail};
 use base64::Engine as _;
 use clap::Args;
 use seismic_tee_common::http::ATTESTATION_RPC_PORT;
-use seismic_tee_common::{Artifact, Manifest, NetworkDir, NodeDescriptor, http, rpc};
+use seismic_tee_common::{Artifact, Manifest, NetworkDir, NodeDescriptor, http, next_step, rpc};
 use sha2::{Digest as _, Sha256};
 use tdx_init_config::{DomainConfig, InitConfig, NetworkConfig, NodeConfig};
 
@@ -643,6 +643,12 @@ pub async fn run(args: ConfigureArgs) -> anyhow::Result<ExitCode> {
         println!("\nStopped watching — node still provisioning in the background.");
         let Some(_) = policy else {
             print_summary(fqdn, public_ip, &record);
+            // No appraisal was asked for, so nothing is owed but the watch
+            // the operator left; re-watch to see it settle.
+            next_step::print(
+                "",
+                &[format!("seismic-tee node status{}", args.node.as_flags())],
+            );
             return Ok(ExitCode::SUCCESS);
         };
         // The operator stopped watching before the attestation service came
@@ -700,6 +706,19 @@ pub async fn run(args: ConfigureArgs) -> anyhow::Result<ExitCode> {
         }
     }
     print_summary(fqdn, public_ip, &record);
+    if policy.is_none() {
+        // --no-verify: the node is up but unappraised, and the appraisal has
+        // its own command.
+        next_step::print(
+            "appraise it before relying on it:",
+            &[format!(
+                "seismic-tee node verify{} --manifest {}{}",
+                args.node.as_flags(),
+                manifest_path.display(),
+                verify::retry_flags(&args.policy_source, &args.verifier),
+            )],
+        );
+    }
     Ok(ExitCode::SUCCESS)
 }
 

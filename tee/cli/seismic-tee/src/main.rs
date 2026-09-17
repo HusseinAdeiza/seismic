@@ -97,7 +97,7 @@ struct Cli {
                      most: every <network> and <network>/<node> in the context file for \
                      `ctx use` and `--context`, the registered networks for `ctx set-nodes` \
                      and `ctx set-network`, and the selected network's nodes for `--name`, \
-                     `--genesis` and `--join`. Names come from the context file alone — no \
+                     `--genesis-node` and `--join`. Names come from the context file alone — no \
                      RPC, no Pulumi — so a tab press never waits on the network.\n\n\
                      Add the line for your shell to its rc file:\n  \
                      bash:   source <(seismic-tee --completions bash)\n  \
@@ -356,7 +356,7 @@ mod tests {
             assert!(arg(&["node", verb], "name"), "{verb}");
             assert!(arg(&["node", verb], "context"), "{verb}");
         }
-        assert!(arg(&["network", "configure"], "genesis"));
+        assert!(arg(&["network", "configure"], "genesis_node"));
         assert!(arg(&["network", "configure"], "join"));
         assert!(arg(&["network", "harvest"], "context"));
         assert!(arg(&["verify-founding"], "context"));
@@ -376,6 +376,9 @@ mod tests {
             vec!["network", "tools", "admission", "compile", "p.json"],
             vec!["admission", "compile", "-"],
             vec!["configure", "--node", "n.json", "--manifest", "m.json"],
+            // the genesis node is named as one: bare `--genesis` read as a
+            // file beside --reth-genesis and --summit-genesis
+            vec!["network", "configure", "--genesis", "a"],
             // completion is an option; `help` is `--help`
             vec!["completions", "bash"],
             vec!["--completions", "bash", "ctx", "list"],
@@ -398,7 +401,9 @@ mod tests {
     }
 
     /// The argv the README, the runbook and the founding workflow spell,
-    /// exactly.
+    /// exactly — and every shape a command's next-step line prints (see
+    /// `seismic_tee_common::next_step`), so a printed invocation cannot drift
+    /// from the command it names.
     #[test]
     fn the_documented_invocations_parse() {
         for argv in [
@@ -407,6 +412,7 @@ mod tests {
             vec!["ctx", "unset"],
             vec!["ctx", "set-nodes", "devnet-1"],
             vec!["ctx", "use", "devnet-1/alpha"],
+            vec!["ctx", "use", "devnet-1"],
             vec!["ctx", "env"],
             vec!["ctx", "env", "--unset"],
             vec!["ctx", "exec", "--", "scast", "block-number"],
@@ -462,6 +468,7 @@ mod tests {
             vec!["network", "harvest", "tee/networks/devnet-3"],
             // resolved from the context
             vec!["network", "harvest"],
+            vec!["network", "harvest", "--nodes", "nodes.json"],
             vec![
                 "network",
                 "harvest",
@@ -476,6 +483,7 @@ mod tests {
             // resolved from the context
             vec!["network", "assemble"],
             vec!["network", "assemble", "--force"],
+            vec!["network", "assemble", "--context", "devnet-1"],
             vec![
                 "network",
                 "assemble",
@@ -505,7 +513,7 @@ mod tests {
             vec![
                 "network",
                 "configure",
-                "--genesis",
+                "--genesis-node",
                 "devnet-3-1",
                 "--manifest",
                 "tee/networks/devnet-3/network-manifest.json",
@@ -513,7 +521,7 @@ mod tests {
             vec![
                 "network",
                 "configure",
-                "--genesis",
+                "--genesis-node",
                 "a",
                 "--join",
                 "b",
@@ -526,7 +534,7 @@ mod tests {
             vec![
                 "network",
                 "configure",
-                "--genesis",
+                "--genesis-node",
                 "a",
                 "--manifest",
                 "m.json",
@@ -536,7 +544,15 @@ mod tests {
                 "http://pccs",
             ],
             // resolved from the context
-            vec!["network", "configure", "--genesis", "a"],
+            vec!["network", "configure", "--genesis-node", "a"],
+            vec![
+                "network",
+                "configure",
+                "--genesis-node",
+                "a",
+                "--context",
+                "devnet-1",
+            ],
             // node
             vec![
                 "node",
@@ -606,6 +622,8 @@ mod tests {
             vec!["node", "status"],
             vec!["node", "status", "--name", "alpha"],
             vec!["node", "verify", "--context", "devnet-1/alpha"],
+            vec!["node", "verify", "--name", "dev-2", "--manifest", "m.json"],
+            vec!["node", "status", "--context", "devnet-1/alpha"],
             vec![
                 "node",
                 "configure",

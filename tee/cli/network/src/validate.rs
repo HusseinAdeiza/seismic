@@ -14,9 +14,11 @@
 use std::process::ExitCode;
 
 use clap::Args;
-use seismic_tee_common::NetworkDir;
+use seismic_tee_common::{NetworkDir, next_step};
 
 use crate::args::DirArgs;
+use crate::configure;
+use crate::founding::load_harvest_records;
 use crate::gates::{ArtifactSet, run_validation_gates};
 use crate::init::absolute;
 use crate::shell_outs::DerivationArgs;
@@ -42,7 +44,19 @@ pub async fn run(args: ValidateArgs) -> anyhow::Result<ExitCode> {
     }
     println!("network_id: {}", set.manifest.network_id());
     eprintln!("all validation gates passed");
+    next_step::print("", &[configure_invocation(&args.dir, &dir)]);
     Ok(ExitCode::SUCCESS)
+}
+
+/// The founding this validated directory is ready for, with the first
+/// harvested node standing in as genesis; a harvest that does not load
+/// leaves a placeholder rather than a guess.
+fn configure_invocation(args: &DirArgs, dir: &NetworkDir) -> String {
+    let genesis = load_harvest_records(dir)
+        .ok()
+        .and_then(|records| records.keys().next().cloned())
+        .unwrap_or_else(|| "<genesis-node>".to_string());
+    configure::invocation(&genesis, args, dir)
 }
 
 #[cfg(test)]
@@ -50,9 +64,14 @@ mod tests {
     use seismic_tee_common::network_dir::MANIFEST_FILENAME;
     use serde_json::json;
 
+    use std::path::PathBuf;
+
+    use seismic_tee_context::ContextArgs;
+
     use super::*;
     use crate::assemble::tests::{Fake, assemble_with, authored};
     use crate::assemble::write_artifact_set;
+    use crate::founding::tests::{NODE_KEY_1, NODE_KEY_2, network_dir, record, write_harvest};
     use crate::gates::hex_0x;
     use crate::gates::tests::{FIXTURE_POLICY, REGISTRY, other_policy};
 
@@ -232,5 +251,46 @@ mod tests {
         let err = failure(validate(&dir).await);
         assert!(err.contains("measurements.contracts.authority"), "{err}");
         assert!(err.contains("has no code"), "{err}");
+    }
+
+    fn args(dir: Option<&str>, context: Option<&str>) -> DirArgs {
+        DirArgs {
+            dir: dir.map(PathBuf::from),
+            context: ContextArgs {
+                context: context.map(str::to_string),
+                config: None,
+            },
+        }
+    }
+
+    #[test]
+    fn the_first_harvested_node_stands_in_as_genesis() {
+        let (_tmp, dir) = network_dir();
+        write_harvest(&dir, "beta", &record(NODE_KEY_2, "02"));
+        write_harvest(&dir, "alpha", &record(NODE_KEY_1, "01"));
+        assert_eq!(
+            configure_invocation(&args(None, None), &dir),
+            "seismic-tee network configure --genesis-node alpha"
+        );
+        assert_eq!(
+            configure_invocation(&args(None, Some("devnet-1")), &dir),
+            "seismic-tee network configure --genesis-node alpha --context devnet-1"
+        );
+        assert_eq!(
+            configure_invocation(&args(Some(dir.root().to_str().unwrap()), None), &dir),
+            format!(
+                "seismic-tee network configure --genesis-node alpha --manifest {}",
+                dir.manifest().display()
+            )
+        );
+    }
+
+    #[test]
+    fn an_unreadable_harvest_leaves_a_placeholder() {
+        let (_tmp, dir) = network_dir();
+        assert_eq!(
+            configure_invocation(&args(None, None), &dir),
+            "seismic-tee network configure --genesis-node <genesis-node>"
+        );
     }
 }

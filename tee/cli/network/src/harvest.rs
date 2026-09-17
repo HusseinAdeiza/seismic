@@ -52,7 +52,7 @@ use anyhow::{Context as _, bail};
 use clap::Args;
 use seismic_measurement_admission::promote_measurements;
 use seismic_tee_common::network_dir::INPUTS_DIRNAME;
-use seismic_tee_common::{Descriptors, NetworkDir, NodeDescriptor, http};
+use seismic_tee_common::{Descriptors, NetworkDir, NodeDescriptor, http, next_step};
 use seismic_tee_context::load_nodes;
 use seismic_verify_quote::{HarvestRecord, SeismicMeasurementPolicy, verify_harvest};
 use serde_json::{Value, json};
@@ -504,6 +504,13 @@ pub async fn run(args: HarvestArgs) -> anyhow::Result<ExitCode> {
         "Harvest complete: {} founding box(es) verified and archived under {}",
         archives.len(),
         dir.harvest().display()
+    );
+    next_step::print(
+        "",
+        &[format!(
+            "seismic-tee network assemble{}",
+            args.dir.as_args()
+        )],
     );
     Ok(ExitCode::SUCCESS)
 }

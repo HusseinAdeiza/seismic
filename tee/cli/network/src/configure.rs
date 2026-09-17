@@ -1,11 +1,11 @@
 //! `configure`: found a network in one command.
 //!
 //! ```text
-//! seismic-tee network configure --genesis devnet-3-1 \
+//! seismic-tee network configure --genesis-node devnet-3-1 \
 //!     --manifest tee/networks/devnet-3/network-manifest.json
 //! ```
 //!
-//! Configures a whole cohort at once: the one genesis node (`--genesis`, mints
+//! Configures a whole cohort at once: the one genesis node (`--genesis-node`, mints
 //! `root_key` locally) plus every joining node (`--join`, fetches `root_key`
 //! from genesis via `getWrappedRootKey`). Exactly one node is genesis —
 //! assigned here, not left to a per-node flag — so a double-genesis network
@@ -67,8 +67,10 @@ use anyhow::{Context as _, bail};
 use clap::Args;
 use clap_complete::ArgValueCandidates;
 use seismic_tee_common::http::TDX_INIT_PORT;
-use seismic_tee_common::{Artifact, Descriptors, Manifest, NetworkDir, NodeDescriptor, http, rpc};
-use seismic_tee_context::{ContextArgs, complete, load_nodes};
+use seismic_tee_common::{
+    Artifact, Descriptors, Manifest, NetworkDir, NodeDescriptor, http, next_step, rpc,
+};
+use seismic_tee_context::{Context, ContextArgs, complete, load_nodes};
 use seismic_tee_node::configure::{
     ConfigInputs, DEFAULT_EMAIL, TDX_INIT_LISTENER_TIMEOUT, TDX_INIT_RETRY_INTERVAL, build_config,
     post_config_within, render_config, resolve_reth_genesis, resolve_summit_genesis, write_record,
@@ -82,11 +84,27 @@ use seismic_tee_node::{load_manifest, resolve_manifest};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
+use crate::args::DirArgs;
 use crate::bootnodes::{self, Bootnode};
 use crate::dashboard::CohortDashboard;
 use crate::founding::{FoundingRecords, SUMMIT_CONSENSUS_PORT, load_harvest_records};
 use crate::gates::hex_0x;
 use crate::launch::{self, LaunchTarget};
+
+/// This command, spelled as the next step after `assemble` or `validate`,
+/// with `genesis` as the genesis node. Which node is genesis is the
+/// founder's call and any founding node is a valid one, so callers pass the
+/// first in name order. `configure` takes the manifest, not `DIR`, so an
+/// explicit `DIR` becomes `--manifest`; an explicit `--context` is repeated
+/// as [`DirArgs::as_args`] would.
+pub fn invocation(genesis: &str, args: &DirArgs, dir: &NetworkDir) -> String {
+    let scope = match (&args.dir, &args.context.context) {
+        (Some(_), _) => format!(" --manifest {}", dir.manifest().display()),
+        (None, Some(context)) => format!(" --context {context}"),
+        (None, None) => String::new(),
+    };
+    format!("seismic-tee network configure --genesis-node {genesis}{scope}")
+}
 
 /// A whole cohort's wipes tend to finish together, so every challenge hits the
 /// PCCS at once — and a DCAP collateral fetch is the one transient way a
@@ -161,7 +179,7 @@ pub fn build_cohort(
         );
     }
 
-    // A name given twice (--genesis reused as --join, or a copy-pasted --join)
+    // A name given twice (--genesis-node reused as --join, or a copy-pasted --join)
     // would race two conflicting POSTs against one node and silently collide
     // on the name-keyed dashboard/result maps — refuse instead. Two map
     // entries sharing an IP are the same mistake in the file.
@@ -784,12 +802,12 @@ fn report(
 
 #[derive(Debug, Args)]
 pub struct ConfigureArgs {
-    /// Name of the one genesis node (mints root_key locally), as keyed in the
-    /// cohort's node table. Exactly one node per network is genesis;
-    /// assigning it here (not a per-node flag) makes a double-genesis split
-    /// impossible.
+    /// Name of the one genesis node — the node that mints root_key locally
+    /// and that the joiners fetch it from — as keyed in the cohort's node
+    /// table. Exactly one node per network is genesis; assigning it here (not
+    /// a per-node flag) makes a double-genesis split impossible.
     #[arg(long, value_name = "NAME", add = ArgValueCandidates::new(complete::nodes))]
-    pub genesis: String,
+    pub genesis_node: String,
 
     /// Name of a joining node (fetches root_key from genesis via
     /// getWrappedRootKey). Repeatable. Default: every other node in the
@@ -902,7 +920,7 @@ pub async fn run(args: ConfigureArgs) -> anyhow::Result<ExitCode> {
     }
     let summit_genesis = Artifact::new(committed.path(), spliced);
 
-    let mut nodes = build_cohort(&descriptors, &args.genesis, args.join.as_deref())?;
+    let mut nodes = build_cohort(&descriptors, &args.genesis_node, args.join.as_deref())?;
     let unharvested: Vec<&str> = nodes
         .iter()
         .filter(|n| !harvest_records.contains_key(&n.name))
@@ -1004,6 +1022,23 @@ pub async fn run(args: ConfigureArgs) -> anyhow::Result<ExitCode> {
     )
     .await?;
     println!("Launch assertions green: the cohort that launched is the cohort pinned.");
+    // The founding is done; what follows is using the network. Only a
+    // context-supplied network has a name to select a node under — an
+    // explicit --manifest may be a directory nothing is registered for.
+    if args.manifest.is_none() {
+        let context = Context::load(args.context.config.as_deref())?;
+        let network = &context
+            .select(args.context.context.as_deref())?
+            .selection
+            .network;
+        next_step::print(
+            "select a node, and point a tool at it:",
+            &[
+                format!("seismic-tee ctx use {network}/{}", args.genesis_node),
+                "seismic-tee ctx exec -- scast block-number".to_string(),
+            ],
+        );
+    }
     Ok(ExitCode::SUCCESS)
 }
 
@@ -1301,21 +1336,21 @@ mod tests {
         }
         let probe = Probe::try_parse_from([
             "configure",
-            "--genesis",
+            "--genesis-node",
             "tmp-devnet-1-1",
             "--manifest",
             "tee/networks/tmp-devnet-1/network-manifest.json",
         ])
         .unwrap()
         .args;
-        assert_eq!(probe.genesis, "tmp-devnet-1-1");
+        assert_eq!(probe.genesis_node, "tmp-devnet-1-1");
         assert_eq!(probe.join, None);
         assert_eq!(probe.email, DEFAULT_EMAIL);
         assert!(!probe.no_verify);
 
         let probe = Probe::try_parse_from([
             "configure",
-            "--genesis",
+            "--genesis-node",
             "a",
             "--join",
             "b",
@@ -1337,7 +1372,7 @@ mod tests {
         // A missing manifest fails before anything else is read.
         let probe = Probe::try_parse_from([
             "configure",
-            "--genesis",
+            "--genesis-node",
             "a",
             "--manifest",
             "/absent/m.json",
