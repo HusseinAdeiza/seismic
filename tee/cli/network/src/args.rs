@@ -1,6 +1,6 @@
 //! `DIR`: which network directory a founding command acts on.
 //!
-//! Shared by `harvest`, `assemble`, `validate` and `verify-founding`. An
+//! Shared by `harvest`, `assemble` and `verify-founding`. An
 //! explicit `DIR` wins outright and the context is never read, so a command
 //! line stays a complete record of what it acted on; otherwise the current
 //! context's network supplies it, and the resolved directory is echoed on

@@ -135,9 +135,12 @@ enum Command {
                       Joining an existing network is `seismic-tee node configure`, not a \
                       command of this group.",
         after_help = "Commands are listed in the order they should be run: init → harvest → \
-                      assemble → validate → configure. Between init and harvest, provision the \
-                      cohort with the seismic_node Pulumi program (tee/pulumi/seismic_node); \
-                      pulumi destroy tears it down.\n\n\
+                      assemble → configure. Between init and harvest, provision the cohort with \
+                      the seismic_node Pulumi program (tee/pulumi/seismic_node); pulumi destroy \
+                      tears it down.\n\n\
+                      Checking an assembled set later — after a merge, or when it may have \
+                      drifted from its inputs — is `assemble --check`: the same derivation, \
+                      compared with what is on disk instead of written.\n\n\
                       Auditing a founding afterwards is `seismic-tee verify-founding`: not a \
                       founding step, and not a command of this group."
     )]
@@ -310,7 +313,7 @@ mod tests {
         );
         assert_eq!(
             group("network"),
-            ["init", "harvest", "assemble", "validate", "configure"]
+            ["init", "harvest", "assemble", "configure"]
         );
         assert_eq!(group("node"), ["configure", "verify", "status"]);
         assert_eq!(group("admission"), ["promote", "compile"]);
@@ -372,6 +375,18 @@ mod tests {
             vec!["network", "verify-harvest", "n"],
             vec!["verify-harvest", "n"],
             vec!["network", "verify-founding", "n"],
+            // re-deriving and comparing is `assemble --check`
+            vec!["network", "validate", "n"],
+            vec!["network", "validate"],
+            vec!["network", "assemble", "--check", "--force", "n"],
+            vec![
+                "network",
+                "assemble",
+                "--check",
+                "--nodes",
+                "nodes.json",
+                "n",
+            ],
             vec!["tools", "admission", "compile", "p.json"],
             vec!["network", "tools", "admission", "compile", "p.json"],
             vec!["admission", "compile", "-"],
@@ -498,13 +513,14 @@ mod tests {
                 "--summit-bin",
                 "/x/summit",
             ],
-            vec!["network", "validate", "tee/networks/devnet-3"],
+            vec!["network", "assemble", "--check", "tee/networks/devnet-3"],
             // resolved from the context
-            vec!["network", "validate"],
+            vec!["network", "assemble", "--check"],
             vec![
                 "network",
-                "validate",
+                "assemble",
                 "n",
+                "--check",
                 "--reth-bin",
                 "r",
                 "--summit-bin",

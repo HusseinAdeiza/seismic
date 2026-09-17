@@ -37,18 +37,19 @@
 //! holding part of an archive; the pinned set is then only asked to seat that
 //! record. There is no `--pccs-url`: nothing here reaches a network.
 //!
-//! This is `network validate`'s sibling: `validate` audits the artifact set
-//! against itself, this audits the archive the set was pinned from. It is the offline
-//! half of `assemble`'s gate on that archive — the two run one function,
+//! This is `network assemble --check`'s sibling: `--check` re-derives the
+//! artifact set from its inputs and holds the set on disk to the result,
+//! this audits the archive the set was pinned from. It is the offline half
+//! of `assemble`'s gate on that archive — the two run one function,
 //! [`verify_harvest_records`] — with a directory in front of it. Neither
 //! needs the founder's shell-outs, so an auditor needs this binary and
 //! nothing else.
 //!
 //! One pin is not recomputed here: `summit.genesis_config_digest` is summit's
-//! own digest over the genesis and needs a summit build, which `validate`
-//! shells out to. The audit reads the seated set as the genesis file carries
-//! it, after the manifest's own structural check of that file; a genesis
-//! swapped under its manifest is `validate`'s catch.
+//! own digest over the genesis and needs a summit build, which `assemble
+//! --check` shells out to. The audit reads the seated set as the genesis file
+//! carries it, after the manifest's own structural check of that file; a
+//! genesis swapped under its manifest is `--check`'s catch.
 
 use std::collections::BTreeSet;
 use std::path::Path;

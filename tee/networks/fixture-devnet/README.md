@@ -47,7 +47,7 @@ cohort pinned:
    (`.github/workflows/found-devnet.yml` uploads the whole network
    directory), or found a two-node throwaway with the runbook's steps
    1–4 and 8 — `init`, `up`, `ctx set-nodes`, `harvest`, `assemble`,
-   `validate`, `destroy`; no `configure`.
+   `destroy`; no `configure`.
 2. Replace this directory's contents with it, dropping `nodes/`.
 3. Update the table above — the release tag the cohort pinned (the
    stack's `image`), the `measurement_id`, the manifest's name and the

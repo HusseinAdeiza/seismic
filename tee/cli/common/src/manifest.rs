@@ -63,7 +63,7 @@ impl Manifest {
     // before a node is appraised against a document this network never
     // committed to). The *hash* commitments — `eth.genesis_hash`,
     // `summit.genesis_config_digest` — need reth's and summit's own code and
-    // are enforced by the founder's `assemble`/`validate`; these are the
+    // are enforced by the founder's `assemble` (and `assemble --check`); these are the
     // fields tdx-init itself checks at POST time.
 
     /// The reth genesis is valid JSON whose `config.chainId` is this

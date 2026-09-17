@@ -13,14 +13,14 @@
 //! descriptors come from the Pulumi program, which provisions one node or N
 //! from one stack.
 //!
-//! Five commands, in founding order: [`init`] scaffolds a network directory's
+//! Four commands, in founding order: [`init`] scaffolds a network directory's
 //! authored inputs; [`harvest`] collects and DCAP-verifies the cohort's
 //! founding keys; [`assemble`] derives the artifact set and mints
-//! `network_id`; [`validate`] re-runs every gate over it; [`configure`]
-//! founds the cohort — one genesis node plus its joiners — and asserts the
-//! launch against what the manifest pins. Between `init` and `harvest` the
-//! cohort is provisioned with the Pulumi program; `pulumi destroy` tears it
-//! down.
+//! `network_id` (and, with `--check`, re-derives it and holds the set on
+//! disk to the result instead of writing); [`configure`] founds the cohort —
+//! one genesis node plus its joiners — and asserts the launch against what
+//! the manifest pins. Between `init` and `harvest` the cohort is provisioned
+//! with the Pulumi program; `pulumi destroy` tears it down.
 //!
 //! One more command lives in this crate without being a founding step.
 //! [`verify_founding`] is the audit of one: it re-verifies a committed
@@ -58,7 +58,6 @@ pub mod harvest;
 pub mod init;
 pub mod launch;
 pub mod shell_outs;
-pub mod validate;
 pub mod verify_founding;
 
 use std::process::ExitCode;
@@ -73,10 +72,9 @@ pub enum NetworkCommand {
     Init(init::InitArgs),
     /// Harvest + DCAP-verify a founding cohort's summit keys into inputs/.
     Harvest(harvest::HarvestArgs),
-    /// Derive the artifact set from a network directory's inputs.
+    /// Derive the artifact set from a network directory's inputs (--check:
+    /// re-derive and compare with what is on disk instead of writing).
     Assemble(assemble::AssembleArgs),
-    /// Re-run all gates over an assembled network directory.
-    Validate(validate::ValidateArgs),
     /// Configure a cohort in parallel: one genesis + N joiners, one command.
     Configure(configure::ConfigureArgs),
 }
@@ -87,7 +85,6 @@ pub async fn run(command: NetworkCommand) -> anyhow::Result<ExitCode> {
         NetworkCommand::Init(args) => init::run(args).await,
         NetworkCommand::Harvest(args) => harvest::run(args).await,
         NetworkCommand::Assemble(args) => assemble::run(args).await,
-        NetworkCommand::Validate(args) => validate::run(args).await,
         NetworkCommand::Configure(args) => configure::run(args).await,
     }
 }
@@ -110,18 +107,16 @@ mod tests {
         Probe::command().debug_assert();
     }
 
-    /// The five founding commands in founding order — and nothing else: the
+    /// The four founding commands in founding order — and nothing else: the
     /// audit sits at the binary's top level, the policy review in its own
-    /// group.
+    /// group, and checking an assembled set is `assemble --check`, not a
+    /// command.
     #[test]
     fn the_commands_are_listed_in_founding_order() {
         let names: Vec<_> = Probe::command()
             .get_subcommands()
             .map(|c| c.get_name().to_string())
             .collect();
-        assert_eq!(
-            names,
-            ["init", "harvest", "assemble", "validate", "configure"]
-        );
+        assert_eq!(names, ["init", "harvest", "assemble", "configure"]);
     }
 }

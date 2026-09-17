@@ -91,8 +91,8 @@ use crate::founding::{FoundingRecords, SUMMIT_CONSENSUS_PORT, load_harvest_recor
 use crate::gates::hex_0x;
 use crate::launch::{self, LaunchTarget};
 
-/// This command, spelled as the next step after `assemble` or `validate`,
-/// with `genesis` as the genesis node. Which node is genesis is the
+/// This command, spelled as the next step after `assemble` (written or
+/// `--check`ed), with `genesis` as the genesis node. Which node is genesis is the
 /// founder's call and any founding node is a valid one, so callers pass the
 /// first in name order. `configure` takes the manifest, not `DIR`, so an
 /// explicit `DIR` becomes `--manifest`; an explicit `--context` is repeated
@@ -1098,6 +1098,38 @@ mod tests {
             .into_iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect()
+    }
+
+    /// The next-step line `assemble` prints: an explicit `DIR` becomes the
+    /// manifest it holds, an explicit `--context` is repeated, a persisted
+    /// selection needs nothing.
+    #[test]
+    fn the_invocation_carries_the_scope_it_was_given() {
+        let dir = NetworkDir::new("/nets/devnet-1");
+        let args = |dir: Option<&str>, context: Option<&str>| DirArgs {
+            dir: dir.map(PathBuf::from),
+            context: ContextArgs {
+                context: context.map(str::to_string),
+                config: None,
+            },
+        };
+        assert_eq!(
+            invocation("alpha", &args(None, None), &dir),
+            "seismic-tee network configure --genesis-node alpha"
+        );
+        assert_eq!(
+            invocation("alpha", &args(None, Some("devnet-1")), &dir),
+            "seismic-tee network configure --genesis-node alpha --context devnet-1"
+        );
+        assert_eq!(
+            invocation(
+                "alpha",
+                &args(Some("/nets/devnet-1"), Some("devnet-1")),
+                &dir
+            ),
+            "seismic-tee network configure --genesis-node alpha --manifest \
+             /nets/devnet-1/network-manifest.json"
+        );
     }
 
     #[test]

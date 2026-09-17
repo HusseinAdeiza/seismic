@@ -56,8 +56,9 @@ pub const SHELL_OUT_TIMEOUT: Duration = Duration::from_secs(120);
 /// The derivations a founding needs from the sibling binaries.
 ///
 /// Every method takes the artifact as bytes: `assemble` derives from copies
-/// that exist only in memory until the artifact set is written, and
-/// `validate` reads them back from disk — one interface for both.
+/// that exist only in memory until the artifact set is written (or, under
+/// `--check`, compared and never written), and the drift suite reads a
+/// committed set back from disk — one interface for both.
 pub trait Derivations {
     /// `eth.genesis_hash` for this reth genesis.
     fn reth_genesis_hash(&self, genesis: &[u8]) -> impl Future<Output = anyhow::Result<[u8; 32]>>;

@@ -22,7 +22,21 @@
 //! replaced; the manifest itself is pure output. Edits go to the inputs, then
 //! re-assemble. A manifest is immutable for the network's lifetime: an
 //! existing one is never overwritten without `--force`.
+//!
+//! `--check` runs the same derivation and every gate over it, then compares
+//! with what is on disk instead of writing — the shape of `cargo fmt
+//! --check`. An artifact that differs from what the inputs and the harvest
+//! derive to fails by name; nothing is written. It is the check to run after
+//! a merge or whenever an artifact set is suspected of having drifted from
+//! its inputs, and it rests on `assemble` being deterministic, which the
+//! drift suite already relies on when it re-renders the committed manifests.
+//! The one input it does not take from the cohort is the validators' IPs:
+//! those are topology outside the pinned digest and rotate without
+//! re-founding, so `--check` re-derives with the IPs the genesis on disk
+//! seats ([`ValidatorIps::Seated`]) — a rotated box is not a difference, and
+//! no node table is needed, so a committed directory checks as it audits.
 
+use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -41,7 +55,9 @@ use sha2::{Digest as _, Sha256};
 
 use crate::args::DirArgs;
 use crate::configure;
-use crate::founding::{FoundingRecords, Validator, load_founding_set};
+use crate::founding::{
+    FoundingRecords, Validator, ValidatorIps, load_founding_set, seated_validator_ips,
+};
 use crate::gates::{
     ArtifactSet, compile, hex_0x, inject_registry_genesis_storage, run_validation_gates,
 };
@@ -263,6 +279,18 @@ pub async fn assemble(
     })
 }
 
+/// The four files an artifact set is, each at its place in the network
+/// directory with the bytes `assemble` derived for it — what `write` writes
+/// and `check` compares.
+fn artifact_files<'a>(dir: &NetworkDir, assembled: &'a Assembled) -> [(PathBuf, &'a [u8]); 4] {
+    [
+        (dir.manifest(), assembled.manifest.bytes()),
+        (dir.policy(), assembled.policy.as_slice()),
+        (dir.reth_genesis(), assembled.reth_genesis.as_slice()),
+        (dir.summit_genesis(), assembled.summit_genesis.as_slice()),
+    ]
+}
+
 /// Write the network artifact set: manifest, policy, and assemble's copies of
 /// the genesis artifacts the manifest commits to.
 ///
@@ -286,14 +314,42 @@ pub fn write_artifact_set(
     }
     std::fs::create_dir_all(dir.root())
         .with_context(|| format!("creating {}", dir.root().display()))?;
-    for (path, bytes) in [
-        (manifest_path, assembled.manifest.bytes()),
-        (dir.policy(), assembled.policy.as_slice()),
-        (dir.reth_genesis(), assembled.reth_genesis.as_slice()),
-        (dir.summit_genesis(), assembled.summit_genesis.as_slice()),
-    ] {
+    for (path, bytes) in artifact_files(dir, assembled) {
         std::fs::write(&path, bytes).with_context(|| format!("writing {}", path.display()))?;
         eprintln!("wrote {}", path.display());
+    }
+    Ok(())
+}
+
+/// Hold the artifact set on disk to the one just derived: every file must be
+/// byte-for-byte what `write_artifact_set` would write. Nothing is written;
+/// every file that differs or is missing is named in one failure.
+///
+/// Byte equality is the right bar, not gate-passing: a set that passes every
+/// gate against itself can still be another network's — one assembled from
+/// inputs since edited — and the manifest's bytes *are* `network_id`.
+pub fn check_artifact_set(dir: &NetworkDir, assembled: &Assembled) -> anyhow::Result<()> {
+    let mut wrong = Vec::new();
+    for (path, derived) in artifact_files(dir, assembled) {
+        match std::fs::read(&path) {
+            Ok(on_disk) if on_disk == derived => eprintln!("{}: unchanged", path.display()),
+            Ok(_) => wrong.push(format!("{}: differs", path.display())),
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                wrong.push(format!("{}: missing", path.display()));
+            }
+            Err(error) => {
+                return Err(error).with_context(|| format!("reading {}", path.display()));
+            }
+        }
+    }
+    if !wrong.is_empty() {
+        bail!(
+            "the artifact set on disk is not what its inputs derive to:\n  {}\nEither the inputs \
+             moved after the set was assembled — restore them — or the set is stale: re-run \
+             `assemble` without --check (with --force if the manifest is among them: a manifest \
+             that differs is another network_id)",
+            wrong.join("\n  ")
+        );
     }
     Ok(())
 }
@@ -375,8 +431,9 @@ pub struct AssembleArgs {
 
     /// Cohort's node table: `pulumi stack output nodes --json`, i.e.
     /// {<name>: {public_ip, fqdn}, …} — supplies each founding validator's
-    /// IP. Omit it to use the current context's network.
-    #[arg(long, value_name = "FILE")]
+    /// IP. Omit it to use the current context's network. Not read under
+    /// --check, which takes the IPs from the summit genesis on disk.
+    #[arg(long, value_name = "FILE", conflicts_with = "check")]
     pub nodes: Option<PathBuf>,
 
     /// Platform the policy promoted from inputs/measurements.json pins.
@@ -392,8 +449,17 @@ pub struct AssembleArgs {
     pub authority: Address,
 
     /// Overwrite an existing manifest (a new network identity).
-    #[arg(long)]
+    #[arg(long, conflicts_with = "check")]
     pub force: bool,
+
+    /// Derive and gate-check as usual, then compare with the artifact set on
+    /// disk instead of writing it: any artifact that is not what the inputs
+    /// and the harvest derive to fails by name. Nothing is written. Needs no
+    /// node table: the validators' IPs are topology outside the pinned digest
+    /// and are taken from the summit genesis on disk, so a box whose IP moved
+    /// since the founding is not a difference.
+    #[arg(long)]
+    pub check: bool,
 
     #[command(flatten)]
     pub derivations: DerivationArgs,
@@ -423,8 +489,29 @@ pub async fn run(args: AssembleArgs) -> anyhow::Result<ExitCode> {
     }
     let [reth_genesis, summit_genesis, measurements] = inputs;
 
-    let descriptors = load_nodes(args.nodes.as_deref(), &args.dir.context, "--nodes")?;
-    let founding = load_founding_set(&dir, &descriptors)?;
+    // The founding-era IPs under --check, the cohort's current ones otherwise;
+    // see `ValidatorIps`. Read before anything slower, so a directory with no
+    // set to check against is named at once.
+    let descriptors;
+    let ips = if args.check {
+        let path = dir.summit_genesis();
+        if !path.is_file() {
+            bail!(
+                "{} not found — no artifact set to check; derive one with `assemble` without \
+                 --check",
+                path.display()
+            );
+        }
+        let on_disk =
+            std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+        ValidatorIps::Seated(
+            seated_validator_ips(&on_disk).with_context(|| path.display().to_string())?,
+        )
+    } else {
+        descriptors = load_nodes(args.nodes.as_deref(), &args.dir.context, "--nodes")?;
+        ValidatorIps::Cohort(&descriptors)
+    };
+    let founding = load_founding_set(&dir, &ips)?;
     eprintln!(
         "founding set: {} validator(s) from {}",
         founding.validators.len(),
@@ -455,12 +542,16 @@ pub async fn run(args: AssembleArgs) -> anyhow::Result<ExitCode> {
     for warning in &assembled.warnings {
         eprintln!("warning: {warning}");
     }
-    write_artifact_set(&dir, &assembled, args.force)?;
+    if args.check {
+        check_artifact_set(&dir, &assembled)?;
+    } else {
+        write_artifact_set(&dir, &assembled, args.force)?;
+    }
     println!("network_id: {}", assembled.manifest.network_id());
-    // Straight to the founding: the gates `validate` runs and the replay
-    // `verify-founding` runs both already ran above, over this very set.
-    // Genesis is named from the founding set just pinned, so the line
-    // cannot name a node this artifact set does not seat.
+    // Straight to the founding: every gate and the replay `verify-founding`
+    // runs both already ran above, over this very set. Genesis is named from
+    // the founding set just pinned, so the line cannot name a node this
+    // artifact set does not seat.
     let genesis = founding
         .records
         .keys()
@@ -922,6 +1013,129 @@ pub(crate) mod tests {
         assert!(err.contains("measurement policy"), "{err}");
     }
 
+    /// `--check` holds every file on disk to the derivation, names each one
+    /// that differs or is missing, and writes nothing.
+    #[tokio::test]
+    async fn check_holds_the_disk_to_the_derivation_and_writes_nothing() {
+        let authored = authored();
+        let assembled = assemble_with(&authored, FIXTURE_POLICY, &Fake::default())
+            .await
+            .unwrap();
+        let out = NetworkDir::new(authored.dir.path().join("out"));
+
+        // Nothing there yet: every artifact is missing, and stays so.
+        let err = check_artifact_set(&out, &assembled)
+            .unwrap_err()
+            .to_string();
+        for path in [
+            out.manifest(),
+            out.policy(),
+            out.reth_genesis(),
+            out.summit_genesis(),
+        ] {
+            assert!(
+                err.contains(&format!("{}: missing", path.display())),
+                "{err}"
+            );
+        }
+        assert!(!out.root().exists());
+
+        write_artifact_set(&out, &assembled, false).unwrap();
+        check_artifact_set(&out, &assembled).unwrap();
+
+        // The same inputs assembled again still match what was written.
+        let again = assemble_with(&authored, FIXTURE_POLICY, &Fake::default())
+            .await
+            .unwrap();
+        check_artifact_set(&out, &again).unwrap();
+
+        // One edited file is named — and only that one; the edit survives,
+        // because a check never writes.
+        let tampered = b"namespace = \"other\"\n".to_vec();
+        std::fs::write(out.summit_genesis(), &tampered).unwrap();
+        std::fs::remove_file(out.policy()).unwrap();
+        let err = check_artifact_set(&out, &assembled)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains(&format!("{}: differs", out.summit_genesis().display())),
+            "{err}"
+        );
+        assert!(
+            err.contains(&format!("{}: missing", out.policy().display())),
+            "{err}"
+        );
+        assert!(!err.contains(MANIFEST_FILENAME), "{err}");
+        assert!(!err.contains("reth-genesis.json"), "{err}");
+        assert!(err.contains("without --check"), "{err}");
+        assert_eq!(std::fs::read(out.summit_genesis()).unwrap(), tampered);
+        assert!(!out.policy().exists());
+
+        // Inputs that moved after the set was written: the derivation is
+        // another network's, and the manifest is among the differences.
+        std::fs::write(out.policy(), &assembled.policy).unwrap();
+        std::fs::write(out.summit_genesis(), &assembled.summit_genesis).unwrap();
+        let drifted = assemble_with(&authored, &other_policy(), &Fake::default())
+            .await
+            .unwrap();
+        let err = check_artifact_set(&out, &drifted).unwrap_err().to_string();
+        assert!(err.contains(MANIFEST_FILENAME), "{err}");
+        assert!(err.contains("--force"), "{err}");
+        assert_eq!(
+            std::fs::read(out.manifest()).unwrap(),
+            assembled.manifest.bytes()
+        );
+    }
+
+    /// A box whose IP rotated since the founding: re-deriving with the
+    /// cohort's current table would call the on-disk summit genesis stale,
+    /// which is why `--check` re-derives with the IPs that genesis seats —
+    /// the founding-era ones — and finds nothing changed.
+    #[tokio::test]
+    async fn check_takes_the_ips_the_genesis_on_disk_seats_not_the_cohorts() {
+        let authored = authored();
+        let founded = assemble_with(&authored, FIXTURE_POLICY, &Fake::default())
+            .await
+            .unwrap();
+        let out = NetworkDir::new(authored.dir.path().join("out"));
+        write_artifact_set(&out, &founded, false).unwrap();
+
+        async fn with(authored: &Authored, validators: &[Validator]) -> Assembled {
+            assemble(
+                &AssembleInputs {
+                    name: "testnet-1",
+                    reth_genesis: &Artifact::read(&authored.reth_genesis).unwrap(),
+                    summit_genesis: &Artifact::read(&authored.summit_genesis).unwrap(),
+                    policy: FIXTURE_POLICY,
+                    validators,
+                    registry: REGISTRY,
+                    authority: AUTHORITY,
+                },
+                &Fake::default(),
+            )
+            .await
+            .unwrap()
+        }
+        let rotated = Validator {
+            ip_address: "198.51.100.9:18551".into(),
+            ..validator()
+        };
+        let from_cohort = with(&authored, std::slice::from_ref(&rotated)).await;
+        let err = check_artifact_set(&out, &from_cohort)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("summit-genesis.toml: differs"), "{err}");
+
+        let seated = seated_validator_ips(&std::fs::read(out.summit_genesis()).unwrap()).unwrap();
+        assert_eq!(seated[&rotated.node_public_key], validator().ip_address);
+        let founding_era = Validator {
+            ip_address: seated[&rotated.node_public_key].clone(),
+            ..rotated
+        };
+        let from_seated = with(&authored, &[founding_era]).await;
+        check_artifact_set(&out, &from_seated).unwrap();
+    }
+
     #[test]
     fn the_addresses_parse_from_the_flags() {
         let args = AssembleArgs::try_parse_from_probe(&["assemble", "/nets/x"]);
@@ -929,19 +1143,38 @@ pub(crate) mod tests {
         assert_eq!(args.authority, AUTHORITY);
         assert_eq!(args.attestation_type, DEFAULT_ATTESTATION_TYPE);
         assert!(!args.force);
+        assert!(!args.check);
         assert_eq!(args.derivations.reth_bin, "seismic-reth");
         assert_eq!(args.dir.dir.as_deref(), Some(Path::new("/nets/x")));
     }
 
+    /// `--check` writes nothing, so there is nothing for `--force` to
+    /// permit, and reads no node table, so `--nodes` would be ignored: each
+    /// pair is a usage error, not a silent no-op.
+    #[test]
+    fn check_excludes_force_and_nodes() {
+        let args = AssembleArgs::try_parse_from_probe(&["assemble", "--check", "/nets/x"]);
+        assert!(args.check);
+        assert!(AssembleArgs::try_parse_probe(&["assemble", "--check", "--force", "n"]).is_err());
+        assert!(
+            AssembleArgs::try_parse_probe(&["assemble", "--check", "--nodes", "n.json", "n"])
+                .is_err()
+        );
+    }
+
     impl AssembleArgs {
-        fn try_parse_from_probe(argv: &[&str]) -> Self {
+        fn try_parse_probe(argv: &[&str]) -> Result<Self, clap::Error> {
             use clap::Parser as _;
             #[derive(clap::Parser)]
             struct Probe {
                 #[command(flatten)]
                 args: AssembleArgs,
             }
-            Probe::try_parse_from(argv).expect("well-formed argv").args
+            Probe::try_parse_from(argv).map(|probe| probe.args)
+        }
+
+        fn try_parse_from_probe(argv: &[&str]) -> Self {
+            Self::try_parse_probe(argv).expect("well-formed argv")
         }
     }
 }

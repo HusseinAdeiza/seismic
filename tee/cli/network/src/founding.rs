@@ -7,9 +7,11 @@
 //! the context file's `[networks.<name>.nodes]`, imported by `ctx set-nodes`,
 //! or `--nodes FILE` for a script's complete record. `harvest` reads the
 //! credentials and the table to size the cohort before it fetches anything;
-//! `assemble` pairs all three into the founding validator set it pins;
-//! `configure` joins the records with the table for the IPs it delivers and
-//! the keys it asserts the launch against. Each reader validates everything
+//! `assemble` pairs all three into the founding validator set it pins (under
+//! `--check`, the IPs come from the summit genesis on disk instead of the
+//! table — see [`ValidatorIps`]); `configure` joins the records with the
+//! table for the IPs it delivers and the keys it asserts the launch against.
+//! Each reader validates everything
 //! it reads even when an earlier command already did: these are plain
 //! committed files (or a re-imported cohort) that may have changed between
 //! commands.
@@ -229,8 +231,58 @@ pub struct FoundingSet {
     pub records: FoundingRecords,
 }
 
+/// Where each founding validator's `ip_address` comes from.
+///
+/// IPs are topology, not identity: delivered in the summit genesis but
+/// excluded from the config digest the manifest pins, so a box whose IP
+/// rotates after the founding is still the same pinned validator. That is
+/// why there are two sources. `assemble` seats the cohort's current IPs;
+/// `assemble --check` re-derives with the IPs the genesis on disk already
+/// seats, so the comparison asks whether the *identity* still derives from
+/// the inputs and never fails on an IP that moved since the founding — and
+/// needs no node table, so it runs on a committed directory as
+/// `verify-founding` does.
+#[derive(Debug, Clone)]
+pub enum ValidatorIps<'a> {
+    /// The cohort's node table (the context's, or `--nodes`): each box's
+    /// current public IP, given the consensus port.
+    Cohort(&'a Descriptors),
+    /// The IPs a completed summit genesis seats, by node pubkey, verbatim —
+    /// see [`seated_validator_ips`].
+    Seated(BTreeMap<String, String>),
+}
+
+/// The `ip_address` each validator of a completed summit genesis seats, by
+/// `node_public_key`, as the file spells it.
+///
+/// Read as [`ValidatorIps::Seated`] for `assemble --check`. Only the pairing
+/// is read here — the keys' spelling and the seated set's agreement with the
+/// harvest are `verify-founding`'s checks, and the re-derivation `--check`
+/// runs holds every identity field to the inputs anyway.
+pub fn seated_validator_ips(summit_genesis: &[u8]) -> anyhow::Result<BTreeMap<String, String>> {
+    let text = std::str::from_utf8(summit_genesis).context("summit genesis is not valid TOML")?;
+    let genesis: toml::Table = toml::from_str(text).context("summit genesis is not valid TOML")?;
+    let Some(validators) = genesis.get("validators").and_then(toml::Value::as_array) else {
+        bail!(
+            "summit genesis has no validators array — an assembled genesis carries the founding \
+             set; an authored input does not"
+        );
+    };
+    let mut seated = BTreeMap::new();
+    for (index, validator) in validators.iter().enumerate() {
+        let field = |name: &str| -> anyhow::Result<String> {
+            match validator.get(name).and_then(toml::Value::as_str) {
+                Some(value) => Ok(value.to_string()),
+                None => bail!("summit genesis validators[{index}].{name}: expected a string"),
+            }
+        };
+        seated.insert(field("node_public_key")?, field("ip_address")?);
+    }
+    Ok(seated)
+}
+
 /// Pair the harvested cohort with its authored withdrawal credentials and
-/// current IPs into summit validator entries.
+/// IPs into summit validator entries.
 ///
 /// The credentials are positional: the i-th authored address goes to the i-th
 /// harvested box in node-name order, and the counts must match exactly — one
@@ -238,14 +290,11 @@ pub struct FoundingSet {
 /// isn't the cohort the founders authored for, and either way assembling would
 /// pin a set other than the intended one. The pairing is printed and lands
 /// visibly in the emitted genesis, since nothing downstream can tell a swapped
-/// pair from an intended one. IPs come from `descriptors` (the cohort's node
-/// table, resolved by the caller from the context or `--nodes`): delivered in
-/// the genesis file but excluded from its config digest, so the committed
-/// file is a founding-era snapshot and IP churn never re-founds.
-pub fn load_founding_set(
-    dir: &NetworkDir,
-    descriptors: &Descriptors,
-) -> anyhow::Result<FoundingSet> {
+/// pair from an intended one. IPs come from `ips` — the cohort's node table,
+/// or the genesis on disk under `--check` — and are delivered in the genesis
+/// file but excluded from its config digest, so the committed file is a
+/// founding-era snapshot and IP churn never re-founds.
+pub fn load_founding_set(dir: &NetworkDir, ips: &ValidatorIps<'_>) -> anyhow::Result<FoundingSet> {
     let founders = load_founder_credentials(&dir.founders())?;
     let records = load_harvest_records(dir)?;
     if founders.len() != records.len() {
@@ -261,18 +310,35 @@ pub fn load_founding_set(
     }
     let mut validators = Vec::with_capacity(records.len());
     for ((name, record), credentials) in records.iter().zip(&founders) {
-        let Some(descriptor) = descriptors.get(name) else {
-            bail!(
-                "the cohort has no node {name:?} — the cohort's node table supplies each \
-                 founding validator's IP. A harvested box that is gone from the cohort means it \
-                 changed under the harvest: re-found rather than assembling",
-            );
+        let ip_address = match ips {
+            ValidatorIps::Cohort(descriptors) => {
+                let Some(descriptor) = descriptors.get(name) else {
+                    bail!(
+                        "the cohort has no node {name:?} — the cohort's node table supplies each \
+                         founding validator's IP. A harvested box that is gone from the cohort \
+                         means it changed under the harvest: re-found rather than assembling",
+                    );
+                };
+                format!("{}:{SUMMIT_CONSENSUS_PORT}", descriptor.public_ip)
+            }
+            ValidatorIps::Seated(seated) => {
+                let Some(ip_address) = seated.get(&record.node_public_key) else {
+                    bail!(
+                        "{} seats no validator with {name}'s node key {} — the artifact set on \
+                         disk was not assembled from this harvest; re-run `assemble` without \
+                         --check",
+                        dir.summit_genesis().display(),
+                        record.node_public_key,
+                    );
+                };
+                ip_address.clone()
+            }
         };
         eprintln!("founding validator {name}: withdrawals to {credentials}");
         validators.push(Validator {
             node_public_key: record.node_public_key.clone(),
             consensus_public_key: record.consensus_public_key.clone(),
-            ip_address: format!("{}:{SUMMIT_CONSENSUS_PORT}", descriptor.public_ip),
+            ip_address,
             withdrawal_credentials: credentials.clone(),
         });
     }
@@ -480,7 +546,7 @@ pub(crate) mod tests {
             ("node-2", "203.0.113.8", "n2.example.com"),
         ]);
 
-        let set = load_founding_set(&dir, &descriptors).unwrap();
+        let set = load_founding_set(&dir, &ValidatorIps::Cohort(&descriptors)).unwrap();
         assert_eq!(set.validators.len(), 2);
         assert_eq!(set.validators[0].node_public_key, NODE_KEY_1);
         assert_eq!(set.validators[0].ip_address, "203.0.113.7:18551");
@@ -491,6 +557,58 @@ pub(crate) mod tests {
         assert_eq!(set.validators[1].node_public_key, NODE_KEY_2);
         assert_eq!(set.validators[1].ip_address, "203.0.113.8:18551");
         assert_eq!(set.records.len(), 2);
+
+        // Seated IPs stand in for the table verbatim — the founding-era ones,
+        // whatever the boxes' IPs are today — and a harvested key the genesis
+        // does not seat is not this set's.
+        let seated: BTreeMap<String, String> = [
+            (NODE_KEY_1.to_string(), "198.51.100.1:18551".to_string()),
+            (NODE_KEY_2.to_string(), "198.51.100.2:18551".to_string()),
+        ]
+        .into();
+        let set = load_founding_set(&dir, &ValidatorIps::Seated(seated.clone())).unwrap();
+        assert_eq!(set.validators[0].ip_address, "198.51.100.1:18551");
+        assert_eq!(set.validators[1].ip_address, "198.51.100.2:18551");
+
+        let mut one_short = seated;
+        one_short.remove(NODE_KEY_2);
+        let err = load_founding_set(&dir, &ValidatorIps::Seated(one_short))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("seats no validator with node-2's node key"),
+            "{err}"
+        );
+        assert!(err.contains(NODE_KEY_2), "{err}");
+        assert!(err.contains("summit-genesis.toml"), "{err}");
+        assert!(err.contains("without --check"), "{err}");
+    }
+
+    /// The seated IPs are read by node key from a completed genesis, as the
+    /// file spells them; an authored input, which seats nobody, is refused.
+    #[test]
+    fn seated_ips_are_read_by_node_key() {
+        let genesis = format!(
+            "namespace = \"n\"\n\n[[validators]]\nnode_public_key = {NODE_KEY_2:?}\n\
+             ip_address = \"203.0.113.8:18551\"\n\n[[validators]]\nnode_public_key = \
+             {NODE_KEY_1:?}\nip_address = \"203.0.113.7:18551\"\n"
+        );
+        let seated = seated_validator_ips(genesis.as_bytes()).unwrap();
+        assert_eq!(seated.len(), 2);
+        assert_eq!(seated[NODE_KEY_1], "203.0.113.7:18551");
+        assert_eq!(seated[NODE_KEY_2], "203.0.113.8:18551");
+
+        let err = seated_validator_ips(b"namespace = \"n\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no validators array"), "{err}");
+
+        let err = seated_validator_ips(
+            format!("[[validators]]\nnode_public_key = {NODE_KEY_1:?}\n").as_bytes(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("validators[0].ip_address"), "{err}");
     }
 
     #[test]
@@ -503,7 +621,7 @@ pub(crate) mod tests {
             Path::new("inputs/founder-withdrawal-credentials.json"),
             &format!(r#"["0x{}"]"#, "01".repeat(20)),
         );
-        let err = load_founding_set(&dir, &Descriptors::new())
+        let err = load_founding_set(&dir, &ValidatorIps::Cohort(&Descriptors::new()))
             .unwrap_err()
             .to_string();
         assert!(
@@ -518,7 +636,7 @@ pub(crate) mod tests {
             &format!(r#"["0x{}", "0x{}"]"#, "01".repeat(20), "02".repeat(20)),
         );
         let descriptors = descriptors_of(&[("node-1", "203.0.113.7", "n1.example.com")]);
-        let err = load_founding_set(&dir, &descriptors)
+        let err = load_founding_set(&dir, &ValidatorIps::Cohort(&descriptors))
             .unwrap_err()
             .to_string();
         assert!(err.contains("has no node \"node-2\""), "{err}");
