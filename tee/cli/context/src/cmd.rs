@@ -26,7 +26,7 @@ use crate::complete;
 use crate::config::{Config, Network, Shape};
 use crate::env::{self, EnvArgs};
 use crate::exec::{self, ExecArgs};
-use crate::{Context, ContextArgs, Selected, Selection, path, write};
+use crate::{Context, ContextArgs, Selected, Selection, note, path, write};
 
 /// The `ctx` command group: name networks, and select which one — and which
 /// of its nodes — the commands act on.
@@ -256,7 +256,7 @@ fn run_view(args: ConfigArgs) -> anyhow::Result<ExitCode> {
     }
     let text =
         std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-    eprintln!("{}", path.display());
+    note(&path.display());
     print!("{text}");
     Ok(ExitCode::SUCCESS)
 }
@@ -268,7 +268,7 @@ fn run_list(args: ListArgs) -> anyhow::Result<ExitCode> {
         Some(selected) if args.names => name_lines(selected)?,
         _ => {
             if context.config().current.is_none() {
-                eprintln!("no context selected — seismic-tee ctx use <network>[/<node>]");
+                note(&"no context selected — seismic-tee ctx use <network>[/<node>]");
             }
             list_lines(
                 &context,

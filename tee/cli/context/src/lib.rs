@@ -240,10 +240,23 @@ impl Selected<'_> {
     }
 }
 
+/// The style of the context narration: dimmed, so what the file resolved to
+/// reads as background beside the command's own report rather than as part
+/// of it. Dimmed rather than a fixed grey because it follows the terminal's
+/// foreground, so it stays legible on light and dark themes alike. Rendered
+/// only when stderr is a terminal that wants colour (see `anstream` in the
+/// workspace manifest).
+pub const NOTE: anstyle::Style = anstyle::Style::new().dimmed();
+
+/// A line of context narration on stderr, in [`NOTE`] style.
+pub fn note(line: &dyn std::fmt::Display) {
+    anstream::eprintln!("{NOTE}{line}{NOTE:#}");
+}
+
 /// What a context-resolved command is acting on, on stderr — never stdout,
 /// so `eval "$(seismic-tee ctx env)"` stays evaluable.
 pub fn echo(selection: &Selection, resolved: &dyn std::fmt::Display) {
-    eprintln!("context {selection} → {resolved}");
+    note(&format_args!("context {selection} → {resolved}"));
 }
 
 /// A cohort's node table: `flag` when given, else the selected network's.

@@ -13,6 +13,8 @@ authors.workspace = true
 # command group reads this crate, so nothing party-specific belongs in it.
 seismic-tee-common.workspace = true
 
+anstream.workspace = true
+anstyle.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 clap_complete.workspace = true

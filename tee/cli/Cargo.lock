@@ -4404,6 +4404,8 @@ dependencies = [
 name = "seismic-tee-context"
 version = "0.1.0"
 dependencies = [
+ "anstream",
+ "anstyle",
  "anyhow",
  "clap",
  "clap_complete",

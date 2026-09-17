@@ -75,6 +75,13 @@ tdx-init-config = { git = "https://github.com/SeismicSystems/enclave.git", rev =
 # code. Already in the graph through seismic-measurement-admission, whose
 # report is typed in these; one copy, at the enclave's version.
 alloy-primitives = { version = "1", default-features = false, features = ["std", "serde"] }
+# The dimmed style of the context narration on stderr, and the stderr
+# handle that knows when to render it: `anstream::eprintln!` strips the
+# escapes when stderr is not a terminal and honours NO_COLOR, CLICOLOR_FORCE
+# and TERM=dumb, the clig.dev rules, and it is the same pair clap's own help
+# output uses, so both are already in the graph and colour is decided once.
+anstream = "1"
+anstyle = "1"
 anyhow = "1.0"
 base64 = "0.22"
 # "env": ContextArgs's `--context` also reads `SEISMIC_CONTEXT`, so a shell
