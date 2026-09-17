@@ -56,6 +56,17 @@
 //! through the node crate's `build_config` / `post_config` primitives and its
 //! status poller, so each node's POSTed config and wipe-watch are identical —
 //! only `[node].genesis_node` and the bootnode set differ.
+//!
+//! `--check` runs the launch assertions and nothing else: no config is built
+//! or POSTed, nothing is written, and every founding node — every box with a
+//! harvest record — is held to the manifest's pins as it stands now. It is
+//! `assemble --check`'s sibling one step on: that holds the artifact set on
+//! disk to its inputs, this holds the live cohort to the artifact set. A
+//! founder runs it after a launch whose holders had not settled, after a
+//! reboot or a re-image, or whenever the cohort may have drifted from what
+//! was pinned. It waits [`launch::CHECK_TIMEOUT`], not the founding's
+//! readiness window: the cohort is supposed to be up, so a node that does not
+//! answer is reported as such and the check is re-run once it is.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -805,9 +816,15 @@ pub struct ConfigureArgs {
     /// Name of the one genesis node — the node that mints root_key locally
     /// and that the joiners fetch it from — as keyed in the cohort's node
     /// table. Exactly one node per network is genesis; assigning it here (not
-    /// a per-node flag) makes a double-genesis split impossible.
-    #[arg(long, value_name = "NAME", add = ArgValueCandidates::new(complete::nodes))]
-    pub genesis_node: String,
+    /// a per-node flag) makes a double-genesis split impossible. Required,
+    /// except under --check, which assigns no roles.
+    #[arg(
+        long,
+        value_name = "NAME",
+        required_unless_present = "check",
+        add = ArgValueCandidates::new(complete::nodes)
+    )]
+    pub genesis_node: Option<String>,
 
     /// Name of a joining node (fetches root_key from genesis via
     /// getWrappedRootKey). Repeatable. Default: every other node in the
@@ -856,11 +873,40 @@ pub struct ConfigureArgs {
     #[command(flatten)]
     pub verifier: VerifierArgs,
 
+    /// Run the launch assertions and nothing else: every founding node's
+    /// reth must serve the manifest's eth.genesis_hash as block 0, and every
+    /// founding box's holder its harvested keys. Configures nothing, writes
+    /// nothing; for after a launch whose holders had not settled, a reboot,
+    /// a re-image, or whenever the cohort may have drifted from its pins.
+    /// Takes only --manifest and --nodes (or the context): roles, genesis
+    /// files and the appraisal are delivery's, so their flags are refused.
+    #[arg(
+        long,
+        conflicts_with_all = [
+            "genesis_node",
+            "join",
+            "reth_genesis",
+            "summit_genesis",
+            "no_verify",
+            "policy",
+            "measurements",
+            "pccs_url",
+        ]
+    )]
+    pub check: bool,
+
     #[command(flatten)]
     pub context: ContextArgs,
 }
 
 pub async fn run(args: ConfigureArgs) -> anyhow::Result<ExitCode> {
+    if args.check {
+        return check(&args, launch::CHECK_TIMEOUT).await;
+    }
+    let genesis_node = args
+        .genesis_node
+        .as_deref()
+        .expect("clap: --genesis-node is required without --check");
     check_policy_source_files(&args.policy_source, args.no_verify)?;
     // Validate the shared network artifacts once, so a bad one fails fast
     // here rather than as N identical per-node errors mid-dashboard.
@@ -920,7 +966,7 @@ pub async fn run(args: ConfigureArgs) -> anyhow::Result<ExitCode> {
     }
     let summit_genesis = Artifact::new(committed.path(), spliced);
 
-    let mut nodes = build_cohort(&descriptors, &args.genesis_node, args.join.as_deref())?;
+    let mut nodes = build_cohort(&descriptors, genesis_node, args.join.as_deref())?;
     let unharvested: Vec<&str> = nodes
         .iter()
         .filter(|n| !harvest_records.contains_key(&n.name))
@@ -1001,27 +1047,13 @@ pub async fn run(args: ConfigureArgs) -> anyhow::Result<ExitCode> {
         .iter()
         .map(|n| LaunchTarget::new(&n.name, &n.descriptor(), &harvest_records[&n.name]))
         .collect();
-    let genesis_hash = shared.manifest.eth.genesis_hash;
-    println!(
-        "Launch assertion 1/2: every node's reth serves block 0 {}...",
-        hex_0x(&genesis_hash)
-    );
-    launch::assert_cohort_genesis_hash(
-        &targets,
-        genesis_hash,
-        launch::READY_TIMEOUT,
-        launch::POLL_INTERVAL,
-    )
-    .await?;
-    println!("Launch assertion 2/2: every holder serves its pinned founding keys...");
-    launch::assert_cohort_holder_keys(
+    assert_launch(
         &shared.client,
+        shared.manifest.eth.genesis_hash,
         &targets,
         launch::READY_TIMEOUT,
-        launch::POLL_INTERVAL,
     )
     .await?;
-    println!("Launch assertions green: the cohort that launched is the cohort pinned.");
     // The founding is done; what follows is using the network. Only a
     // context-supplied network has a name to select a node under — an
     // explicit --manifest may be a directory nothing is registered for.
@@ -1034,11 +1066,83 @@ pub async fn run(args: ConfigureArgs) -> anyhow::Result<ExitCode> {
         next_step::print(
             "select a node, and point a tool at it:",
             &[
-                format!("seismic-tee ctx use {network}/{}", args.genesis_node),
+                format!("seismic-tee ctx use {network}/{genesis_node}"),
                 "seismic-tee ctx exec -- scast block-number".to_string(),
             ],
         );
     }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Both launch assertions, in order, each announced as it starts: every
+/// target's reth serves `genesis_hash` as block 0, then every target's
+/// holder serves its pinned founding keys. `timeout` is how long a target
+/// that does not answer is waited for — the founding's readiness window from
+/// `configure`, a short one under `--check`.
+async fn assert_launch(
+    client: &reqwest::Client,
+    genesis_hash: [u8; 32],
+    targets: &[LaunchTarget],
+    timeout: Duration,
+) -> anyhow::Result<()> {
+    println!(
+        "Launch assertion 1/2: every node's reth serves block 0 {}...",
+        hex_0x(&genesis_hash)
+    );
+    launch::assert_cohort_genesis_hash(targets, genesis_hash, timeout, launch::POLL_INTERVAL)
+        .await?;
+    println!("Launch assertion 2/2: every holder serves its pinned founding keys...");
+    launch::assert_cohort_holder_keys(client, targets, timeout, launch::POLL_INTERVAL).await?;
+    println!("Launch assertions green: the cohort that launched is the cohort pinned.");
+    Ok(())
+}
+
+/// `--check`: the launch assertions alone, over the founding cohort as it
+/// stands now — nothing is built, sent or written.
+///
+/// The founding cohort is the harvest: every record must still have a node
+/// to reach (`load_founding_facts` refuses otherwise, as delivery does), and
+/// a node the harvest does not know is not a founding box — it joined later
+/// and `node verify` appraises it — so it is named and skipped rather than
+/// held to a pin it never had.
+async fn check(args: &ConfigureArgs, timeout: Duration) -> anyhow::Result<ExitCode> {
+    let manifest_path = resolve_manifest(args.manifest.as_deref(), &args.context)?;
+    let manifest = load_manifest(&manifest_path)?;
+    let dir = NetworkDir::of_manifest(&manifest_path);
+    let descriptors = load_nodes(args.nodes.as_deref(), &args.context, "--nodes")?;
+    let (_, harvest_records) = load_founding_facts(&dir, &descriptors)?;
+    let later: Vec<&str> = descriptors
+        .keys()
+        .filter(|name| !harvest_records.contains_key(*name))
+        .map(String::as_str)
+        .collect();
+    if !later.is_empty() {
+        println!(
+            "Skipping {} node(s) with no founding harvest record — not founding boxes, so \
+             nothing is pinned for them (`seismic-tee node verify` appraises a later joiner): {}",
+            later.len(),
+            later.join(", ")
+        );
+    }
+    let targets: Vec<LaunchTarget> = harvest_records
+        .iter()
+        .map(|(name, record)| LaunchTarget::new(name, &descriptors[name], record))
+        .collect();
+    println!(
+        "Checking {} founding node(s) against the pins of {}",
+        targets.len(),
+        manifest_path.display()
+    );
+    // The eth RPC is reached over TLS; see `node verify` for why the provider
+    // is chosen here.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    assert_launch(
+        &http::client()?,
+        manifest.eth.genesis_hash,
+        &targets,
+        timeout,
+    )
+    .await?;
     Ok(ExitCode::SUCCESS)
 }
 
@@ -1375,7 +1479,8 @@ mod tests {
         ])
         .unwrap()
         .args;
-        assert_eq!(probe.genesis_node, "tmp-devnet-1-1");
+        assert_eq!(probe.genesis_node.as_deref(), Some("tmp-devnet-1-1"));
+        assert!(!probe.check);
         assert_eq!(probe.join, None);
         assert_eq!(probe.email, DEFAULT_EMAIL);
         assert!(!probe.no_verify);
@@ -1413,6 +1518,87 @@ mod tests {
         .args;
         let err = run(probe).await.unwrap_err().to_string();
         assert!(err.contains("--manifest file not found"), "{err}");
+    }
+
+    /// `--check` assigns no roles, so it needs no genesis node — and it
+    /// delivers nothing, so every flag that only delivery reads is refused
+    /// rather than silently ignored.
+    #[test]
+    fn check_needs_no_genesis_node_and_refuses_the_delivery_flags() {
+        #[derive(Parser)]
+        struct Probe {
+            #[command(flatten)]
+            args: ConfigureArgs,
+        }
+        let probe = Probe::try_parse_from(["configure", "--check"])
+            .unwrap()
+            .args;
+        assert!(probe.check);
+        assert_eq!(probe.genesis_node, None);
+
+        for excluded in [
+            &["--genesis-node", "a"][..],
+            &["--join", "b"],
+            &["--reth-genesis", "r.json"],
+            &["--summit-genesis", "s.toml"],
+            &["--no-verify"],
+            &["--policy", "p.json"],
+            &["--measurements", "m.json"],
+            &["--pccs-url", "https://pccs"],
+        ] {
+            let argv: Vec<&str> = ["configure", "--check"]
+                .into_iter()
+                .chain(excluded.iter().copied())
+                .collect();
+            assert!(Probe::try_parse_from(&argv).is_err(), "{excluded:?}");
+        }
+    }
+
+    /// `--check` reaches the launch assertions with nothing delivered: no
+    /// policy or genesis file is needed, nothing is written under the
+    /// network directory, and a node the harvest does not know is skipped
+    /// rather than held to a pin it never had. The nodes here are
+    /// unreachable — the descriptor fixes the ports the assertions dial, so
+    /// a fake server cannot stand in — and the check says so, per node.
+    #[tokio::test]
+    async fn check_asserts_the_founding_cohort_and_writes_nothing() {
+        use crate::founding::tests::{
+            NODE_KEY_1, descriptors_of, network_dir, record, write_harvest,
+        };
+
+        #[derive(Parser)]
+        struct Probe {
+            #[command(flatten)]
+            args: ConfigureArgs,
+        }
+        let (_tmp, dir) = network_dir();
+        std::fs::write(dir.manifest(), FIXTURE_MANIFEST).unwrap();
+        write_harvest(&dir, "node-1", &record(NODE_KEY_1, "cc"));
+        let descriptors = descriptors_of(&[
+            ("node-1", "127.0.0.1", "127.0.0.1:1"),
+            ("node-2", "127.0.0.1", "127.0.0.1:2"),
+        ]);
+        let nodes = dir.root().join("nodes.json");
+        std::fs::write(&nodes, serde_json::to_vec(&descriptors).unwrap()).unwrap();
+
+        let args = Probe::try_parse_from([
+            "configure",
+            "--check",
+            "--manifest",
+            &dir.manifest().to_string_lossy(),
+            "--nodes",
+            &nodes.to_string_lossy(),
+        ])
+        .unwrap()
+        .args;
+        let err = check(&args, Duration::ZERO).await.unwrap_err().to_string();
+        assert!(err.contains("Cohort disagrees"), "{err}");
+        assert!(
+            err.contains("✗ node-1: unreachable via https://127.0.0.1:1/rpc"),
+            "{err}"
+        );
+        assert!(!err.contains("node-2"), "{err}");
+        assert!(!dir.nodes().exists(), "--check wrote under nodes/");
     }
 
     /// The appraisal retries a transient failure and then fails the node; the

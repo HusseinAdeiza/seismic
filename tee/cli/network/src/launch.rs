@@ -48,6 +48,10 @@ use crate::gates::hex_0x;
 /// pauses the residual readiness timeout.
 pub const POLL_INTERVAL: Duration = Duration::from_secs(5);
 pub const READY_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+/// How long `configure --check` waits for a node that does not answer. The
+/// cohort is supposed to be up, so this covers a blip, not a boot: a node
+/// still down after it is reported as such, and the check is re-run.
+pub const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 pub const WAIT_LOG_INTERVAL: Duration = Duration::from_secs(30);
 /// The status read beside a reth probe is a side glance, not the wait.
 const STATUS_GLANCE: Duration = Duration::from_secs(2);
@@ -433,8 +437,8 @@ pub async fn assert_cohort_holder_keys(
          founding window — its pinned validator slot is dead. Re-found (`pulumi destroy` + fresh \
          `up`) rather than running degraded."
     } else {
-        "Holders that never answered may still be booting — re-run `configure` to re-assert once \
-         the cohort settles."
+        "Holders that never answered may still be booting — re-assert once the cohort settles: \
+         `seismic-tee network configure --check`."
     };
     bail!(
         "{} box(es) not serving their pinned founding keys after {}s; the launch assertion \
@@ -707,7 +711,7 @@ mod tests {
         .await
         .unwrap_err()
         .to_string();
-        assert!(err.contains("re-run `configure`"), "{err}");
+        assert!(err.contains("configure --check"), "{err}");
         assert!(!err.contains("Re-found"), "{err}");
     }
 

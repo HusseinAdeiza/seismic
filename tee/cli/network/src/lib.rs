@@ -19,7 +19,8 @@
 //! `network_id` (and, with `--check`, re-derives it and holds the set on
 //! disk to the result instead of writing); [`configure`] founds the cohort —
 //! one genesis node plus its joiners — and asserts the launch against what
-//! the manifest pins. Between `init` and `harvest` the cohort is provisioned
+//! the manifest pins (and, with `--check`, re-asserts a live cohort's launch
+//! without configuring anything). Between `init` and `harvest` the cohort is provisioned
 //! with the Pulumi program; `pulumi destroy` tears it down.
 //!
 //! One more command lives in this crate without being a founding step.
@@ -75,7 +76,9 @@ pub enum NetworkCommand {
     /// Derive the artifact set from a network directory's inputs (--check:
     /// re-derive and compare with what is on disk instead of writing).
     Assemble(assemble::AssembleArgs),
-    /// Configure a cohort in parallel: one genesis + N joiners, one command.
+    /// Configure a cohort in parallel: one genesis + N joiners, one command
+    /// (--check: re-assert the launch against the manifest's pins instead of
+    /// configuring).
     Configure(configure::ConfigureArgs),
 }
 
@@ -109,8 +112,8 @@ mod tests {
 
     /// The four founding commands in founding order — and nothing else: the
     /// audit sits at the binary's top level, the policy review in its own
-    /// group, and checking an assembled set is `assemble --check`, not a
-    /// command.
+    /// group, and checking an assembled set or a launched cohort is a
+    /// `--check` on the command that produced it, not a command.
     #[test]
     fn the_commands_are_listed_in_founding_order() {
         let names: Vec<_> = Probe::command()

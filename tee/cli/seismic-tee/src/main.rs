@@ -140,7 +140,10 @@ enum Command {
                       tears it down.\n\n\
                       Checking an assembled set later — after a merge, or when it may have \
                       drifted from its inputs — is `assemble --check`: the same derivation, \
-                      compared with what is on disk instead of written.\n\n\
+                      compared with what is on disk instead of written. Checking a launched \
+                      cohort — after a reboot or a re-image, or when its holders had not \
+                      settled at launch — is `configure --check`: the launch assertions \
+                      again, with nothing configured.\n\n\
                       Auditing a founding afterwards is `seismic-tee verify-founding`: not a \
                       founding step, and not a command of this group."
     )]
