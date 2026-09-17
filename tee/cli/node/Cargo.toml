@@ -26,6 +26,7 @@ tdx-init-config.workspace = true
 anyhow.workspace = true
 base64.workspace = true
 clap.workspace = true
+clap_complete.workspace = true
 hex.workspace = true
 jsonrpsee.workspace = true
 reqwest.workspace = true

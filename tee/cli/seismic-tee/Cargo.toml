@@ -16,7 +16,9 @@ seismic-tee-context.workspace = true
 seismic-tee-network.workspace = true
 seismic-tee-node.workspace = true
 
+anyhow.workspace = true
 clap.workspace = true
+clap_complete.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]

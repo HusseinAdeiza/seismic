@@ -23,6 +23,7 @@ seismic-verify-quote.workspace = true
 alloy-primitives.workspace = true
 anyhow.workspace = true
 clap.workspace = true
+clap_complete.workspace = true
 hex.workspace = true
 jsonrpsee.workspace = true
 rand.workspace = true

@@ -17,9 +17,11 @@ use std::process::ExitCode;
 
 use anyhow::{Context as _, bail};
 use clap::{Args, Subcommand};
+use clap_complete::ArgValueCandidates;
 use seismic_tee_common::descriptor::parse_descriptors;
 use seismic_tee_common::load_descriptors;
 
+use crate::complete;
 use crate::config::{Network, Shape};
 use crate::env::{self, EnvArgs};
 use crate::exec::{self, ExecArgs};
@@ -72,7 +74,7 @@ pub struct UseArgs {
     /// <network>, <network>/<node>, or `-` for the previous selection. A bare
     /// name with no `/` is a registered network when one is named that; else
     /// a node when exactly one network is registered; else a network.
-    #[arg(value_name = "CONTEXT")]
+    #[arg(value_name = "CONTEXT", add = ArgValueCandidates::new(complete::selections))]
     pub selection: Option<String>,
 
     /// Context file to write. Default: $XDG_CONFIG_HOME/seismic/config.toml,
@@ -93,7 +95,7 @@ pub struct ListArgs {
 #[derive(Debug, Args)]
 pub struct SetNetworkArgs {
     /// The name to register the network under.
-    #[arg(value_name = "NAME")]
+    #[arg(value_name = "NAME", add = ArgValueCandidates::new(complete::networks))]
     pub name: String,
 
     /// A network directory (from `network init`): the committed artifact
@@ -127,7 +129,7 @@ pub struct SetNetworkArgs {
 pub struct SetNodesArgs {
     /// The network to import the cohort into. Created, with nodes only,
     /// when unregistered.
-    #[arg(value_name = "NETWORK")]
+    #[arg(value_name = "NETWORK", add = ArgValueCandidates::new(complete::networks))]
     pub name: String,
 
     /// Context file to write. Default: $XDG_CONFIG_HOME/seismic/config.toml,

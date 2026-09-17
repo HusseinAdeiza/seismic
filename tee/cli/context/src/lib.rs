@@ -22,6 +22,7 @@
 
 pub mod args;
 pub mod cmd;
+pub mod complete;
 pub mod config;
 pub mod env;
 pub mod exec;

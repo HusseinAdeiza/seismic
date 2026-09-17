@@ -65,9 +65,10 @@ use std::time::Duration;
 
 use anyhow::{Context as _, bail};
 use clap::Args;
+use clap_complete::ArgValueCandidates;
 use seismic_tee_common::http::TDX_INIT_PORT;
 use seismic_tee_common::{Artifact, Descriptors, Manifest, NetworkDir, NodeDescriptor, http, rpc};
-use seismic_tee_context::{ContextArgs, load_nodes};
+use seismic_tee_context::{ContextArgs, complete, load_nodes};
 use seismic_tee_node::configure::{
     ConfigInputs, DEFAULT_EMAIL, TDX_INIT_LISTENER_TIMEOUT, TDX_INIT_RETRY_INTERVAL, build_config,
     post_config_within, render_config, resolve_reth_genesis, resolve_summit_genesis, write_record,
@@ -787,13 +788,13 @@ pub struct ConfigureArgs {
     /// cohort's node table. Exactly one node per network is genesis;
     /// assigning it here (not a per-node flag) makes a double-genesis split
     /// impossible.
-    #[arg(long, value_name = "NAME")]
+    #[arg(long, value_name = "NAME", add = ArgValueCandidates::new(complete::nodes))]
     pub genesis: String,
 
     /// Name of a joining node (fetches root_key from genesis via
     /// getWrappedRootKey). Repeatable. Default: every other node in the
     /// cohort's node table; name a subset to configure only those.
-    #[arg(long, value_name = "NAME")]
+    #[arg(long, value_name = "NAME", add = ArgValueCandidates::new(complete::nodes))]
     pub join: Option<Vec<String>>,
 
     /// Network manifest JSON (from `assemble`); → [network]. The network

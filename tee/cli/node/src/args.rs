@@ -12,8 +12,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::bail;
 use clap::Args;
+use clap_complete::ArgValueCandidates;
 use seismic_tee_common::{NodeDescriptor, load_descriptors, select_descriptor};
-use seismic_tee_context::{Context, ContextArgs, Selection, echo};
+use seismic_tee_context::{Context, ContextArgs, Selection, complete, echo};
 
 #[derive(Debug, Clone, Args)]
 pub struct NodeArgs {
@@ -26,7 +27,7 @@ pub struct NodeArgs {
 
     /// Which node in --node to act on (its key). Optional when the file holds
     /// exactly one, or when the context names it.
-    #[arg(long, value_name = "NAME")]
+    #[arg(long, value_name = "NAME", add = ArgValueCandidates::new(complete::nodes))]
     pub name: Option<String>,
 
     #[command(flatten)]

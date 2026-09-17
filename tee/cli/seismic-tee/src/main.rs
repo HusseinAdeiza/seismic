@@ -28,15 +28,29 @@
 //! The client and security council have no CLI work today, so no group
 //! stands empty for them.
 //!
+//! Tab completion belongs to no party, so it is not a command: the root's
+//! `--completions <SHELL>` option prints the shell code that turns it on,
+//! and sits with `--help` and `--version`, leaving the command listing a
+//! who-runs-what. (The `help` subcommand is disabled for the same reason;
+//! `--help` is the one spelling.) Completion is dynamic — each tab press re-enters this binary through
+//! [`CompleteEnv`], which walks the clap tree for flags and subcommand names
+//! and calls the candidate functions in [`seismic_tee_context::complete`] for
+//! the values an operator actually struggles to type: contexts, networks and
+//! nodes, read from nothing but the context file.
+//!
 //! This crate is the mount point and nothing else. The library crates' one-way
 //! dependency rule — `common` and `admission` on neither side, `node` only on
 //! `common`, only `network` on both — is what keeps each party's crate free
 //! of the others' dependencies, and a binary that links them all changes
 //! nothing about it.
 
+use std::io::Write as _;
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand};
+use anyhow::{Context as _, bail};
+use clap::{CommandFactory as _, Parser, Subcommand};
+use clap_complete::Shell;
+use clap_complete::env::{CompleteEnv, Shells};
 use seismic_tee_admission::AdmissionCommand;
 use seismic_tee_context::cmd::CtxCommand;
 use seismic_tee_network::NetworkCommand;
@@ -45,6 +59,12 @@ use seismic_tee_node::NodeCommand;
 
 /// The name the binary is installed and invoked as.
 const BIN_NAME: &str = "seismic-tee";
+
+/// The environment variable the completion engine is entered through:
+/// `COMPLETE=bash seismic-tee` prints the registration script, and the script
+/// sets it on every callback. `--completions` prints the same script under a
+/// spelling an operator can find in `--help`.
+const COMPLETE_VAR: &str = "COMPLETE";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -57,11 +77,41 @@ const BIN_NAME: &str = "seismic-tee";
                   (governance: the policies that decide which images a network accepts) — and \
                   the auditor's verify-founding at the top level.\n\n\
                   Never provisions: every command starts at the node descriptors the Pulumi \
-                  program produces, or at a network directory."
+                  program produces, or at a network directory.",
+    // The listing is the parties; `--help` is the one way to ask for it.
+    disable_help_subcommand = true,
+    // `--completions` stands alone, and nothing at all prints this help.
+    args_conflicts_with_subcommands = true,
+    arg_required_else_help = true
 )]
 struct Cli {
+    /// Print the shell code that turns on tab completion, of command and
+    /// context names alike: source <(seismic-tee --completions bash)
+    #[arg(
+        long,
+        value_name = "SHELL",
+        value_enum,
+        num_args = 0..=1,
+        long_help = "Print the shell code that turns on tab completion for seismic-tee.\n\n\
+                     Completes flags and command names, and the values an operator types \
+                     most: every <network> and <network>/<node> in the context file for \
+                     `ctx use` and `--context`, the registered networks for `ctx set-nodes` \
+                     and `ctx set-network`, and the selected network's nodes for `--name`, \
+                     `--genesis` and `--join`. Names come from the context file alone — no \
+                     RPC, no Pulumi — so a tab press never waits on the network.\n\n\
+                     Add the line for your shell to its rc file:\n  \
+                     bash:   source <(seismic-tee --completions bash)\n  \
+                     zsh:    source <(seismic-tee --completions zsh)\n  \
+                     fish:   seismic-tee --completions fish | source\n\n\
+                     The code calls back into this binary on every tab press, at the path it \
+                     was printed from, so re-source it after moving or upgrading the binary — \
+                     an rc line does that on every new shell. SHELL defaults to what $SHELL \
+                     names."
+    )]
+    completions: Option<Option<Shell>>,
+
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 /// The groups in the trust model's order of appearance in a network's life:
@@ -128,7 +178,42 @@ enum Command {
     VerifyFounding(VerifyFoundingArgs),
 }
 
+/// The registration script for `shell` (`--completions [SHELL]`), the same
+/// one `COMPLETE=<shell> seismic-tee` prints — the engine's own spelling,
+/// which the script itself uses when it calls back. Registered under the
+/// installed name (the word the operator types), calling back to the binary
+/// that printed it.
+fn run_completions(shell: Option<Shell>) -> anyhow::Result<ExitCode> {
+    let shell = match shell.or_else(Shell::from_env) {
+        Some(shell) => shell,
+        None => bail!(
+            "cannot tell the shell from $SHELL — name it: seismic-tee --completions \
+             <bash|zsh|fish|elvish|powershell>"
+        ),
+    };
+    let shells = Shells::builtins();
+    let completer = shells
+        .completer(&shell.to_string())
+        .with_context(|| format!("no dynamic completer for {shell}"))?;
+    let bin_path = std::env::current_exe().context("locating this binary")?;
+    let mut script = Vec::new();
+    completer.write_registration(
+        COMPLETE_VAR,
+        BIN_NAME,
+        BIN_NAME,
+        &bin_path.to_string_lossy(),
+        &mut script,
+    )?;
+    std::io::stdout().write_all(&script)?;
+    Ok(ExitCode::SUCCESS)
+}
+
 fn main() -> ExitCode {
+    // A completion callback never reaches the parser: it answers and exits
+    // here, before anything below can open a file or a socket.
+    CompleteEnv::with_factory(Cli::command)
+        .var(COMPLETE_VAR)
+        .complete();
     let cli = Cli::parse();
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(runtime) => runtime,
@@ -138,12 +223,19 @@ fn main() -> ExitCode {
         }
     };
     let result = runtime.block_on(async {
-        match cli.command {
-            Command::Ctx { command } => seismic_tee_context::cmd::run(command),
-            Command::Network { command } => seismic_tee_network::run(command).await,
-            Command::Node { command } => seismic_tee_node::run(command).await,
-            Command::Admission { command } => seismic_tee_admission::run(command),
-            Command::VerifyFounding(args) => seismic_tee_network::verify_founding::run(args).await,
+        match (cli.completions, cli.command) {
+            (Some(shell), _) => run_completions(shell),
+            (None, Some(command)) => match command {
+                Command::Ctx { command } => seismic_tee_context::cmd::run(command),
+                Command::Network { command } => seismic_tee_network::run(command).await,
+                Command::Node { command } => seismic_tee_node::run(command).await,
+                Command::Admission { command } => seismic_tee_admission::run(command),
+                Command::VerifyFounding(args) => {
+                    seismic_tee_network::verify_founding::run(args).await
+                }
+            },
+            // `arg_required_else_help`: clap has already printed the help.
+            (None, None) => unreachable!("clap requires an argument or a subcommand"),
         }
     });
     match result {
@@ -186,7 +278,8 @@ mod tests {
     }
 
     /// One group per party with CLI work, in the order a network meets them,
-    /// and the auditor's command at the top level.
+    /// and the auditor's command at the top level. Nothing else in the
+    /// listing: no `help` verb, and completion is an option, not a command.
     #[test]
     fn the_groups_follow_the_trust_models_parties() {
         let cli = Cli::command();
@@ -194,6 +287,13 @@ mod tests {
             subcommand_names(&cli),
             ["ctx", "network", "node", "admission", "verify-founding"]
         );
+        assert!(cli.is_disable_help_subcommand_set());
+        let completions = cli
+            .get_arguments()
+            .find(|a| a.get_id() == "completions")
+            .unwrap();
+        assert!(!completions.is_hide_set());
+        assert_eq!(completions.get_long(), Some("completions"));
         let group = |name: &str| subcommand_names(cli.find_subcommand(name).unwrap());
         assert_eq!(
             group("ctx"),
@@ -217,6 +317,53 @@ mod tests {
         assert!(subcommand_names(cli.find_subcommand("verify-founding").unwrap()).is_empty());
     }
 
+    /// Every shell `--completions <SHELL>` accepts has a dynamic completer to
+    /// print for: the argument's enum is clap_complete's static one, and its
+    /// spellings must be the names the dynamic engine answers to.
+    #[test]
+    fn every_offered_shell_has_a_dynamic_completer() {
+        use clap::ValueEnum as _;
+        let shells = Shells::builtins();
+        for shell in Shell::value_variants() {
+            assert!(shells.completer(&shell.to_string()).is_some(), "{shell}");
+        }
+    }
+
+    /// The candidate functions are wired to the arguments an operator types
+    /// a context, network or node name into, and to no path argument. The
+    /// closure itself is opaque; what can be checked is that the derive
+    /// attached the extension.
+    #[test]
+    fn the_name_arguments_carry_completion_candidates() {
+        use clap_complete::ArgValueCandidates;
+        let cli = Cli::command();
+        let arg = |path: &[&str], id: &str| {
+            let mut command = &cli;
+            for name in path {
+                command = command.find_subcommand(name).unwrap();
+            }
+            command
+                .get_arguments()
+                .find(|a| a.get_id() == id)
+                .unwrap_or_else(|| panic!("{path:?} has no `{id}`"))
+                .get::<ArgValueCandidates>()
+                .is_some()
+        };
+        assert!(arg(&["ctx", "use"], "selection"));
+        assert!(arg(&["ctx", "set-nodes"], "name"));
+        assert!(arg(&["ctx", "set-network"], "name"));
+        for verb in ["configure", "verify", "status"] {
+            assert!(arg(&["node", verb], "name"), "{verb}");
+            assert!(arg(&["node", verb], "context"), "{verb}");
+        }
+        assert!(arg(&["network", "configure"], "genesis"));
+        assert!(arg(&["network", "configure"], "join"));
+        assert!(arg(&["network", "harvest"], "context"));
+        assert!(arg(&["verify-founding"], "context"));
+        // A path is not a name: the file arguments complete as files.
+        assert!(!arg(&["node", "configure"], "node"));
+    }
+
     /// "Harvest" is the founder's internal step name: an auditor never types
     /// it, and the retired `tools` spellings are gone rather than aliased.
     #[test]
@@ -229,6 +376,12 @@ mod tests {
             vec!["network", "tools", "admission", "compile", "p.json"],
             vec!["admission", "compile", "-"],
             vec!["configure", "--node", "n.json", "--manifest", "m.json"],
+            // completion is an option; `help` is `--help`
+            vec!["completions", "bash"],
+            vec!["--completions", "bash", "ctx", "list"],
+            vec!["ctx", "list", "--completions", "bash"],
+            vec!["help"],
+            vec!["help", "ctx"],
         ] {
             let full: Vec<&str> = std::iter::once(BIN_NAME)
                 .chain(argv.iter().copied())
@@ -501,6 +654,11 @@ mod tests {
             // resolved from the context
             vec!["verify-founding"],
             vec!["verify-founding", "--record", "n-2"],
+            // tab completion
+            vec!["--completions", "bash"],
+            vec!["--completions", "zsh"],
+            vec!["--completions", "fish"],
+            vec!["--completions"],
         ] {
             let full: Vec<&str> = std::iter::once(BIN_NAME)
                 .chain(argv.iter().copied())

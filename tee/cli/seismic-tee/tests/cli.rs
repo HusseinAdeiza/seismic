@@ -330,3 +330,154 @@ fn node_status_echoes_the_resolved_node_on_stderr_and_the_status_on_stdout() {
         "{stderr}"
     );
 }
+
+/// One tab press, as the registration script makes it: the binary entered
+/// through `COMPLETE`, handed the shell's words — the command name first,
+/// like bash's `COMP_WORDS` — and the index of the one being completed, the
+/// last. The candidates come back one per line.
+fn complete(sandbox: &Sandbox, words: &[&str], extra_env: &[(&str, &str)]) -> Vec<String> {
+    let mut command = sandbox.command();
+    command
+        .env("COMPLETE", "bash")
+        .env("_CLAP_COMPLETE_INDEX", words.len().to_string())
+        .arg("--")
+        .arg("seismic-tee")
+        .args(words);
+    for (key, value) in extra_env {
+        command.env(key, value);
+    }
+    let output = command.output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    stdout.lines().map(str::to_string).collect()
+}
+
+/// The value candidates of a tab press: [`complete`] less the flags clap
+/// offers alongside them on an empty word (`--config`, `--help`), which are
+/// the static half's and not what these tests are about.
+fn names(sandbox: &Sandbox, words: &[&str], extra_env: &[(&str, &str)]) -> Vec<String> {
+    complete(sandbox, words, extra_env)
+        .into_iter()
+        .filter(|word| !word.starts_with("--"))
+        .collect()
+}
+
+/// The dynamic half of the ticket: the names an operator struggles to type
+/// come out of the context file — and nothing else in the sandbox exists for
+/// the completer to have read.
+#[test]
+fn tab_completes_context_network_and_node_names_from_the_config_file() {
+    let sandbox = Sandbox::new(TWO_NODE_CONFIG);
+
+    // Static: a subcommand name, from the clap tree.
+    assert_eq!(complete(&sandbox, &["no"], &[]), ["node"]);
+
+    // `ctx use <TAB>`: every network and <network>/<node>. No `previous` in
+    // the file, so no `-`.
+    assert_eq!(
+        names(&sandbox, &["ctx", "use", ""], &[]),
+        ["devnet-1", "devnet-1/alpha", "devnet-1/beta"]
+    );
+    // The typed prefix narrows it.
+    assert_eq!(
+        names(&sandbox, &["ctx", "use", "devnet-1/b"], &[]),
+        ["devnet-1/beta"]
+    );
+    // `--context <TAB>` is the same set.
+    assert_eq!(
+        names(&sandbox, &["node", "status", "--context", ""], &[]),
+        ["devnet-1", "devnet-1/alpha", "devnet-1/beta"]
+    );
+    // `ctx set-nodes <TAB>`: the registered networks.
+    assert_eq!(
+        names(&sandbox, &["ctx", "set-nodes", ""], &[]),
+        ["devnet-1"]
+    );
+    // `--name <TAB>`: the selected network's nodes.
+    assert_eq!(
+        names(&sandbox, &["node", "status", "--name", ""], &[]),
+        ["alpha", "beta"]
+    );
+    assert_eq!(
+        names(&sandbox, &["network", "configure", "--genesis", ""], &[]),
+        ["alpha", "beta"]
+    );
+    // The shell's pinned selection scopes `--name` the way it scopes the
+    // command; one that names no registered network falls back to every
+    // node the file holds.
+    assert_eq!(
+        names(
+            &sandbox,
+            &["node", "verify", "--name", ""],
+            &[("SEISMIC_CONTEXT", "devnet-1/beta")]
+        ),
+        ["alpha", "beta"]
+    );
+    assert_eq!(
+        names(
+            &sandbox,
+            &["node", "verify", "--name", ""],
+            &[("SEISMIC_CONTEXT", "elsewhere")]
+        ),
+        ["alpha", "beta"]
+    );
+}
+
+/// An unreadable context file contributes no names rather than an error in
+/// the prompt; the static half — flags and subcommands — still completes.
+#[test]
+fn a_broken_config_file_completes_to_nothing_quietly() {
+    let sandbox = Sandbox::new("current = 3\nthis is not toml");
+    let offered = complete(&sandbox, &["ctx", "use", ""], &[]);
+    assert!(
+        !offered.is_empty() && offered.iter().all(|word| word.starts_with('-')),
+        "{offered:?}"
+    );
+    assert_eq!(complete(&sandbox, &["ctx", "us"], &[]), ["use"]);
+}
+
+/// `--completions <SHELL>` is the operator-facing spelling of the engine's
+/// `COMPLETE=<shell> seismic-tee`: byte-identical output, registered under
+/// the installed name and calling back to this binary by absolute path.
+#[test]
+fn completions_prints_the_engines_registration_script() {
+    let sandbox = Sandbox::new(TWO_NODE_CONFIG);
+
+    let verb = sandbox
+        .command()
+        .args(["--completions", "bash"])
+        .output()
+        .unwrap();
+    assert!(verb.status.success(), "{verb:?}");
+    let script = String::from_utf8(verb.stdout).unwrap();
+    assert!(
+        script.contains("-F _clap_complete_seismic_tee seismic-tee"),
+        "{script}"
+    );
+    assert!(
+        script.contains(env!("CARGO_BIN_EXE_seismic-tee")),
+        "{script}"
+    );
+
+    let engine = sandbox.command().env("COMPLETE", "bash").output().unwrap();
+    assert!(engine.status.success(), "{engine:?}");
+    assert_eq!(String::from_utf8(engine.stdout).unwrap(), script);
+
+    // The shell comes from $SHELL when not named, and is an error when it
+    // cannot: the sandbox clears the environment.
+    let zsh = sandbox
+        .command()
+        .env("SHELL", "/bin/zsh")
+        .arg("--completions")
+        .output()
+        .unwrap();
+    assert!(zsh.status.success(), "{zsh:?}");
+    assert!(
+        String::from_utf8(zsh.stdout).unwrap().contains("compdef"),
+        "not a zsh script"
+    );
+    let unknown = sandbox.command().arg("--completions").output().unwrap();
+    assert!(!unknown.status.success(), "{unknown:?}");
+    let stderr = String::from_utf8(unknown.stderr).unwrap();
+    assert!(stderr.contains("$SHELL"), "{stderr}");
+}
