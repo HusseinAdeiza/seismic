@@ -306,7 +306,7 @@ mod tests {
             [
                 "use",
                 "list",
-                "show",
+                "view",
                 "env",
                 "exec",
                 "set-network",
@@ -427,6 +427,9 @@ mod tests {
         for argv in [
             // ctx
             vec!["ctx", "list"],
+            vec!["ctx", "list", "--names"],
+            vec!["ctx", "list", "--names", "devnet-1"],
+            vec!["ctx", "view"],
             vec!["ctx", "unset"],
             vec!["ctx", "set-nodes", "devnet-1"],
             vec!["ctx", "use", "devnet-1/alpha"],
@@ -434,6 +437,16 @@ mod tests {
             vec!["ctx", "env"],
             vec!["ctx", "env", "--unset"],
             vec!["ctx", "exec", "--", "scast", "block-number"],
+            vec![
+                "ctx",
+                "exec",
+                "--name",
+                "alpha",
+                "--",
+                "scast",
+                "rpc",
+                "seismic_getTeePublicKey",
+            ],
             vec![
                 "ctx",
                 "set-network",

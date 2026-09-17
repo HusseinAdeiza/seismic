@@ -160,6 +160,85 @@ fn env_unset_is_the_reverse() {
     );
 }
 
+/// `view`'s stdout is the file, byte for byte, and its path goes to stderr:
+/// a redirect captures a faithful copy.
+#[test]
+fn view_prints_the_file_on_stdout_and_its_path_on_stderr() {
+    let sandbox = Sandbox::new(TWO_NODE_CONFIG);
+
+    let output = sandbox.command().args(["ctx", "view"]).output().unwrap();
+
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), TWO_NODE_CONFIG);
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(
+        stderr.trim_end(),
+        sandbox
+            .dir
+            .path()
+            .join("config/seismic/config.toml")
+            .to_str()
+            .unwrap()
+    );
+}
+
+/// `--names` is defined by its stdout: the bare names, one per line, with no
+/// marker and no narration, so `$(…)` word-splits to exactly the table's
+/// keys. The scope comes from `current` here — a network-only selection is
+/// the shape a founder holds right after `init` and `set-nodes`.
+#[test]
+fn list_names_prints_bare_node_names_and_nothing_else() {
+    let sandbox = Sandbox::new(NETWORK_ONLY_CONFIG);
+
+    let output = sandbox
+        .command()
+        .args(["ctx", "list", "--names"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "alpha\nbeta\n");
+    assert_eq!(String::from_utf8(output.stderr).unwrap(), "");
+}
+
+/// The loop the ticket is for, run by a shell: `ctx list --names` is the
+/// header and `ctx exec --name` the body, so `scast` reaches each node in
+/// turn with that node's URL and a context pinned to it — and one child's
+/// exit code does not stop the loop.
+#[test]
+fn a_shell_loop_over_list_names_reaches_every_node_through_exec() {
+    let sandbox = Sandbox::new(NETWORK_ONLY_CONFIG);
+
+    let output = sandbox
+        .command()
+        .env("SEISMIC_TEE", env!("CARGO_BIN_EXE_seismic-tee"))
+        .args([
+            "ctx",
+            "exec",
+            "--name",
+            "alpha",
+            "--",
+            "/bin/sh",
+            "-c",
+            // Under `exec`, SEISMIC_CONTEXT is pinned to alpha: the loop's
+            // own `--name` must win over it for beta.
+            r#"for n in $("$SEISMIC_TEE" ctx list --names); do
+                   "$SEISMIC_TEE" ctx exec --name "$n" -- scast block-number
+               done"#,
+        ])
+        .output()
+        .unwrap();
+
+    // The shell's status is its last command's: the stub's 7, from beta —
+    // each body carries its own exit code, and alpha's did not end the loop.
+    assert_eq!(output.status.code(), Some(7), "{output:?}");
+    assert_eq!(
+        sandbox.log(),
+        "block-number\nhttps://alpha.example.com/rpc\ndevnet-1/alpha\n\
+         block-number\nhttps://beta.example.com/rpc\ndevnet-1/beta\n"
+    );
+}
+
 #[test]
 fn exec_hands_the_child_the_selected_nodes_rpc_url_and_context() {
     let sandbox = Sandbox::new(TWO_NODE_CONFIG);
@@ -393,6 +472,8 @@ fn tab_completes_context_network_and_node_names_from_the_config_file() {
         names(&sandbox, &["ctx", "set-nodes", ""], &[]),
         ["devnet-1"]
     );
+    // `ctx list <TAB>`: the same, the network to narrow to.
+    assert_eq!(names(&sandbox, &["ctx", "list", ""], &[]), ["devnet-1"]);
     // `--name <TAB>`: the selected network's nodes.
     assert_eq!(
         names(&sandbox, &["node", "status", "--name", ""], &[]),

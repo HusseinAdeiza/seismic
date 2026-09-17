@@ -2,8 +2,9 @@
 //! other commands act on.
 //!
 //! Eight verbs. [`CtxCommand::Use`] selects a context and refuses one that
-//! points at nothing; [`CtxCommand::List`] and [`CtxCommand::Show`] read the
-//! file back; [`CtxCommand::Env`] and [`CtxCommand::Exec`] hand the selection
+//! points at nothing; [`CtxCommand::List`] reads the file back, marking the
+//! selection, and [`CtxCommand::View`] prints it as it is on disk;
+//! [`CtxCommand::Env`] and [`CtxCommand::Exec`] hand the selection
 //! to a shell or a child process (their own modules, [`crate::env`] and
 //! [`crate::exec`]); [`CtxCommand::SetNetwork`] registers or updates a network's
 //! pointers; [`CtxCommand::SetNodes`] imports a network's cohort from stdin,
@@ -25,7 +26,7 @@ use crate::complete;
 use crate::config::{Config, Network, Shape};
 use crate::env::{self, EnvArgs};
 use crate::exec::{self, ExecArgs};
-use crate::{Context, Selected, Selection, path, write};
+use crate::{Context, ContextArgs, Selected, Selection, path, write};
 
 /// The `ctx` command group: name networks, and select which one — and which
 /// of its nodes — the commands act on.
@@ -34,10 +35,11 @@ pub enum CtxCommand {
     /// Select the network, and node, the other commands act on:
     /// <network>, <network>/<node>, or `-` for the previous.
     Use(UseArgs),
-    /// List every <network>/<node> in the file, marking the current one.
+    /// List every network and its nodes, marking the current selection — or,
+    /// with --names, one network's bare node names for a shell loop.
     List(ListArgs),
-    /// Show the current selection and the paths and RPC URL it resolves to.
-    Show(ListArgs),
+    /// Print the context file as it is on disk, and its path on stderr.
+    View(ConfigArgs),
     /// Print export lines for the selected node: eval "$(seismic-tee ctx env)".
     Env(EnvArgs),
     /// Run a command with the selected node's ETH_RPC_URL set.
@@ -52,7 +54,7 @@ pub enum CtxCommand {
     /// Creates the network when it is not registered yet.
     SetNodes(SetNodesArgs),
     /// Clear the current selection.
-    Unset(ListArgs),
+    Unset(ConfigArgs),
 }
 
 /// Run one `ctx` command.
@@ -60,7 +62,7 @@ pub fn run(command: CtxCommand) -> anyhow::Result<ExitCode> {
     match command {
         CtxCommand::Use(args) => run_use(args),
         CtxCommand::List(args) => run_list(args),
-        CtxCommand::Show(args) => run_show(args),
+        CtxCommand::View(args) => run_view(args),
         CtxCommand::Env(args) => env::run(args),
         CtxCommand::Exec(args) => exec::run(args),
         CtxCommand::SetNetwork(args) => run_set_network(args),
@@ -83,13 +85,36 @@ pub struct UseArgs {
     pub config: Option<PathBuf>,
 }
 
-/// `--config` alone: what `list`, `show` and `unset` need.
+/// `--config` alone: what `view` and `unset` need.
 #[derive(Debug, Clone, Default, Args)]
-pub struct ListArgs {
+pub struct ConfigArgs {
     /// Context file to read. Default: $XDG_CONFIG_HOME/seismic/config.toml,
     /// else ~/.config/seismic/config.toml.
     #[arg(long, value_name = "FILE")]
     pub config: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Default, Args)]
+#[command(after_help = "Examples:\n  \
+    seismic-tee ctx list                 every network and its nodes, the selection starred\n  \
+    seismic-tee ctx list devnet-1        one network's group\n  \
+    seismic-tee ctx list --names         the selected network's node names, one per line\n  \
+    for n in $(seismic-tee ctx list --names); do\n      \
+        seismic-tee ctx exec --name \"$n\" -- scast block-number\n  \
+    done")]
+pub struct ListArgs {
+    /// List this network alone. Default: every network — or, with --names,
+    /// the selected one.
+    #[arg(value_name = "NETWORK", add = ArgValueCandidates::new(complete::networks))]
+    pub network: Option<String>,
+
+    /// One bare node name per line and nothing else on stdout, for a shell
+    /// loop (see the example below).
+    #[arg(long)]
+    pub names: bool,
+
+    #[command(flatten)]
+    pub context: ContextArgs,
 }
 
 #[derive(Debug, Args)]
@@ -197,16 +222,9 @@ fn resolve_target(raw: &str, context: &Context) -> anyhow::Result<Selection> {
     raw.parse()
 }
 
-fn run_show(args: ListArgs) -> anyhow::Result<ExitCode> {
-    let context = Context::load(args.config.as_deref())?;
-    let selected = context.select(None)?;
-    println!("{}", selected.selection);
-    print_resolution(&selected);
-    Ok(ExitCode::SUCCESS)
-}
-
-/// What `ctx use` and `ctx show` both print about a resolved selection: one
-/// row per thing that resolved.
+/// What `ctx use` prints about the selection it just stored: one row per
+/// thing that resolved. The state changed, so the command says what to —
+/// reading it back later is `ctx list`'s marker.
 fn print_resolution(selected: &Selected<'_>) {
     if let Ok(dir) = selected.dir() {
         println!("  dir       {}", dir.display());
@@ -221,66 +239,159 @@ fn print_resolution(selected: &Selected<'_>) {
     }
 }
 
+/// The file's bytes, unparsed — a file the loader refuses is the one an
+/// operator most wants to look at — with the path on stderr, so
+/// `seismic-tee ctx view > backup.toml` is the file and nothing else.
+fn run_view(args: ConfigArgs) -> anyhow::Result<ExitCode> {
+    let path = match args.config {
+        Some(path) => path,
+        None => path::default_path()?,
+    };
+    if !path.is_file() {
+        bail!(
+            "no context file at {} — `seismic-tee network init` or `seismic-tee ctx set-nodes` \
+             creates one",
+            path.display()
+        );
+    }
+    let text =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    eprintln!("{}", path.display());
+    print!("{text}");
+    Ok(ExitCode::SUCCESS)
+}
+
 fn run_list(args: ListArgs) -> anyhow::Result<ExitCode> {
-    let context = Context::load(args.config.as_deref())?;
-    for line in list_lines(&context) {
+    let context = Context::load(args.context.config.as_deref())?;
+    let scope = list_scope(&context, &args)?;
+    let lines = match &scope {
+        Some(selected) if args.names => name_lines(selected)?,
+        _ => {
+            if context.config().current.is_none() {
+                eprintln!("no context selected — seismic-tee ctx use <network>[/<node>]");
+            }
+            list_lines(
+                &context,
+                scope.as_ref().map(|s| s.selection.network.as_str()),
+            )
+        }
+    };
+    for line in lines {
         println!("{line}");
     }
     Ok(ExitCode::SUCCESS)
 }
 
-/// One line per selectable context, current one marked with `*`. Opens no
-/// file but the config: every field a line needs is already in it.
-fn list_lines(context: &Context) -> Vec<String> {
-    let current = context.config().current.clone();
-    context
-        .config()
+/// The one network `list` narrows to, resolved against the file: `NETWORK`,
+/// else the `--context`/`SEISMIC_CONTEXT` selection's network. `--names`
+/// must have one — its output feeds `--name`, which picks within a network,
+/// so a bare name from an unspecified network would name nothing — and falls
+/// back to the file's `current`. Without `--names`, no scope is the whole
+/// file.
+fn list_scope<'a>(context: &'a Context, args: &ListArgs) -> anyhow::Result<Option<Selected<'a>>> {
+    let requested = args.network.as_deref().or(args.context.context.as_deref());
+    if requested.is_none() {
+        if !args.names {
+            return Ok(None);
+        }
+        if context.config().current.is_none() {
+            bail!(
+                "ctx list --names needs a network: name one (`seismic-tee ctx list --names \
+                 <network>`), or select one with `seismic-tee ctx use <network>`"
+            );
+        }
+    }
+    Ok(Some(context.select(requested)?))
+}
+
+/// `--names`: the scoped network's node names, bare, in table order. An
+/// empty table is the same error every cohort read gives, naming `ctx
+/// set-nodes` — a loop over nothing would pass silently otherwise.
+fn name_lines(selected: &Selected<'_>) -> anyhow::Result<Vec<String>> {
+    Ok(selected.nodes()?.keys().cloned().collect())
+}
+
+/// The human list: one group per network, `git branch` style. The network
+/// line carries the marker when the selection stops at the network, and the
+/// pointer to its artifact set; each node line carries the marker when the
+/// selection names that node, and its fqdn. `scope` narrows it to one group.
+/// Opens no file but the config: every field a line needs is already in it.
+///
+/// The marker is always the character left of the marked name, at either
+/// depth, so a glance finds it without reading the names.
+fn list_lines(context: &Context, scope: Option<&str>) -> Vec<String> {
+    let config = context.config();
+    let current = config
+        .current
+        .as_deref()
+        .and_then(|raw| raw.parse::<Selection>().ok());
+    let networks: Vec<(&String, &Network)> = config
         .networks
-        .keys()
-        .flat_map(|name| network_entries(context, name))
-        .map(|(selection, display)| {
-            let marker = if Some(&selection) == current.as_ref() {
-                '*'
-            } else {
-                ' '
+        .iter()
+        .filter(|(name, _)| scope.is_none_or(|scope| scope == name.as_str()))
+        .collect();
+    let name_width = networks
+        .iter()
+        .map(|(name, _)| name.chars().count())
+        .max()
+        .unwrap_or(0);
+
+    let mut lines = Vec::new();
+    for (name, network) in networks {
+        let selected_here = current
+            .as_ref()
+            .filter(|selection| &selection.network == name);
+        let network_marker = match selected_here {
+            Some(selection) if selection.node.is_none() => '*',
+            _ => ' ',
+        };
+        lines.push(format!(
+            "{network_marker} {name:<name_width$}  {}",
+            pointer(network)
+        ));
+
+        if network.nodes.is_empty() {
+            lines.push(format!(
+                "    (no nodes: pulumi stack output nodes --json | seismic-tee ctx set-nodes {name})"
+            ));
+            continue;
+        }
+        let node_width = network
+            .nodes
+            .keys()
+            .map(|node| node.chars().count())
+            .max()
+            .unwrap_or(0);
+        for (node, descriptor) in &network.nodes {
+            let node_marker = match selected_here {
+                Some(selection) if selection.node.as_deref() == Some(node.as_str()) => '*',
+                _ => ' ',
             };
-            format!("{marker} {display}")
-        })
-        .collect()
+            lines.push(format!(
+                "  {node_marker} {node:<node_width$}  {}",
+                descriptor.fqdn
+            ));
+        }
+    }
+    lines
 }
 
-/// `name`'s entries: `(<network>/<node>, <network>/<node>)` per node its
-/// table holds, or one `(<network>, "<network> (<reason>)")` pair when it has
-/// none to list — a published network awaiting a fetch, or one with no nodes
-/// imported yet. Listing must not fail because one entry is incomplete.
-fn network_entries(context: &Context, name: &str) -> Vec<(String, String)> {
-    let network = &context.config().networks[name];
-    if let Shape::Published { .. } = network.shape() {
-        return vec![(
-            name.to_string(),
-            format!("{name} (published; fetching is not implemented)"),
-        )];
+/// Where a network's artifact set is, as the file spells it: the field and
+/// its value, so what the line says is what `ctx set-network` would take.
+fn pointer(network: &Network) -> String {
+    match network.shape() {
+        Shape::Dir(dir) => format!("dir {}", dir.display()),
+        Shape::Loose {
+            manifest: Some(manifest),
+        } => format!("manifest {}", manifest.display()),
+        Shape::Loose { manifest: None } => "nodes only".to_string(),
+        Shape::Published { source, .. } => {
+            format!("source {source} (fetching is not implemented)")
+        }
     }
-    if network.nodes.is_empty() {
-        return vec![(
-            name.to_string(),
-            format!(
-                "{name} (no nodes; pulumi stack output nodes --json | seismic-tee ctx \
-                 set-nodes {name})"
-            ),
-        )];
-    }
-    network
-        .nodes
-        .keys()
-        .map(|node| {
-            let selection = format!("{name}/{node}");
-            (selection.clone(), selection)
-        })
-        .collect()
 }
 
-fn run_unset(args: ListArgs) -> anyhow::Result<ExitCode> {
+fn run_unset(args: ConfigArgs) -> anyhow::Result<ExitCode> {
     let context = Context::load(args.config.as_deref())?;
     write::clear_current(context.path())?;
     println!(
@@ -443,7 +554,7 @@ mod tests {
             [
                 "use",
                 "list",
-                "show",
+                "view",
                 "env",
                 "exec",
                 "set-network",
@@ -761,6 +872,25 @@ mod tests {
         assert!(err.contains("ctx use needs a target"), "{err}");
     }
 
+    /// `view` reads nothing but bytes: a file `Context::load` would refuse
+    /// still prints, and a missing one is an error naming the path and what
+    /// creates it.
+    #[test]
+    fn view_reads_the_raw_file_or_names_the_missing_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+
+        let err = run(parse(&["view", "--config", config_path.to_str().unwrap()]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no context file at"), "{err}");
+        assert!(err.contains("network init"), "{err}");
+
+        std::fs::write(&config_path, "current = 3\nthis is not toml\n").unwrap();
+        assert!(Context::load(Some(&config_path)).is_err());
+        run(parse(&["view", "--config", config_path.to_str().unwrap()])).unwrap();
+    }
+
     #[test]
     fn list_marks_the_current_entry() {
         let dir = tempfile::tempdir().unwrap();
@@ -768,9 +898,31 @@ mod tests {
         write_config(&config_path, "current = \"devnet-1/alpha\"\n\n");
         let context = Context::load(Some(&config_path)).unwrap();
 
-        let lines = list_lines(&context);
-        assert!(lines.contains(&"* devnet-1/alpha".to_string()), "{lines:?}");
-        assert!(lines.contains(&"  devnet-1/beta".to_string()), "{lines:?}");
+        let lines = list_lines(&context, None);
+        assert_eq!(
+            lines,
+            [
+                "  devnet-1  dir /x",
+                "  * alpha  alpha.example.com",
+                "    beta   beta.example.com",
+            ]
+        );
+
+        // A selection that stops at the network marks the network line.
+        write_config(&config_path, "current = \"devnet-1\"\n\n");
+        let context = Context::load(Some(&config_path)).unwrap();
+        let lines = list_lines(&context, None);
+        assert_eq!(lines[0], "* devnet-1  dir /x");
+        assert!(
+            lines[1..].iter().all(|line| line.starts_with("    ")),
+            "{lines:?}"
+        );
+
+        // Nothing selected: no marker anywhere.
+        write_config(&config_path, "");
+        let context = Context::load(Some(&config_path)).unwrap();
+        let lines = list_lines(&context, None);
+        assert!(lines.iter().all(|line| !line.contains('*')), "{lines:?}");
     }
 
     /// `list` reaches only the config file: a `dir` that does not exist on
@@ -782,8 +934,8 @@ mod tests {
         write_config(&config_path, "");
 
         let context = Context::load(Some(&config_path)).unwrap();
-        let lines = list_lines(&context);
-        assert_eq!(lines.len(), 2, "{lines:?}");
+        let lines = list_lines(&context, None);
+        assert_eq!(lines.len(), 3, "{lines:?}");
     }
 
     #[test]
@@ -793,10 +945,127 @@ mod tests {
         std::fs::write(&config_path, "[networks.stale-net]\ndir = \"/x\"\n").unwrap();
         let context = Context::load(Some(&config_path)).unwrap();
 
-        let lines = list_lines(&context);
-        assert_eq!(lines.len(), 1, "{lines:?}");
-        assert!(lines[0].contains("stale-net"), "{lines:?}");
-        assert!(lines[0].contains("ctx set-nodes stale-net"), "{lines:?}");
+        let lines = list_lines(&context, None);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert_eq!(lines[0], "  stale-net  dir /x");
+        assert!(lines[1].contains("no nodes"), "{lines:?}");
+        assert!(lines[1].contains("ctx set-nodes stale-net"), "{lines:?}");
+    }
+
+    /// `list`'s arguments as the binary would parse them.
+    fn list_args(argv: &[&str]) -> ListArgs {
+        match parse(&[&["list"], argv].concat()) {
+            CtxCommand::List(args) => args,
+            other => panic!("not a list: {other:?}"),
+        }
+    }
+
+    /// The scoped network's node names, or the error resolving the scope or
+    /// reading its table produced — what `ctx list --names` prints or refuses
+    /// with, minus the printing.
+    fn names_of(config_path: &Path, argv: &[&str]) -> anyhow::Result<Vec<String>> {
+        let args = list_args(
+            &[
+                argv,
+                &["--names", "--config", config_path.to_str().unwrap()],
+            ]
+            .concat(),
+        );
+        let context = Context::load(Some(config_path))?;
+        let selected = list_scope(&context, &args)?.expect("--names always scopes");
+        name_lines(&selected)
+    }
+
+    /// A second network beside `devnet-1`, so scoping has something to
+    /// exclude.
+    fn write_two_network_config(config_path: &Path, current: &str) {
+        write_config(
+            config_path,
+            &format!(
+                "{current}[networks.partner-net]\nmanifest = \"/y/network-manifest.json\"\n\n\
+                 [networks.partner-net.nodes]\nmy-node = {{ public_ip = \"198.51.100.4\", \
+                 fqdn = \"my-node.example.com\" }}\n\n"
+            ),
+        );
+    }
+
+    /// The bare names, in table order; the network is the positional, else
+    /// the `--context` selection's, else `current`'s — a network-only
+    /// `current` scopes as well as a node one.
+    #[test]
+    fn names_are_one_networks_bare_node_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        write_two_network_config(&config_path, "current = \"devnet-1/alpha\"\n\n");
+
+        assert_eq!(names_of(&config_path, &[]).unwrap(), ["alpha", "beta"]);
+        assert_eq!(
+            names_of(&config_path, &["partner-net"]).unwrap(),
+            ["my-node"]
+        );
+        assert_eq!(
+            names_of(&config_path, &["--context", "partner-net/my-node"]).unwrap(),
+            ["my-node"]
+        );
+        // The positional beats --context, as it beats the file's current.
+        assert_eq!(
+            names_of(&config_path, &["devnet-1", "--context", "partner-net"]).unwrap(),
+            ["alpha", "beta"]
+        );
+
+        write_two_network_config(&config_path, "current = \"partner-net\"\n\n");
+        assert_eq!(names_of(&config_path, &[]).unwrap(), ["my-node"]);
+    }
+
+    /// Nothing to scope to is a refusal naming both ways to supply one; a
+    /// network the file does not hold names the ones it does; an empty table
+    /// is the cohort read's own error, pointing at `ctx set-nodes`.
+    #[test]
+    fn names_refuses_rather_than_guessing_a_network() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        write_two_network_config(&config_path, "");
+
+        let err = names_of(&config_path, &[]).unwrap_err().to_string();
+        assert!(err.contains("ctx list --names <network>"), "{err}");
+        assert!(err.contains("ctx use <network>"), "{err}");
+
+        let err = names_of(&config_path, &["gone"]).unwrap_err().to_string();
+        assert!(err.contains("no network `gone`"), "{err}");
+        assert!(err.contains("devnet-1, partner-net"), "{err}");
+
+        std::fs::write(&config_path, "[networks.stale-net]\ndir = \"/x\"\n").unwrap();
+        let err = names_of(&config_path, &["stale-net"])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("has no nodes"), "{err}");
+        assert!(err.contains("ctx set-nodes stale-net"), "{err}");
+    }
+
+    /// Without `--names`, a positional narrows the marked list to one network
+    /// and nothing else changes; with neither, the whole file lists.
+    #[test]
+    fn list_narrows_to_the_named_network() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        write_two_network_config(&config_path, "current = \"devnet-1/alpha\"\n\n");
+        let context = Context::load(Some(&config_path)).unwrap();
+
+        let all = list_args(&["--config", config_path.to_str().unwrap()]);
+        assert!(list_scope(&context, &all).unwrap().is_none());
+        // Two groups: devnet-1 and its two nodes, partner-net and its one.
+        assert_eq!(list_lines(&context, None).len(), 5);
+
+        let one = list_args(&["partner-net", "--config", config_path.to_str().unwrap()]);
+        let scope = list_scope(&context, &one).unwrap().unwrap();
+        assert_eq!(scope.selection.network, "partner-net");
+        assert_eq!(
+            list_lines(&context, Some(&scope.selection.network)),
+            [
+                "  partner-net  manifest /y/network-manifest.json",
+                "    my-node  my-node.example.com",
+            ]
+        );
     }
 
     #[test]
