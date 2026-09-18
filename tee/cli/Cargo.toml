@@ -102,11 +102,23 @@ hex = "0.4"
 # client: the binary serves nothing and opens no websockets.
 jsonrpsee = { version = "0.26", default-features = false, features = ["http-client"] }
 # default-features off drops native-tls: an operator downloads one binary, so
-# it must not link the host's OpenSSL.
+# it must not link the host's OpenSSL. (The one OpenSSL that does reach the
+# graph, through attested-tls, is vendored — see `openssl` below.)
 reqwest = { version = "0.12", default-features = false, features = [
     "json",
     "rustls-tls",
 ] }
+# Not called by any crate here: this entry exists for its feature. attested-tls's
+# `azure-verifier` (reached through the enclave's seismic-attestation) verifies
+# the Azure vTPM quote with the `openssl` crate, which otherwise links the
+# host's OpenSSL — libssl.so.3 on Linux, Homebrew's dylib by absolute path on
+# macOS — and a downloaded binary can assume neither. `vendored` compiles
+# OpenSSL from source (openssl-src; perl and make at build time) and links it
+# statically, and Cargo unifies the feature onto the one copy in the graph.
+# Delete this once https://linear.app/seismic-systems/issue/SEI-572 lands and
+# the enclave pin moves: azure-verifier then takes its algorithms from the
+# rustls provider this binary already installs, and `openssl` leaves the graph.
+openssl = { version = "0.10", features = ["vendored"] }
 # The process-level crypto provider `node verify` installs; see there.
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"] }
 # The harvest's per-box nonce. At the enclave's version, like jsonrpsee.

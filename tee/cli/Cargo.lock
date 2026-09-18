@@ -4363,6 +4363,7 @@ dependencies = [
  "anyhow",
  "clap",
  "clap_complete",
+ "openssl",
  "seismic-tee-admission",
  "seismic-tee-common",
  "seismic-tee-context",

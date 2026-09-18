@@ -19,6 +19,10 @@ seismic-tee-node.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 clap_complete.workspace = true
+# For its `vendored` feature alone — a downloaded binary must not link the
+# host's OpenSSL. Why the graph has OpenSSL at all, and when this goes:
+# ../Cargo.toml, and https://linear.app/seismic-systems/issue/SEI-572.
+openssl.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
