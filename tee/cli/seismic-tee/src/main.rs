@@ -28,15 +28,16 @@
 //! The client and security council have no CLI work today, so no group
 //! stands empty for them.
 //!
-//! Tab completion belongs to no party, so it is not a command: the root's
-//! `--completions <SHELL>` option prints the shell code that turns it on,
-//! and sits with `--help` and `--version`, leaving the command listing a
-//! who-runs-what. `--version` (`-v`, or clap's usual `-V`) names the crate
-//! version and the commit the binary was built from ([`VERSION`]): the
-//! releases are cut per merge as well as per version, so the version alone
-//! does not identify a build. (The `help` subcommand is disabled for the
-//! same reason; `--help` is the one spelling.) Completion is dynamic — each
-//! tab press re-enters this binary through
+//! Two things belong to no party, so neither is a command: the root's
+//! `--completions <SHELL>` option prints the shell code that turns tab
+//! completion on, and `--upgrade [VERSION]` replaces this binary with a fresh
+//! download ([`run_upgrade`]). Both sit with `--help` and `--version`, leaving
+//! the command listing a who-runs-what. `--version` (`-v`, or clap's usual
+//! `-V`) names the crate version and the commit the binary was built from
+//! ([`VERSION`]): the releases are cut per merge as well as per version, so
+//! the version alone does not identify a build. (The `help` subcommand is
+//! disabled for the same reason; `--help` is the one spelling.) Completion is
+//! dynamic — each tab press re-enters this binary through
 //! [`CompleteEnv`], which walks the clap tree for flags and subcommand names
 //! and calls the candidate functions in [`seismic_tee_context::complete`] for
 //! the values an operator actually struggles to type: contexts, networks and
@@ -49,7 +50,7 @@
 //! nothing about it.
 
 use std::io::Write as _;
-use std::process::ExitCode;
+use std::process::{Command as Process, ExitCode, Stdio};
 
 use anyhow::{Context as _, bail};
 use clap::{CommandFactory as _, Parser, Subcommand};
@@ -69,6 +70,13 @@ const BIN_NAME: &str = "seismic-tee";
 /// sets it on every callback. `--completions` prints the same script under a
 /// spelling an operator can find in `--help`.
 const COMPLETE_VAR: &str = "COMPLETE";
+
+/// The repository the releases are cut from, `<owner>/<repo>`. The same
+/// default the installer carries; `--upgrade` fetches the installer from here.
+const REPO: &str = "SeismicSystems/deploy";
+
+/// The installer's path in [`REPO`], on the default branch.
+const INSTALLER_PATH: &str = "tee/install.sh";
 
 /// What `--version` prints after the name: the crate version, then the
 /// commit the binary was built from, stamped by `build.rs` — `-dirty` when
@@ -127,6 +135,28 @@ struct Cli {
                      names."
     )]
     completions: Option<Option<Shell>>,
+
+    /// Replace this binary with a fresh download from the repository's
+    /// releases: seismic-tee --upgrade [VERSION]
+    #[arg(
+        long,
+        value_name = "VERSION",
+        num_args = 0..=1,
+        conflicts_with = "completions",
+        long_help = "Replace this binary with a fresh download from the repository's releases.\n\n\
+                     VERSION takes the release spellings: X.Y.Z or vX.Y.Z for a release, \
+                     main-<sha> for one prerelease build, main for the tip of main. With no \
+                     VERSION, the newest release. Downgrading is naming an older one.\n\n\
+                     The new binary lands beside this one, not at the installer's default, so \
+                     a copy installed outside ~/.local/bin is the copy replaced. Re-source \
+                     your completion line afterwards if it names a path rather than the \
+                     command.\n\n\
+                     Fetches and runs this repository's installer, which checks the download \
+                     against the release's SHA256SUMS and, through `gh`, the binary's build \
+                     provenance attestation. While the repository is private that fetch needs \
+                     `gh`, logged in."
+    )]
+    upgrade: Option<Option<String>>,
 
     /// Print the version and the commit this binary was built from
     #[arg(short = 'v', short_alias = 'V', long, action = clap::ArgAction::Version)]
@@ -236,6 +266,95 @@ fn run_completions(shell: Option<Shell>) -> anyhow::Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// Replace this binary with a fresh download, by running the installer a
+/// first install runs.
+///
+/// The installer is fetched and run rather than reimplemented here. It
+/// already picks the release for `version`, checks the tarball against the
+/// release's SHA256SUMS, verifies the binary's build provenance through `gh`,
+/// and installs by renaming over the target — which is the one way to replace
+/// an executable while it is running, since the file cannot be written to but
+/// can be renamed over. A second copy of that in Rust would be a second thing
+/// to keep correct, and the way it would drift is towards checking less than
+/// the installer does.
+///
+/// `--to` is this binary's own directory rather than the installer's default,
+/// so upgrading a copy that lives outside `~/.local/bin` replaces that copy
+/// instead of leaving a second one for `PATH` to choose between.
+fn run_upgrade(version: Option<String>) -> anyhow::Result<ExitCode> {
+    let exe = std::env::current_exe().context("locating this binary")?;
+    let dir = exe
+        .parent()
+        .with_context(|| format!("{} has no parent directory", exe.display()))?;
+    let script = fetch_installer()?;
+
+    // argv, not a shell string: VERSION reaches the installer as one word and
+    // is never parsed as shell syntax.
+    let mut installer = Process::new("sh");
+    installer.arg("-s").arg("--").arg("--to").arg(dir);
+    if let Some(version) = &version {
+        installer.arg("--version").arg(version);
+    }
+    let mut child = installer
+        .stdin(Stdio::piped())
+        .spawn()
+        .context("running the installer with sh")?;
+    // The handle drops at the end of the statement, which is the EOF `sh -s`
+    // waits for before it runs anything.
+    child
+        .stdin
+        .take()
+        .expect("stdin was piped")
+        .write_all(&script)
+        .context("writing the installer to sh")?;
+    let status = child.wait().context("waiting for the installer")?;
+    if !status.success() {
+        bail!("the installer did not finish; this binary is as it was");
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// The installer's source, over `gh` when it is there and logged in — which
+/// is what reads a private repository — and over plain curl otherwise, for
+/// the day the repository is public. The installer makes the same choice for
+/// the release assets themselves.
+fn fetch_installer() -> anyhow::Result<Vec<u8>> {
+    let logged_in = Process::new("gh")
+        .args(["auth", "status"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success());
+
+    if logged_in {
+        let out = Process::new("gh")
+            .args(["api", "-H", "Accept: application/vnd.github.raw"])
+            .arg(format!("repos/{REPO}/contents/{INSTALLER_PATH}"))
+            .output()
+            .context("running gh to fetch the installer")?;
+        if !out.status.success() {
+            bail!(
+                "gh could not fetch {INSTALLER_PATH} from {REPO}: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        return Ok(out.stdout);
+    }
+
+    let url = format!("https://raw.githubusercontent.com/{REPO}/main/{INSTALLER_PATH}");
+    let out = Process::new("curl")
+        .args(["-fsSL", &url])
+        .output()
+        .context("running curl to fetch the installer (it needs curl, or gh logged in)")?;
+    if !out.status.success() {
+        bail!(
+            "could not fetch the installer from {url} — while the repository is private this \
+             needs gh: log in with `gh auth login` and re-run"
+        );
+    }
+    Ok(out.stdout)
+}
+
 fn main() -> ExitCode {
     // A completion callback never reaches the parser: it answers and exits
     // here, before anything below can open a file or a socket.
@@ -251,9 +370,10 @@ fn main() -> ExitCode {
         }
     };
     let result = runtime.block_on(async {
-        match (cli.completions, cli.command) {
-            (Some(shell), _) => run_completions(shell),
-            (None, Some(command)) => match command {
+        match (cli.completions, cli.upgrade, cli.command) {
+            (Some(shell), _, _) => run_completions(shell),
+            (_, Some(version), _) => run_upgrade(version),
+            (None, None, Some(command)) => match command {
                 Command::Ctx { command } => seismic_tee_context::cmd::run(command),
                 Command::Network { command } => seismic_tee_network::run(command).await,
                 Command::Node { command } => seismic_tee_node::run(command).await,
@@ -263,7 +383,7 @@ fn main() -> ExitCode {
                 }
             },
             // `arg_required_else_help`: clap has already printed the help.
-            (None, None) => unreachable!("clap requires an argument or a subcommand"),
+            (None, None, None) => unreachable!("clap requires an argument or a subcommand"),
         }
     });
     match result {
@@ -433,6 +553,10 @@ mod tests {
             vec!["completions", "bash"],
             vec!["--completions", "bash", "ctx", "list"],
             vec!["ctx", "list", "--completions", "bash"],
+            // upgrading is an option too, and stands as alone as completion
+            vec!["upgrade"],
+            vec!["--upgrade", "ctx", "list"],
+            vec!["--upgrade", "--completions", "bash"],
             vec!["help"],
             vec!["help", "ctx"],
         ] {
@@ -447,6 +571,22 @@ mod tests {
             } else {
                 assert!(parsed.is_err(), "{argv:?}");
             }
+        }
+    }
+
+    /// `--upgrade` takes the installer's version grammar, or nothing at all
+    /// for the newest release. The value is passed through rather than parsed
+    /// here — the installer owns the grammar — so what this pins is that a
+    /// bare flag and a flag with a value both reach [`run_upgrade`].
+    #[test]
+    fn upgrade_takes_an_optional_version() {
+        let bare = Cli::try_parse_from([BIN_NAME, "--upgrade"]).unwrap();
+        assert_eq!(bare.upgrade, Some(None));
+        assert!(bare.command.is_none());
+
+        for version in ["1.2.3", "v1.2.3", "main", "main-1a2b3c4d5"] {
+            let parsed = Cli::try_parse_from([BIN_NAME, "--upgrade", version]).unwrap();
+            assert_eq!(parsed.upgrade, Some(Some(version.to_string())), "{version}");
         }
     }
 
