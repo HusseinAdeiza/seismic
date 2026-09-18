@@ -31,8 +31,12 @@
 //! Tab completion belongs to no party, so it is not a command: the root's
 //! `--completions <SHELL>` option prints the shell code that turns it on,
 //! and sits with `--help` and `--version`, leaving the command listing a
-//! who-runs-what. (The `help` subcommand is disabled for the same reason;
-//! `--help` is the one spelling.) Completion is dynamic — each tab press re-enters this binary through
+//! who-runs-what. `--version` (`-v`, or clap's usual `-V`) names the crate
+//! version and the commit the binary was built from ([`VERSION`]): the
+//! releases are cut per merge as well as per version, so the version alone
+//! does not identify a build. (The `help` subcommand is disabled for the
+//! same reason; `--help` is the one spelling.) Completion is dynamic — each
+//! tab press re-enters this binary through
 //! [`CompleteEnv`], which walks the clap tree for flags and subcommand names
 //! and calls the candidate functions in [`seismic_tee_context::complete`] for
 //! the values an operator actually struggles to type: contexts, networks and
@@ -66,10 +70,24 @@ const BIN_NAME: &str = "seismic-tee";
 /// spelling an operator can find in `--help`.
 const COMPLETE_VAR: &str = "COMPLETE";
 
+/// What `--version` prints after the name: the crate version, then the
+/// commit the binary was built from, stamped by `build.rs` — `-dirty` when
+/// the checkout had uncommitted changes, `unknown` when there was no git to
+/// ask. `seismic-tee 0.1.0 (1a2b3c4d5)` is what an operator quotes when
+/// reporting a problem and what a founder records beside a founding.
+const VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (",
+    env!("SEISMIC_TEE_BUILD_COMMIT"),
+    ")"
+);
+
 #[derive(Debug, Parser)]
 #[command(
     name = BIN_NAME,
-    version,
+    version = VERSION,
+    // The flag is declared below, so it answers to `-v` as well as `-V`.
+    disable_version_flag = true,
     about = "Found, join, govern and audit a Seismic TEE network",
     long_about = "The Seismic TEE deploy CLI.\n\n\
                   One command group per party of the trust model — network (the genesis \
@@ -109,6 +127,10 @@ struct Cli {
                      names."
     )]
     completions: Option<Option<Shell>>,
+
+    /// Print the version and the commit this binary was built from
+    #[arg(short = 'v', short_alias = 'V', long, action = clap::ArgAction::Version)]
+    version: (),
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -266,14 +288,24 @@ mod tests {
         Cli::command().debug_assert();
     }
 
-    /// The released binary reports the crate's version, which is what a
-    /// founder records alongside a founding and an operator quotes when
-    /// reporting a problem.
+    /// The released binary reports the crate's version and its build
+    /// commit, which is what a founder records alongside a founding and an
+    /// operator quotes when reporting a problem — under `-v`, `-V` and
+    /// `--version` alike.
     #[test]
     fn the_binary_is_named_and_versioned() {
         let command = Cli::command();
         assert_eq!(command.get_name(), BIN_NAME);
-        assert_eq!(command.get_version(), Some(env!("CARGO_PKG_VERSION")));
+        assert_eq!(command.get_version(), Some(VERSION));
+        let commit = VERSION
+            .strip_prefix(concat!(env!("CARGO_PKG_VERSION"), " ("))
+            .and_then(|rest| rest.strip_suffix(')'))
+            .unwrap_or_else(|| panic!("{VERSION}"));
+        assert!(!commit.is_empty());
+        for flag in ["-v", "-V", "--version"] {
+            let err = Cli::try_parse_from([BIN_NAME, flag]).unwrap_err();
+            assert_eq!(err.kind(), clap::error::ErrorKind::DisplayVersion, "{flag}");
+        }
     }
 
     fn subcommand_names(command: &clap::Command) -> Vec<String> {

@@ -127,6 +127,34 @@ impl Sandbox {
     }
 }
 
+/// `-v`, `-V` and `--version` are one flag: the name, the crate version and
+/// the commit the binary was built from, on one line of stdout and nothing
+/// on stderr. The commit is nine hex digits (with `-dirty` from an edited
+/// checkout) or `unknown` from a tree with no git to ask.
+#[test]
+fn version_names_the_crate_version_and_the_build_commit() {
+    let sandbox = Sandbox::new(TWO_NODE_CONFIG);
+    let mut lines = Vec::new();
+    for flag in ["-v", "-V", "--version"] {
+        let output = sandbox.command().arg(flag).output().unwrap();
+        assert!(output.status.success(), "{flag}: {output:?}");
+        assert!(output.stderr.is_empty(), "{flag}: {output:?}");
+        lines.push(String::from_utf8(output.stdout).unwrap());
+    }
+    assert!(lines.iter().all(|line| *line == lines[0]), "{lines:?}");
+
+    let line = lines[0].trim_end();
+    let commit = line
+        .strip_prefix(concat!("seismic-tee ", env!("CARGO_PKG_VERSION"), " ("))
+        .and_then(|rest| rest.strip_suffix(')'))
+        .unwrap_or_else(|| panic!("{line}"));
+    let hash = commit.strip_suffix("-dirty").unwrap_or(commit);
+    assert!(
+        hash == "unknown" || (hash.len() == 9 && hash.bytes().all(|b| b.is_ascii_hexdigit())),
+        "{line}"
+    );
+}
+
 #[test]
 fn env_prints_only_export_lines_on_stdout() {
     let sandbox = Sandbox::new(TWO_NODE_CONFIG);
