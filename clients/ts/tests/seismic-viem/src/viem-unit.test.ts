@@ -33,6 +33,13 @@ import {
   testParseFaucetResponseHashValid,
 } from '@sviem-tests/tests/faucet.ts'
 import {
+  testSplitResponseIvAcceptsTagOnlyBody,
+  testSplitResponseIvRejectsEmptyResponse,
+  testSplitResponseIvRejectsShortResponse,
+  testSplitResponseIvRejectsUnknownVersion,
+  testSplitResponseIvSeparatesVersionIvAndBody,
+} from '@sviem-tests/tests/responseIv.ts'
+import {
   testSerializeMissingChainId,
   testSerializeMissingData,
   testSerializeMissingEncryptionNonce,
@@ -46,6 +53,7 @@ import {
   testSerializeValidTxDoesNotThrow,
 } from '@sviem-tests/tests/seismicTxValidation.ts'
 import { testSignedCallBlockSelection } from '@sviem-tests/tests/signedCallBlockSelection.ts'
+import { testSignedCallRejectsBareZeroX } from '@sviem-tests/tests/signedCallEnvelope.ts'
 import {
   testComputeKeyHashDifferentKeysProduceDifferentHashes,
   testComputeKeyHashIsDeterministic,
@@ -224,4 +232,28 @@ describe('Seismic EIP-712 typed data', () => {
     'includes authorizationListHash',
     testTypedDataIncludesAuthorizationListHash
   )
+})
+
+describe('signed-read response IV', () => {
+  test('separates the version, IV, and ciphertext body', () => {
+    testSplitResponseIvSeparatesVersionIvAndBody()
+  })
+  test('accepts a tag-only body', () => {
+    testSplitResponseIvAcceptsTagOnlyBody()
+  })
+  test('rejects a response shorter than the envelope', () => {
+    testSplitResponseIvRejectsShortResponse()
+  })
+  test('rejects an empty response', () => {
+    testSplitResponseIvRejectsEmptyResponse()
+  })
+  test('rejects an unknown format version', () => {
+    testSplitResponseIvRejectsUnknownVersion()
+  })
+})
+
+describe('signedCall envelope handling', () => {
+  test('rejects a bare 0x result', async () => {
+    await testSignedCallRejectsBareZeroX()
+  })
 })
